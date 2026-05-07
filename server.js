@@ -1858,10 +1858,12 @@ async function uploadFileToStore(storeName, fileName, mimeType, fileBuffer, apiK
   return uploadRes.json();
 }
 
-/** UI list page size for policy collection file grids (Gemini `pageSize` / `pageToken`). */
-const FILE_SEARCH_DOCUMENT_PAGE_SIZE_UI = 20;
-/** Larger pages when aggregating all documents (extract, sync, overview). */
-const LIST_STORE_DOCUMENTS_PAGE_SIZE_BULK = 100;
+/** Gemini ListDocuments caps page_size at 20 (INVALID_ARGUMENT otherwise). */
+const GEMINI_FILE_SEARCH_DOCUMENT_PAGE_MAX = 20;
+/** UI list page size for policy collection file grids (`pageSize` / `pageToken`). */
+const FILE_SEARCH_DOCUMENT_PAGE_SIZE_UI = GEMINI_FILE_SEARCH_DOCUMENT_PAGE_MAX;
+/** Full-store scans use the same max page size; loop with nextPageToken. */
+const LIST_STORE_DOCUMENTS_PAGE_SIZE_BULK = GEMINI_FILE_SEARCH_DOCUMENT_PAGE_MAX;
 
 const policyStoreDocCountCache = new Map(); // bare store id -> { count, ts }
 
@@ -1871,7 +1873,7 @@ function invalidatePolicyStoreDocCountCache(storeIdBare) {
 }
 
 async function listStoreDocumentsPage(storeName, apiKey, pageSize, pageToken) {
-  const safeSize = Math.min(100, Math.max(1, pageSize | 0 || FILE_SEARCH_DOCUMENT_PAGE_SIZE_UI));
+  const safeSize = Math.min(GEMINI_FILE_SEARCH_DOCUMENT_PAGE_MAX, Math.max(1, pageSize | 0 || FILE_SEARCH_DOCUMENT_PAGE_SIZE_UI));
   const qs = new URLSearchParams({ key: apiKey, pageSize: String(safeSize) });
   if (pageToken) qs.set('pageToken', pageToken);
   const res = await fetch(`${GEMINI_BASE_URL}/${storeName}/documents?${qs}`);
