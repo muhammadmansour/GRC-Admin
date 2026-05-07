@@ -3694,11 +3694,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- Policy Collections API ----
-  const policyCollMatch = url.pathname.match(/^\/api\/policy-collections(?:\/([^\/]+))?(?:\/(files|extract|approve|preview-library|history|sync|chat)(?:\/([^\/]+))?)?$/);
+  const policyCollMatch = url.pathname.match(/^\/api\/policy-collections(?:\/([^\/]+))?(?:\/(files|extract|approve|preview-library|history|sync|chat)(?:\/([^\/]+))?(?:\/([^\/]+))?)?$/);
   if (policyCollMatch) {
     let collId = policyCollMatch[1];
     let subResource = policyCollMatch[2]; // 'files' | 'extract' | 'approve' | 'preview-library' | 'history' | 'sync' | 'chat'
     const fileId = policyCollMatch[3];
+    const histSub = policyCollMatch[4]; // e.g. 'preview-library' for .../history/:id/preview-library
     const apiKey = GEMINI_API_KEY || req.headers['x-api-key'];
 
     try {
@@ -4471,8 +4472,41 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // POST /api/policy-collections/:id/history/:historyId/preview-library — YAML from this history row’s extraction_data (+ body edits)
+      if (collId && subResource === 'history' && fileId && histSub === 'preview-library' && req.method === 'POST') {
+        const r = dbGetGenHistoryById.get(fileId);
+        if (!r) { sendJSON(res, 404, { error: 'History entry not found' }); return; }
+        if (r.collection_id !== collId) { sendJSON(res, 404, { error: 'History entry not found' }); return; }
+        if (!r.extraction_data || !String(r.extraction_data).trim()) {
+          sendJSON(res, 400, { error: 'No extraction data for this history entry.' });
+          return;
+        }
+        const body = await parseBody(req);
+        const collRow = dbGetPolicyCollection.get(collId);
+        let cfg = {};
+        try { cfg = JSON.parse(r.config || '{}'); } catch (e) { cfg = {}; }
+        const pseudoRow = {
+          extraction_result: r.extraction_data,
+          config: r.config,
+          name: collRow?.name || cfg.libraryName || 'Policy library',
+          description: collRow?.description || '',
+        };
+        try {
+          const { libraryPayload, filename, generationType } = buildPolicyIngestionLibraryUploadPayload(pseudoRow, body, true);
+          const yamlStr = yaml.dump(libraryPayload, { lineWidth: 100, skipInvalid: false });
+          sendJSON(res, 200, {
+            success: true,
+            data: { yaml: yamlStr, filename, generationType },
+          });
+        } catch (preErr) {
+          console.error('[Policy History Preview] ', preErr.message);
+          sendJSON(res, 500, { error: preErr.message });
+        }
+        return;
+      }
+
       // GET /api/policy-collections/:id/history/:historyId — Single history entry with full data
-      if (collId && subResource === 'history' && fileId && req.method === 'GET') {
+      if (collId && subResource === 'history' && fileId && !histSub && req.method === 'GET') {
         const r = dbGetGenHistoryById.get(fileId);
         if (!r) { sendJSON(res, 404, { error: 'History entry not found' }); return; }
         if (r.collection_id !== collId) { sendJSON(res, 404, { error: 'History entry not found' }); return; }
@@ -4500,7 +4534,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       // PATCH /api/policy-collections/:id/history/:historyId — Update stored extraction_data (e.g. edits in History detail)
-      if (collId && subResource === 'history' && fileId && req.method === 'PATCH') {
+      if (collId && subResource === 'history' && fileId && !histSub && req.method === 'PATCH') {
         const row = dbGetGenHistoryById.get(fileId);
         if (!row) { sendJSON(res, 404, { error: 'History entry not found' }); return; }
         if (row.collection_id !== collId) { sendJSON(res, 404, { error: 'History entry not found' }); return; }

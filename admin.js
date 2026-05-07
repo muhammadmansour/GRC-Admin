@@ -7352,6 +7352,9 @@ function piRenderHistoryDetail(entry) {
   if (cfg.provider) cfgItems.push(['Provider', cfg.provider]);
   const cfgHtml = cfgItems.map(([k,v]) => `<div class="pi-hist-cfg-item"><span class="pi-hist-cfg-key">${esc(k)}</span><span class="pi-hist-cfg-val">${esc(v)}</span></div>`).join('');
 
+  const yamlPreviewSvg = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2.5 12.5v-9h8l2.5 2.5v6.5h-8" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M4.5 4.5v-2h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M4.5 8.5h7M4.5 11h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+  const canHistPreviewYaml = !!(exData && (exData.extractedLibrary || policies.length || reqNodes.length));
+
   // No data message
   let noDataMsg = '';
   if (policies.length === 0 && reqNodes.length === 0) {
@@ -7374,11 +7377,14 @@ function piRenderHistoryDetail(entry) {
       <div style="padding:16px 20px;display:flex;flex-wrap:wrap;gap:16px;align-items:center;border-bottom:1px solid #f3f4f6">
         <span class="pi-hist-type-badge ${genTypeClass}" style="font-size:12px;padding:4px 12px">${genTypeLabel}</span>
         <span class="pi-hist-status-badge ${st.cls}" style="font-size:12px;padding:4px 12px">${st.label}</span>
-        <div style="display:flex;gap:20px;margin-left:auto;font-size:12px;color:#6b7280">
+        <div style="margin-left:auto;display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+          ${canHistPreviewYaml ? `<button type="button" class="pi-btn pi-btn-preview-yaml pi-hist-preview-yaml" onclick="piHistPreviewYaml()">${yamlPreviewSvg} Preview YAML</button>` : ''}
+          <div style="display:flex;gap:20px;font-size:12px;color:#6b7280">
           <span>⏱ ${esc(entry.generationTime || '-')}</span>
           <span>📄 ${entry.sourceFileCount} file${entry.sourceFileCount !== 1 ? 's' : ''}</span>
           ${entry.nodesCount > 0 ? `<span>🔷 ${entry.nodesCount} nodes</span>` : ''}
           ${entry.controlsCount > 0 ? `<span>✅ ${entry.controlsCount} controls</span>` : ''}
+          </div>
         </div>
       </div>
       ${cfgHtml ? `<div style="padding:12px 20px;border-bottom:1px solid #f3f4f6;display:flex;flex-wrap:wrap;gap:8px">${cfgHtml}</div>` : ''}
@@ -8478,6 +8484,36 @@ async function piPreviewYaml() {
   }
 }
 window.piPreviewYaml = piPreviewYaml;
+
+async function piHistPreviewYaml() {
+  const entry = piHistCurrentEntry();
+  if (!entry) return;
+  const collId = entry.collectionId || piSelectedCollectionId;
+  if (!collId) return;
+  const genType = entry.generationType || 'both';
+  const ex = entry.extractionData || {};
+  const payload = { folder: (entry.config && entry.config.folder) || '' };
+  if (genType === 'controls' || genType === 'both') payload.policies = ex.policies || [];
+  if (genType === 'framework' || genType === 'both') payload.requirementNodes = ex.requirementNodes || [];
+
+  const btns = document.querySelectorAll('.pi-hist-preview-yaml');
+  btns.forEach(b => { b.disabled = true; b.dataset._o = b.innerHTML; b.innerHTML = '…'; });
+  try {
+    const res = await fetch(`${PI_API}/${collId}/history/${entry.id}/preview-library`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    piShowYamlPreviewModal(data.data.yaml, data.data.filename);
+  } catch (err) {
+    toast('error', 'Preview failed', err.message);
+  } finally {
+    btns.forEach(b => { b.disabled = false; if (b.dataset._o) b.innerHTML = b.dataset._o; });
+  }
+}
+window.piHistPreviewYaml = piHistPreviewYaml;
 
 async function piApprove() {
   if (!piSelectedCollectionId) return;
