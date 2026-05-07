@@ -5211,6 +5211,85 @@
 .pi-btn-approve { color: #fff; background: #059669; border-color: #059669; }
 .pi-btn-approve:hover { background: #047857; }
 .pi-btn-approve:disabled { opacity: 0.7; cursor: not-allowed; }
+.pi-btn-preview-yaml {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+}
+.pi-btn-preview-yaml:hover:not(:disabled) { background: #dbeafe; }
+.pi-btn-preview-yaml:disabled { opacity: 0.65; cursor: wait; }
+
+.pi-yaml-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99990;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+.pi-yaml-preview-dialog {
+  width: min(920px, 100%);
+  max-height: min(86vh, 900px);
+  background: #fff;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pi-yaml-preview-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #f3f4f6;
+  flex-shrink: 0;
+}
+.pi-yaml-preview-title { font-size: 14px; font-weight: 600; color: #111827; }
+.pi-yaml-preview-subtitle { font-size: 11px; color: #6b7280; margin-top: 4px; max-width: 560px; line-height: 1.45; }
+.pi-yaml-preview-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.pi-btn-preview-yaml-copy {
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  cursor: pointer;
+  color: #374151;
+}
+.pi-btn-preview-yaml-copy:hover { background: #f9fafb; }
+.pi-yaml-preview-close {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  font-size: 22px;
+  line-height: 1;
+  color: #9ca3af;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.pi-yaml-preview-close:hover { background: #f3f4f6; color: #374151; }
+.pi-yaml-preview-pre {
+  margin: 0;
+  padding: 16px 18px;
+  overflow: auto;
+  flex: 1;
+  font-size: 11px;
+  line-height: 1.45;
+  font-family: 'SF Mono', 'Fira Code', ui-monospace, monospace;
+  color: #1f2937;
+  background: #fafafa;
+  border-top: none;
+}
 
 /* Success screen */
 .pi-success-card { background: #fff; border-radius: 12px; border: 1px solid #e5e7eb; overflow: hidden; }

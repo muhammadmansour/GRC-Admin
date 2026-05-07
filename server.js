@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { GoogleGenAI } = require('@google/genai');
 const Database = require('better-sqlite3');
+const yaml = require('js-yaml');
 
 const PORT = 5555; // Wathbah server port
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent';
@@ -958,6 +959,97 @@ async function policyCollectionToJSON(row, apiKey) {
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+function piCloneJson(obj) {
+  return obj == null ? obj : JSON.parse(JSON.stringify(obj));
+}
+
+/** Apply Policy Ingestion review edits from the approve/preview POST body onto a cloned extracted library (`libObjects` is extraction objects root). */
+function mergePolicyIngestionFrontendEdits(libObjects, body, generationType) {
+  if (!body || !libObjects) return;
+
+  const editedPolicies = body.policies && body.policies.length ? body.policies : null;
+  if ((generationType === 'controls' || generationType === 'both') && libObjects.reference_controls) {
+    const refControls = libObjects.reference_controls;
+    if (editedPolicies && refControls.length) {
+      libObjects.reference_controls = refControls.map(rc => {
+        const edited = editedPolicies.find(p =>
+          (p.code || p.ref_id) === rc.ref_id || p.name === rc.name
+        );
+        if (edited) {
+          return {
+            ...rc,
+            name: edited.name || rc.name,
+            description: edited.description != null ? edited.description : rc.description,
+            category: edited.category || rc.category,
+            csf_function: edited.csfFunction || edited.csf_function || rc.csf_function,
+          };
+        }
+        return rc;
+      });
+    }
+  }
+
+  const editedNodes = body.requirementNodes && body.requirementNodes.length ? body.requirementNodes : null;
+  if (editedNodes && libObjects.framework && (generationType === 'framework' || generationType === 'both')) {
+    const origNodes = libObjects.framework.requirement_nodes || [];
+    libObjects.framework.requirement_nodes = editedNodes.map(ed => {
+      const o = origNodes.find(x =>
+        (ed.ref_id && x.ref_id === ed.ref_id) || (ed.urn && x.urn === ed.urn)
+      ) || {};
+      return {
+        ...o,
+        urn: ed.urn || o.urn,
+        ref_id: ed.ref_id != null ? ed.ref_id : o.ref_id,
+        name: ed.name != null ? ed.name : o.name,
+        description: ed.description != null ? ed.description : (o.description ?? ''),
+        assessable: ed.assessable != null ? !!ed.assessable : !!o.assessable,
+        depth: ed.depth != null ? ed.depth : (o.depth || 1),
+        parent_urn: ed.parent_urn !== undefined ? ed.parent_urn : o.parent_urn,
+      };
+    });
+  }
+}
+
+/** Build the library upload object; mutates `result` (parsed extraction_result) when cloneResult is false so approve persists merged edits. */
+function buildPolicyIngestionLibraryUploadPayload(row, body, cloneResult = false) {
+  const result = cloneResult ? piCloneJson(JSON.parse(row.extraction_result || '{}')) : JSON.parse(row.extraction_result || '{}');
+  const config = JSON.parse(row.config || '{}');
+  const generationType = result.generationType || config.generationType || 'both';
+
+  const extractedLibrary = result.extractedLibrary || {};
+  const libObjects = extractedLibrary.objects || extractedLibrary;
+  mergePolicyIngestionFrontendEdits(libObjects, body || {}, generationType);
+
+  let uploadObjects = {};
+  if (generationType === 'framework') {
+    uploadObjects = { framework: libObjects.framework || {} };
+  } else if (generationType === 'controls') {
+    uploadObjects = { reference_controls: libObjects.reference_controls || [] };
+  } else {
+    uploadObjects = {};
+    if (libObjects.framework) uploadObjects.framework = libObjects.framework;
+    if (libObjects.reference_controls && libObjects.reference_controls.length > 0) {
+      uploadObjects.reference_controls = libObjects.reference_controls;
+    }
+  }
+
+  const libraryPayload = {
+    urn: extractedLibrary.urn || `urn:${(config.provider || 'org').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}:risk:library:${(config.libraryName || row.name || 'policy').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`,
+    locale: extractedLibrary.locale || config.language || 'en',
+    ref_id: extractedLibrary.ref_id || (config.libraryName || row.name || 'policy').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
+    name: extractedLibrary.name || config.libraryName || row.name,
+    description: extractedLibrary.description || row.description || `AI-extracted ${generationType} library from ${result.sourceFileCount || 0} document(s).`,
+    copyright: extractedLibrary.copyright || `© ${config.provider || 'Organization'} ${new Date().getFullYear()}`,
+    version: extractedLibrary.version || 1,
+    provider: extractedLibrary.provider || config.provider || '',
+    packager: extractedLibrary.packager || 'wathba',
+    objects: uploadObjects,
+  };
+
+  const filename = `${libraryPayload.ref_id || 'ai-policy-library'}.yaml`;
+  return { libraryPayload, filename, generationType, result, libObjects, uploadObjects };
 }
 
 // Ensure policy-uploads directory exists
@@ -3602,10 +3694,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- Policy Collections API ----
-  const policyCollMatch = url.pathname.match(/^\/api\/policy-collections(?:\/([^\/]+))?(?:\/(files|extract|approve|history|sync|chat)(?:\/([^\/]+))?)?$/);
+  const policyCollMatch = url.pathname.match(/^\/api\/policy-collections(?:\/([^\/]+))?(?:\/(files|extract|approve|preview-library|history|sync|chat)(?:\/([^\/]+))?)?$/);
   if (policyCollMatch) {
     let collId = policyCollMatch[1];
-    let subResource = policyCollMatch[2]; // 'files' | 'extract' | 'approve' | 'history' | 'sync' | 'chat'
+    let subResource = policyCollMatch[2]; // 'files' | 'extract' | 'approve' | 'preview-library' | 'history' | 'sync' | 'chat'
     const fileId = policyCollMatch[3];
     const apiKey = GEMINI_API_KEY || req.headers['x-api-key'];
 
@@ -4253,6 +4345,29 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // POST /api/policy-collections/:id/preview-library — YAML preview of the payload that would be uploaded (no GRC call)
+      if (collId && subResource === 'preview-library' && req.method === 'POST') {
+        const row = dbGetPolicyCollection.get(collId);
+        if (!row) { sendJSON(res, 404, { error: 'Not found' }); return; }
+        if (!row.extraction_result) {
+          sendJSON(res, 400, { error: 'No extraction result to preview. Run extraction first.' });
+          return;
+        }
+        const body = await parseBody(req);
+        try {
+          const { libraryPayload, filename, generationType } = buildPolicyIngestionLibraryUploadPayload(row, body, true);
+          const yamlStr = yaml.dump(libraryPayload, { lineWidth: 100, skipInvalid: false });
+          sendJSON(res, 200, {
+            success: true,
+            data: { yaml: yamlStr, filename, generationType },
+          });
+        } catch (preErr) {
+          console.error('[Policy Preview] ', preErr.message);
+          sendJSON(res, 500, { error: preErr.message });
+        }
+        return;
+      }
+
       // POST /api/policy-collections/:id/approve — Push full library + policies to GRC
       if (collId && subResource === 'approve' && req.method === 'POST') {
         const row = dbGetPolicyCollection.get(collId);
@@ -4260,86 +4375,9 @@ const server = http.createServer(async (req, res) => {
         if (!row.extraction_result) { sendJSON(res, 400, { error: 'No extraction result to approve.' }); return; }
 
         const body = await parseBody(req);
-        const folder = body.folder; // Required for controls/both — GRC folder UUID
-
-        const result = JSON.parse(row.extraction_result);
-        const config = JSON.parse(row.config || '{}');
-        const generationType = result.generationType || config.generationType || 'both';
-
-        // Folder is optional — used for organizational context only (applied controls are created manually by the user)
-
-        // The AI returns the full library structure including urn, name, objects, etc.
-        const extractedLibrary = result.extractedLibrary || {};
-        const libObjects = extractedLibrary.objects || extractedLibrary;
+        const { libraryPayload, filename, generationType, result, uploadObjects, libObjects } = buildPolicyIngestionLibraryUploadPayload(row, body, false);
 
         console.log(`[Policy Approve] Generation type: ${generationType}`);
-
-        // ── Build library payload based on generation type ──
-
-        let uploadObjects = {};
-        if (generationType === 'framework') {
-          // Framework-only: include framework, no reference_controls
-          uploadObjects = { framework: libObjects.framework || {} };
-        } else if (generationType === 'controls') {
-          // Controls-only: include reference_controls, no framework
-          // Apply edits from frontend to reference_controls
-          const editedPolicies = body.policies && body.policies.length ? body.policies : null;
-          const refControls = libObjects.reference_controls || [];
-          if (editedPolicies && refControls.length) {
-            libObjects.reference_controls = refControls.map(rc => {
-              const edited = editedPolicies.find(p =>
-                (p.code || p.ref_id) === rc.ref_id || p.name === rc.name
-              );
-              if (edited) {
-                rc.name = edited.name || rc.name;
-                rc.description = edited.description || rc.description;
-                rc.category = edited.category || rc.category;
-                rc.csf_function = edited.csfFunction || edited.csf_function || rc.csf_function;
-              }
-              return rc;
-            });
-          }
-          uploadObjects = { reference_controls: libObjects.reference_controls || [] };
-        } else {
-          // "Both" mode: include framework AND reference_controls
-          const editedPolicies = body.policies && body.policies.length ? body.policies : null;
-          const refControls = libObjects.reference_controls || [];
-          if (editedPolicies && refControls.length) {
-            libObjects.reference_controls = refControls.map(rc => {
-              const edited = editedPolicies.find(p =>
-                (p.code || p.ref_id) === rc.ref_id || p.name === rc.name
-              );
-              if (edited) {
-                rc.name = edited.name || rc.name;
-                rc.description = edited.description || rc.description;
-                rc.category = edited.category || rc.category;
-                rc.csf_function = edited.csfFunction || edited.csf_function || rc.csf_function;
-              }
-              return rc;
-            });
-          }
-          uploadObjects = {};
-          if (libObjects.framework) uploadObjects.framework = libObjects.framework;
-          if (libObjects.reference_controls && libObjects.reference_controls.length > 0) {
-            uploadObjects.reference_controls = libObjects.reference_controls;
-          }
-        }
-
-        const libraryPayload = {
-          urn: extractedLibrary.urn || `urn:${(config.provider || 'org').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}:risk:library:${(config.libraryName || row.name || 'policy').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`,
-          locale: extractedLibrary.locale || config.language || 'en',
-          ref_id: extractedLibrary.ref_id || (config.libraryName || row.name || 'policy').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
-          name: extractedLibrary.name || config.libraryName || row.name,
-          description: extractedLibrary.description || row.description || `AI-extracted ${generationType} library from ${result.sourceFileCount || 0} document(s).`,
-          copyright: extractedLibrary.copyright || `© ${config.provider || 'Organization'} ${new Date().getFullYear()}`,
-          version: extractedLibrary.version || 1,
-          provider: extractedLibrary.provider || config.provider || '',
-          packager: extractedLibrary.packager || 'wathba',
-          objects: uploadObjects,
-        };
-
-        const libSlug = libraryPayload.ref_id || 'ai-policy-library';
-        const filename = `${libSlug}.yaml`;
 
         console.log(`[Policy Approve] Step 1: Uploading ${generationType} library "${libraryPayload.name}" (${libraryPayload.urn}) as ${filename}`);
 

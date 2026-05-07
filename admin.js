@@ -8168,7 +8168,8 @@ function piRenderReview() {
 
       <div class="pi-review-footer">
         <button class="pi-btn pi-btn-discard" onclick="piDiscard()">Discard & Delete</button>
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button type="button" class="pi-btn pi-btn-preview-yaml" onclick="piPreviewYaml()"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2.5 12.5v-9h8l2.5 2.5v6.5h-8" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M4.5 4.5v-2h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M4.5 8.5h7M4.5 11h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg> Preview YAML</button>
           <button class="pi-btn pi-btn-regenerate" onclick="piRegenerate()"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 6C1 3.2 3.2 1 6 1C8.8 1 11 3.2 11 6C11 8.8 8.8 11 6 11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M4 6L1 6L1 9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg> Regenerate</button>
           <button class="pi-btn pi-btn-approve" onclick="piApprove()"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6L5 9L10 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg> Approve & Upload Library</button>
         </div>
@@ -8280,7 +8281,8 @@ function piRenderReview() {
 
     <div class="pi-review-footer">
       <button class="pi-btn pi-btn-discard" onclick="piDiscard()">Discard & Delete</button>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" class="pi-btn pi-btn-preview-yaml" onclick="piPreviewYaml()"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2.5 12.5v-9h8l2.5 2.5v6.5h-8" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M4.5 4.5v-2h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M4.5 8.5h7M4.5 11h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg> Preview YAML</button>
         <button class="pi-btn pi-btn-regenerate" onclick="piRegenerate()"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 6C1 3.2 3.2 1 6 1C8.8 1 11 3.2 11 6C11 8.8 8.8 11 6 11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M4 6L1 6L1 9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg> Regenerate</button>
         <button class="pi-btn pi-btn-approve" onclick="piApprove()"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6L5 9L10 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg> ${approveLabel}</button>
       </div>
@@ -8414,6 +8416,68 @@ function piRegenerate() {
   piRunExtraction(piSelectedCollectionId, piCurrentConfig);
 }
 window.piRegenerate = piRegenerate;
+
+function piShowYamlPreviewModal(yamlText, filename) {
+  document.querySelector('.pi-yaml-preview-overlay')?.remove();
+  const overlay = document.createElement('div');
+  overlay.className = 'pi-yaml-preview-overlay';
+  const safeName = esc(filename || 'library.yaml');
+  overlay.innerHTML = `
+    <div class="pi-yaml-preview-dialog">
+      <div class="pi-yaml-preview-header">
+        <div>
+          <div class="pi-yaml-preview-title">Library YAML preview</div>
+          <div class="pi-yaml-preview-subtitle">${safeName} — same shape as GRC stored-libraries upload (YAML-serialized).</div>
+        </div>
+        <div class="pi-yaml-preview-header-actions">
+          <button type="button" class="pi-btn pi-btn-preview-yaml-copy">Copy</button>
+          <button type="button" class="pi-yaml-preview-close" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <pre class="pi-yaml-preview-pre"></pre>
+    </div>`;
+  overlay.querySelector('.pi-yaml-preview-pre').textContent = yamlText || '';
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('keydown', onKey);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('.pi-yaml-preview-close').addEventListener('click', close);
+  overlay.querySelector('.pi-btn-preview-yaml-copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(yamlText || '');
+      toast('success', 'Copied', 'YAML copied to clipboard.');
+    } catch (e) {
+      toast('error', 'Copy failed', e.message || 'Could not copy');
+    }
+  });
+  document.body.appendChild(overlay);
+}
+
+async function piPreviewYaml() {
+  if (!piSelectedCollectionId) return;
+  const genType = piGenerationResult?.generationType || piCurrentConfig?.generationType || 'both';
+  const payload = { folder: piCurrentConfig.folder || '' };
+  if (genType === 'controls' || genType === 'both') payload.policies = piReviewPolicies;
+  if (genType === 'framework' || genType === 'both') payload.requirementNodes = piReviewNodes;
+
+  const btns = document.querySelectorAll('.pi-btn-preview-yaml');
+  btns.forEach(b => { b.disabled = true; b.dataset._o = b.innerHTML; b.innerHTML = '…'; });
+  try {
+    const res = await fetch(`${PI_API}/${piSelectedCollectionId}/preview-library`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    piShowYamlPreviewModal(data.data.yaml, data.data.filename);
+  } catch (err) {
+    toast('error', 'Preview failed', err.message);
+  } finally {
+    btns.forEach(b => { b.disabled = false; if (b.dataset._o) b.innerHTML = b.dataset._o; });
+  }
+}
+window.piPreviewYaml = piPreviewYaml;
 
 async function piApprove() {
   if (!piSelectedCollectionId) return;
