@@ -3170,7 +3170,7 @@ async function orgUploadFile(orgId, input) {
       console.log(`[OrgFiles] Uploaded: ${file.name}`);
     } catch (err) {
       console.error(`[OrgFiles] Upload error for ${file.name}:`, err);
-      wbAlert('Upload failed', `Failed to upload "${escapeHtml(file.name)}": ${escapeHtml(err.message)}`, { danger: true });
+      toast('error', 'Upload failed', `"${file.name}": ${err.message}`);
     }
   }
 
@@ -6942,7 +6942,6 @@ function piRenderCollectionDetail(coll) {
 
   const filesTabContent = `
     ${filesHtml}
-    <div id="pi-upload-progress-container"></div>
     <div class="pi-dropzone" id="pi-dropzone-root" onclick="piTriggerUpload()">
       <svg width="24" height="24" viewBox="0 0 16 16" fill="none"><path d="M14 10V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 5L8 2L5 5M8 2V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       <p>Drag files or folders here, or browse below</p>
@@ -6952,9 +6951,7 @@ function piRenderCollectionDetail(coll) {
         <button type="button" class="pi-dropzone-btn" onclick="piTriggerFolderUpload()">Browse folder</button>
       </div>
       <p class="pi-dropzone-hint">PDF, DOCX, PPTX, TXT, PNG, JPG — subfolders included for folder uploads. Max 50 MB per file.</p>
-    </div>
-    <input type="file" id="pi-file-input" style="display:none" multiple accept=".pdf,.docx,.pptx,.txt,.png,.jpg,.jpeg" onchange="piHandleFileUpload(event)">
-    <input type="file" id="pi-folder-input" style="display:none" webkitdirectory directory multiple onchange="piHandleFolderUpload(event)">`;
+    </div>`;
 
   // ── History Tab Content ──
   const history = piHistoryCache[coll.id] || [];
@@ -7059,6 +7056,9 @@ function piRenderCollectionDetail(coll) {
           <button class="btn-admin-primary" onclick="piGenerateFromDetail()" ${genDisabled ? 'disabled' : ''} title="${genDisabled ? 'Select files first' : ''}"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L8.5 4L12 4.5L9.5 7L10 10.5L7 9L4 10.5L4.5 7L2 4.5L5.5 4L7 1Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/></svg> ${genLabel}</button>
         </div>
       </div>
+      <div id="pi-upload-progress-container"></div>
+    <input type="file" id="pi-file-input" style="display:none" multiple accept=".pdf,.docx,.pptx,.txt,.png,.jpg,.jpeg" onchange="piHandleFileUpload(event)">
+    <input type="file" id="pi-folder-input" style="display:none" webkitdirectory directory multiple onchange="piHandleFolderUpload(event)">
       <div class="pi-tabs">
         <button class="pi-tab${piActiveTab === 'files' ? ' active' : ''}" onclick="piSwitchTab('files')">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 2H10L13 5V13C13 13.6 12.6 14 12 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.3"/></svg>
@@ -7798,57 +7798,150 @@ function piAttachPolicyDropzone(collId) {
 async function piUploadFilesToCollection(coll, filesToUpload) {
   if (!coll || !filesToUpload.length) return;
 
-  const container = document.getElementById('pi-upload-progress-container');
+  const UPLOAD_MAX_ATTEMPTS = 4;
+  const UPLOAD_RETRY_MS_BASE = 1200;
+  /** Space batch uploads to reduce provider rate limits (many failures after ~10 uploads). */
+  const PI_UPLOAD_GAP_MS = 2500;
 
-  for (const file of filesToUpload) {
-    const displayName = piPolicyUploadDisplayName(file);
-    const uid = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  const container = document.getElementById('pi-upload-progress-container');
+  const total = filesToUpload.length;
+  const bulk = total > 1;
+
+  if (container) {
+    container.classList.toggle('pi-upload-batch-mode', bulk);
+    container.innerHTML = '';
+  }
+
+  const displayNames = filesToUpload.map(f => piPolicyUploadDisplayName(f));
+
+  let summaryEl = null;
+  const setSummary = currentIndex => {
+    if (!summaryEl || !bulk) return;
+    const safeIdx = Math.max(0, Math.min(currentIndex, total - 1));
+    const num = Math.min(currentIndex + 1, total);
+    const cur = displayNames[safeIdx] || '';
+    const line1 = `Uploading ${total} files · ${num} / ${total}`;
+    summaryEl.innerHTML = `<div class="pi-upload-batch-line1">${esc(line1)}</div>` +
+      (cur ? `<div class="pi-upload-batch-line2" title="${esc(cur)}">${esc('Current: ' + cur)}</div>` : '');
+  };
+
+  if (bulk && container) {
+    summaryEl = document.createElement('div');
+    summaryEl.className = 'pi-upload-batch-summary';
+    container.appendChild(summaryEl);
+  }
+
+  const rowEls = [];
+  for (let i = 0; i < total; i++) {
+    const displayName = displayNames[i];
+    const uid = 'pi-up-' + Date.now() + '-' + i + '-' + Math.random().toString(36).slice(2, 9);
     const progressEl = document.createElement('div');
-    progressEl.className = 'pi-upload-progress';
+    progressEl.className = 'pi-upload-progress' + (bulk ? ' pi-upload-queued' : '');
     progressEl.id = uid;
     progressEl.innerHTML = `
       <div class="pi-upload-progress-info">
         <span class="pi-upload-progress-name" title="${esc(displayName)}">${esc(displayName)}</span>
-        <span class="pi-upload-progress-pct">0%</span>
+        <div class="pi-upload-progress-trailing">
+          <span class="pi-upload-progress-pct">${bulk ? '—' : '0%'}</span>
+          <span class="pi-upload-progress-index-badge pi-upload-index-badge pi-upload-index-badge-queue">${bulk ? 'Queued' : 'Waiting'}</span>
+        </div>
       </div>
       <div class="pi-upload-progress-bar"><div class="pi-upload-progress-fill" style="width:0%"></div></div>
-      <div class="pi-upload-progress-status">Preparing file…</div>`;
-    if (container) container.prepend(progressEl);
+      <div class="pi-upload-progress-status">${bulk ? 'Waiting in queue…' : 'Preparing file…'}</div>`;
+    if (container) container.appendChild(progressEl);
+    rowEls.push(progressEl);
+  }
+
+  if (bulk) setSummary(0);
+
+  let succeeded = 0;
+  let failed = 0;
+
+  for (let i = 0; i < total; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, 0));
+
+    const file = filesToUpload[i];
+    const displayName = displayNames[i];
+    const progressEl = rowEls[i];
+
+    rowEls.forEach((row, j) => {
+      row.classList.toggle('pi-upload-active', j === i);
+    });
+
+    if (bulk) {
+      progressEl.classList.remove('pi-upload-queued');
+      setSummary(i);
+    }
 
     const pctEl = progressEl.querySelector('.pi-upload-progress-pct');
+    const badgeEl = progressEl.querySelector('.pi-upload-progress-index-badge');
     const fillEl = progressEl.querySelector('.pi-upload-progress-fill');
     const statusEl = progressEl.querySelector('.pi-upload-progress-status');
 
+    const setIndexBadge = (variant, text) => {
+      if (!badgeEl) return;
+      badgeEl.textContent = text;
+      badgeEl.className = `pi-upload-progress-index-badge pi-upload-index-badge pi-upload-index-badge-${variant}`;
+    };
+
+    const applyFinalIndexingBadge = ix => {
+      if (!badgeEl) return;
+      if (!ix) {
+        setIndexBadge('ready', 'Indexed');
+        return;
+      }
+      if (!ix.operationComplete) {
+        setIndexBadge('pending', 'Indexing');
+        return;
+      }
+      if (ix.documentFetched && ix.documentState === 'STATE_ACTIVE') {
+        setIndexBadge('ready', 'Indexed');
+        return;
+      }
+      if (ix.documentFetched && ix.documentState) {
+        const s = ix.documentState.replace(/^STATE_/, '').toLowerCase();
+        const label = s ? s.charAt(0).toUpperCase() + s.slice(1) : 'Pending';
+        setIndexBadge('pending', label);
+        return;
+      }
+      setIndexBadge('ready', 'Indexed');
+    };
+
+    setIndexBadge('reading', 'Reading');
+
     const setProgress = (pct, statusText) => {
-      if (pctEl) pctEl.textContent = Math.round(pct) + '%';
-      if (fillEl) fillEl.style.width = pct + '%';
+      if (pctEl) pctEl.textContent = `${Math.round(pct)}%`;
+      if (fillEl) fillEl.style.width = `${pct}%`;
       if (statusEl && statusText) statusEl.textContent = statusText;
     };
 
-    try {
-      setProgress(10, 'Reading file…');
-      const base64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(',')[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+    const fadeRemove = delayMs => {
+      setTimeout(() => {
+        progressEl.style.transition = 'opacity 0.4s ease, max-height 0.4s ease, margin 0.4s ease, padding 0.4s ease';
+        progressEl.style.opacity = '0';
+        progressEl.style.maxHeight = '0';
+        progressEl.style.marginBottom = '0';
+        progressEl.style.padding = '0 14px';
+        setTimeout(() => progressEl.remove(), 450);
+      }, delayMs);
+    };
 
-      setProgress(30, 'Uploading to server…');
-
-      await new Promise((resolve, reject) => {
+    const runOneUpload = base64Payload =>
+      new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `${PI_API}/${coll.id}/files`);
         xhr.setRequestHeader('Content-Type', 'application/json');
 
-        xhr.upload.addEventListener('progress', (e) => {
+        xhr.upload.addEventListener('progress', e => {
           if (e.lengthComputable) {
             const uploadPct = 30 + (e.loaded / e.total) * 40;
             setProgress(uploadPct, 'Uploading…');
+            setIndexBadge('uploading', 'Uploading');
           }
         });
         xhr.upload.addEventListener('load', () => {
-          setProgress(75, 'Syncing to Wathbah AI… please wait');
+          setProgress(75, 'Indexing…');
+          setIndexBadge('indexing', 'Indexing');
         });
 
         xhr.onload = () => {
@@ -7870,38 +7963,110 @@ async function piUploadFilesToCollection(coll, filesToUpload) {
         xhr.send(JSON.stringify({
           fileName: displayName,
           mimeType: file.type || 'application/octet-stream',
-          data: base64,
+          data: base64Payload,
         }));
       });
 
-      setProgress(90, 'Processing…');
-      setProgress(100, 'Uploaded successfully ✓');
-      progressEl.classList.add('pi-upload-success');
+    try {
+      let base64 = null;
+      let lastErr = null;
 
-      setTimeout(() => {
-        progressEl.style.transition = 'opacity 0.4s ease, max-height 0.4s ease, margin 0.4s ease, padding 0.4s ease';
-        progressEl.style.opacity = '0';
-        progressEl.style.maxHeight = '0';
-        progressEl.style.marginBottom = '0';
-        progressEl.style.padding = '0 14px';
-        setTimeout(() => progressEl.remove(), 450);
-      }, 3000);
+      for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
+        try {
+          if (attempt > 1) {
+            const waitMs = UPLOAD_RETRY_MS_BASE * Math.pow(2, attempt - 2);
+            const sec = Math.max(1, Math.ceil(waitMs / 1000));
+            setProgress(18, `Retry ${attempt - 1}/${UPLOAD_MAX_ATTEMPTS - 1} in ${sec}s…`);
+            await new Promise(r => setTimeout(r, waitMs));
+            progressEl.classList.remove('pi-upload-error');
+            progressEl.classList.remove('pi-upload-index-warning');
+          }
+
+          if (!base64) {
+            setProgress(10, attempt > 1 ? 'Reading file… (retry)' : 'Reading file…');
+            base64 = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const dataUrl = reader.result;
+                const s = typeof dataUrl === 'string' ? dataUrl : '';
+                const idx = s.indexOf(',');
+                if (idx < 0) reject(new Error('Could not read file (invalid data)'));
+                else resolve(s.slice(idx + 1));
+              };
+              reader.onerror = () => reject(new Error('Could not read file'));
+              reader.readAsDataURL(file);
+            });
+          }
+
+          const uploadLabel =
+            attempt > 1 ? `Uploading… (${attempt}/${UPLOAD_MAX_ATTEMPTS})` : 'Uploading…';
+          setProgress(30, uploadLabel);
+          setIndexBadge('uploading', 'Uploading');
+          const uploadResp = await runOneUpload(base64);
+          const ix = uploadResp.indexingStatus;
+          const statusLine =
+            ix && ix.summaryLabel ? ix.summaryLabel : 'Uploaded successfully ✓';
+          setProgress(100, statusLine);
+          applyFinalIndexingBadge(ix);
+          progressEl.classList.toggle(
+            'pi-upload-index-warning',
+            !!(
+              ix &&
+              (!ix.operationComplete ||
+                (ix.documentFetched &&
+                  ix.documentState &&
+                  ix.documentState !== 'STATE_ACTIVE'))
+            )
+          );
+          progressEl.classList.add('pi-upload-success');
+          progressEl.classList.remove('pi-upload-active');
+          succeeded++;
+
+          if (!bulk) {
+            fadeRemove(3000);
+            toast('success', 'Uploaded', displayName.length > 60 ? `"${displayName.slice(0, 57)}…"` : `"${displayName}"`);
+          }
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          const msg = err && err.message ? String(err.message) : '';
+          if (/Could not read file|invalid data/i.test(msg)) base64 = null;
+          console.warn(
+            `[Policy upload] "${displayName}" attempt ${attempt}/${UPLOAD_MAX_ATTEMPTS}:`,
+            msg || err
+          );
+          if (attempt === UPLOAD_MAX_ATTEMPTS) break;
+          setIndexBadge('pending', 'Retry');
+          setProgress(
+            22,
+            `Failed: ${msg || 'Unknown error'} · will retry`
+          );
+        }
+      }
+
+      if (lastErr) throw lastErr;
+
+      if (bulk && i < total - 1) {
+        await new Promise(r => setTimeout(r, PI_UPLOAD_GAP_MS));
+      }
     } catch (err) {
+      failed++;
+      progressEl.classList.remove('pi-upload-active');
       setProgress(100, `Failed: ${err.message}`);
+      setIndexBadge('error', 'Failed');
       progressEl.classList.add('pi-upload-error');
-
-      setTimeout(() => {
-        progressEl.style.transition = 'opacity 0.4s ease, max-height 0.4s ease, margin 0.4s ease, padding 0.4s ease';
-        progressEl.style.opacity = '0';
-        progressEl.style.maxHeight = '0';
-        progressEl.style.marginBottom = '0';
-        progressEl.style.padding = '0 14px';
-        setTimeout(() => progressEl.remove(), 450);
-      }, 6000);
-
-      toast('error', 'Upload Error', `"${displayName}": ${err.message}`);
+      fadeRemove(8000);
+      toast('error', 'Upload Error', `"${displayName.length > 40 ? displayName.slice(0, 37) + '…' : displayName}": ${err.message}`);
     }
   }
+
+  if (bulk && summaryEl) {
+    const tail = failed ? ` · ${failed} failed` : '';
+    summaryEl.innerHTML = `<div class="pi-upload-batch-line1 pi-upload-batch-done">${esc(`Finished · ${succeeded}/${total} uploaded${tail}`)}</div>`;
+  }
+
+  rowEls.forEach(row => row.classList.remove('pi-upload-active'));
 
   try {
     const freshData = await fetchJSON(`${PI_API}/${coll.id}`);
@@ -7912,10 +8077,25 @@ async function piUploadFilesToCollection(coll, filesToUpload) {
   } catch (e) { console.warn('Could not refresh collection:', e); }
 
   const liveProgressBars = container ? Array.from(container.children) : [];
-  piRender();
+  try {
+    piRender();
+  } catch (e) {
+    console.warn('piRender after upload:', e);
+  }
   const newContainer = document.getElementById('pi-upload-progress-container');
   if (newContainer) {
     liveProgressBars.forEach(bar => newContainer.appendChild(bar));
+    newContainer.classList.toggle('pi-upload-batch-mode', bulk && liveProgressBars.length > 0);
+  }
+
+  if (bulk) {
+    if (failed === 0) {
+      toast('success', 'Batch complete', `${succeeded} file${succeeded !== 1 ? 's' : ''} uploaded.`);
+    } else if (succeeded === 0) {
+      toast('error', 'Upload failed', `All ${failed} file${failed !== 1 ? 's' : ''} failed.`);
+    } else {
+      toast('info', 'Batch finished', `${succeeded} succeeded, ${failed} failed. Expand errors on each row if needed.`);
+    }
   }
 }
 

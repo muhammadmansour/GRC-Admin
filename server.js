@@ -11,6 +11,9 @@ const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 const GEMINI_UPLOAD_URL = 'https://generativelanguage.googleapis.com/upload/v1beta';
 
+// File Search uploads: Gemini indexing often exceeds the default 2min poll when batching large PDFs
+const GEMINI_FILE_SEARCH_INDEX_POLL_MS = 480000;
+
 // Load environment variables from .env file
 function loadEnv() {
   try {
@@ -1842,14 +1845,27 @@ async function uploadFileToStore(storeName, fileName, mimeType, fileBuffer, apiK
   return uploadRes.json();
 }
 
-// List documents in a file search store
+// List documents in a file search store (paginates; pageSize requested — API may cap lower)
 async function listStoreDocuments(storeName, apiKey) {
-  const res = await fetch(`${GEMINI_BASE_URL}/${storeName}/documents?key=${apiKey}`);
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`List documents failed (${res.status}): ${err}`);
-  }
-  return res.json();
+  const allDocuments = [];
+  let pageToken = '';
+  const pageSize = 100;
+
+  do {
+    const qs = new URLSearchParams({ key: apiKey, pageSize: String(pageSize) });
+    if (pageToken) qs.set('pageToken', pageToken);
+    const res = await fetch(`${GEMINI_BASE_URL}/${storeName}/documents?${qs}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`List documents failed (${res.status}): ${err}`);
+    }
+    const page = await res.json();
+    const docs = page.documents || [];
+    allDocuments.push(...docs);
+    pageToken = typeof page.nextPageToken === 'string' ? page.nextPageToken : '';
+  } while (pageToken);
+
+  return { documents: allDocuments };
 }
 
 // Delete a document from a file search store (force=true to delete even if it has chunks)
@@ -1865,20 +1881,156 @@ async function deleteDocument(documentName, apiKey) {
   return text ? JSON.parse(text) : {};
 }
 
+function safeJsonForLog(value, maxLen = 4000) {
+  if (value == null) return String(value);
+  try {
+    const s = typeof value === 'string' ? value : JSON.stringify(value);
+    if (s.length > maxLen) return `${s.slice(0, maxLen)}… (+${s.length - maxLen} more chars)`;
+    return s;
+  } catch {
+    return '[unserializable]';
+  }
+}
+
 // Poll a long-running operation until done
 async function pollOperation(operationName, apiKey, maxWaitMs = 120000) {
   const start = Date.now();
+  let lastOp = null;
   while (Date.now() - start < maxWaitMs) {
     const res = await fetch(`${GEMINI_BASE_URL}/${operationName}?key=${apiKey}`);
     if (!res.ok) {
-      console.warn(`Poll operation warning: ${res.status}`);
+      const errText = await res.text().catch(() => '');
+      console.warn(
+        `[Gemini][operations] poll HTTP ${res.status} ${operationName}:`,
+        safeJsonForLog(errText, 1200)
+      );
       break;
     }
-    const op = await res.json();
-    if (op.done) return op;
+    lastOp = await res.json();
+    console.log(
+      `[Gemini][operations] poll ${operationName} (${Math.round((Date.now() - start) / 1000)}s elapsed):`,
+      safeJsonForLog(lastOp, 2500)
+    );
+    if (lastOp.done) return lastOp;
     await new Promise(r => setTimeout(r, 3000));
   }
+  if (lastOp) {
+    console.warn(
+      `[Gemini][operations] poll stopped after ${maxWaitMs}ms (done=false); last response:`,
+      safeJsonForLog(lastOp, 2500)
+    );
+  } else {
+    console.warn(`[Gemini][operations] poll stopped with no successful response: ${operationName}`);
+  }
   return { done: false, note: 'Still processing in background' };
+}
+
+/** Whether Gemini LRO finished; missing `done` on non-operation bodies counts as complete. */
+function geminiUploadOperationLooksComplete(op) {
+  if (!op || typeof op !== 'object') return false;
+  if (op.done === true) return true;
+  if (op.done === false) return false;
+  const nm = op.name || '';
+  if (typeof nm === 'string' && nm.includes('operations/')) return false;
+  return true;
+}
+
+/** File Search document resource name from upload LRO `response` (shape varies). */
+function extractDocumentResourceNameFromUploadOp(op) {
+  const r = op && op.response;
+  if (!r || typeof r !== 'object') return '';
+  // UploadToFileSearchStoreResponse uses documentName (see google.ai.generativelanguage UploadToFileSearchStoreResponse)
+  if (typeof r.documentName === 'string' && r.documentName.includes('/documents/')) return r.documentName;
+  if (typeof r.name === 'string' && r.name.includes('/documents/')) return r.name;
+  const d = r.document;
+  if (d && typeof d.name === 'string') return d.name;
+  if (typeof d === 'string' && d.includes('/documents/')) return d;
+  return '';
+}
+
+async function getFileSearchDocument(documentName, apiKey) {
+  if (!documentName || !apiKey) return null;
+  const pathSeg = documentName.replace(/^\//, '');
+  try {
+    const res = await fetch(`${GEMINI_BASE_URL}/${pathSeg}?key=${apiKey}`);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.warn(
+        `[Gemini][documents] GET ${pathSeg} HTTP ${res.status}:`,
+        safeJsonForLog(errText, 1200)
+      );
+      return null;
+    }
+    const doc = await res.json();
+    console.log(`[Gemini][documents] GET ${pathSeg}:`, safeJsonForLog(doc, 4000));
+    return doc;
+  } catch (e) {
+    console.warn(`[Gemini][documents] GET ${pathSeg}: ${e.message}`);
+    return null;
+  }
+}
+
+async function buildPolicyIndexingStatus(finalResult, apiKey) {
+  console.log('[Policy][indexing] LRO / upload finalResult:', safeJsonForLog(finalResult, 3500));
+
+  const operationComplete = geminiUploadOperationLooksComplete(finalResult);
+  let documentName = extractDocumentResourceNameFromUploadOp(finalResult);
+  let documentState = '';
+  let documentFetched = false;
+
+  if (operationComplete && documentName && apiKey) {
+    console.log('[Policy][indexing] fetching document state:', documentName);
+    const doc = await getFileSearchDocument(documentName, apiKey);
+    if (doc && typeof doc === 'object') {
+      documentFetched = true;
+      documentState = typeof doc.state === 'string' ? doc.state : '';
+    }
+  } else if (operationComplete && !documentName) {
+    console.log('[Policy][indexing] operation complete but no document resource name in LRO response');
+  }
+
+  let summaryLabel = '';
+  if (!operationComplete) {
+    summaryLabel = 'Uploaded · indexing still in progress';
+  } else if (documentFetched && documentState === 'STATE_ACTIVE') {
+    summaryLabel = 'Indexed & ready ✓';
+  } else if (documentFetched && documentState) {
+    summaryLabel = `Indexing: ${documentState.replace(/^STATE_/, '').toLowerCase()}`;
+  } else if (operationComplete) {
+    summaryLabel = 'Indexing finished ✓';
+  } else {
+    summaryLabel = 'Uploaded successfully ✓';
+  }
+
+  const indexingStatus = {
+    operationComplete,
+    documentName: documentName || null,
+    documentState: documentState || null,
+    documentFetched,
+    summaryLabel,
+  };
+  console.log('[Policy][indexing] indexingStatus for client:', safeJsonForLog(indexingStatus, 2000));
+  return indexingStatus;
+}
+
+/**
+ * ASCII-safe unique disk name for stored uploads. Arabic/Unicode-only names become identical
+ * after /[^a-zA-Z0-9._-]/g sanitization (e.g. many files → "_____.pdf"), which overwrites
+ * local copies and corrupts _metadata.json mappings.
+ */
+function uniqueAsciiLocalFileName(originalFileName, fileBuffer) {
+  const raw = originalFileName || 'file';
+  const ext = path.extname(raw);
+  const extLower = (ext || '').toLowerCase() || '.bin';
+  const baseStem = ext ? path.basename(raw, ext) : raw;
+  let stem = baseStem
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+  if (!stem) stem = 'file';
+  if (stem.length > 48) stem = stem.slice(0, 48);
+  const hash12 = crypto.createHash('sha256').update(fileBuffer).digest('hex').slice(0, 12);
+  return `${stem}_${hash12}${extLower}`;
 }
 
 // ==========================================
@@ -3499,20 +3651,22 @@ const server = http.createServer(async (req, res) => {
         const result = await uploadFileToStore(storeName, fileName, mime, fileBuffer, apiKey);
         let finalResult = result;
         if (result.name && !result.done) {
-          finalResult = await pollOperation(result.name, apiKey);
+          finalResult = await pollOperation(result.name, apiKey, GEMINI_FILE_SEARCH_INDEX_POLL_MS);
         }
 
         // Save local copy for viewing
         try {
           const oStoreDir = path.join(COLLECTION_UPLOADS_DIR, storeId);
           if (!fs.existsSync(oStoreDir)) fs.mkdirSync(oStoreDir, { recursive: true });
-          const oSafeFileName = (fileName || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+          const oSafeFileName = uniqueAsciiLocalFileName(fileName, fileBuffer);
           fs.writeFileSync(path.join(oStoreDir, oSafeFileName), fileBuffer);
           const oMetaPath = path.join(oStoreDir, '_metadata.json');
           let oMeta = {};
           try { oMeta = JSON.parse(fs.readFileSync(oMetaPath, 'utf-8')); } catch {}
-          const oDocName = finalResult?.response?.name || finalResult?.name || '';
-          const oDocId = oDocName.split('/').pop() || oSafeFileName;
+          const oDocPath = extractDocumentResourceNameFromUploadOp(finalResult);
+          const oDocId =
+            (oDocPath && oDocPath.includes('/documents/') && oDocPath.split('/').pop()) ||
+            oSafeFileName;
           oMeta[oDocId] = { originalName: fileName, localFile: oSafeFileName, mimeType: mime, size: fileBuffer.length, uploadedAt: new Date().toISOString() };
           oMeta[oSafeFileName] = oMeta[oDocId];
           fs.writeFileSync(oMetaPath, JSON.stringify(oMeta, null, 2));
@@ -3902,22 +4056,29 @@ const server = http.createServer(async (req, res) => {
         // Poll if long-running operation
         let finalResult = result;
         if (result.name && !result.done) {
-          finalResult = await pollOperation(result.name, apiKey);
+          finalResult = await pollOperation(result.name, apiKey, GEMINI_FILE_SEARCH_INDEX_POLL_MS);
           console.log(`[Policy] Upload complete:`, finalResult.done);
+          if (!finalResult.done) {
+            console.warn(
+              `[Policy] Indexing still in progress after ${GEMINI_FILE_SEARCH_INDEX_POLL_MS / 1000}s for "${fileName}" — may succeed in background; consider spacing uploads if failures persist.`
+            );
+          }
         }
 
         // Save local copy for viewing/downloading
         try {
           const pStoreDir = path.join(COLLECTION_UPLOADS_DIR, storeId);
           if (!fs.existsSync(pStoreDir)) fs.mkdirSync(pStoreDir, { recursive: true });
-          const pSafeFileName = (fileName || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+          const pSafeFileName = uniqueAsciiLocalFileName(fileName, fileBuffer);
           const pLocalFilePath = path.join(pStoreDir, pSafeFileName);
           fs.writeFileSync(pLocalFilePath, fileBuffer);
           const pMetaPath = path.join(pStoreDir, '_metadata.json');
           let pMeta = {};
           try { pMeta = JSON.parse(fs.readFileSync(pMetaPath, 'utf-8')); } catch {}
-          const pDocName = finalResult?.response?.name || finalResult?.name || '';
-          const pDocId = pDocName.split('/').pop() || pSafeFileName;
+          const pDocPath = extractDocumentResourceNameFromUploadOp(finalResult);
+          const pDocId =
+            (pDocPath && pDocPath.includes('/documents/') && pDocPath.split('/').pop()) ||
+            pSafeFileName;
           pMeta[pDocId] = { originalName: fileName, localFile: pSafeFileName, mimeType: mime, size: fileBuffer.length, uploadedAt: new Date().toISOString() };
           pMeta[pSafeFileName] = pMeta[pDocId];
           fs.writeFileSync(pMetaPath, JSON.stringify(pMeta, null, 2));
@@ -3927,7 +4088,8 @@ const server = http.createServer(async (req, res) => {
         }
 
         console.log(`[Policy] File "${fileName}" uploaded to store ${storeId}`);
-        sendJSON(res, 200, { success: true, data: finalResult });
+        const indexingStatus = await buildPolicyIndexingStatus(finalResult, apiKey);
+        sendJSON(res, 200, { success: true, data: finalResult, indexingStatus });
         return;
       }
 
@@ -4838,7 +5000,7 @@ const server = http.createServer(async (req, res) => {
         let finalResult = result;
         if (result.name && !result.done) {
           console.log('Polling upload operation...');
-          finalResult = await pollOperation(result.name, apiKey);
+          finalResult = await pollOperation(result.name, apiKey, GEMINI_FILE_SEARCH_INDEX_POLL_MS);
           console.log('Upload complete:', finalResult.done);
         }
 
@@ -4846,8 +5008,7 @@ const server = http.createServer(async (req, res) => {
         try {
           const storeDir = path.join(COLLECTION_UPLOADS_DIR, storeId);
           if (!fs.existsSync(storeDir)) fs.mkdirSync(storeDir, { recursive: true });
-          // Use a safe filename: store the original name in a metadata JSON alongside the binary
-          const safeFileName = (fileName || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+          const safeFileName = uniqueAsciiLocalFileName(fileName, fileBuffer);
           const localFilePath = path.join(storeDir, safeFileName);
           fs.writeFileSync(localFilePath, fileBuffer);
           // Also save metadata for name mapping
@@ -4855,8 +5016,10 @@ const server = http.createServer(async (req, res) => {
           let meta = {};
           try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8')); } catch {}
           // Extract the document ID from the result (the Gemini API returns it)
-          const docName = finalResult?.response?.name || finalResult?.name || '';
-          const docId = docName.split('/').pop() || safeFileName;
+          const docPath = extractDocumentResourceNameFromUploadOp(finalResult);
+          const docId =
+            (docPath && docPath.includes('/documents/') && docPath.split('/').pop()) ||
+            safeFileName;
           meta[docId] = { originalName: fileName, localFile: safeFileName, mimeType: mimeType || 'application/octet-stream', size: fileBuffer.length, uploadedAt: new Date().toISOString() };
           // Also store by safe filename as a fallback lookup
           meta[safeFileName] = meta[docId];
