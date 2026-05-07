@@ -111,44 +111,44 @@ function renderMultiSelect(libraries) {
       `;
       
       nodes.forEach(node => {
-        const optionData = {
-          libraryId: library.id,
-          frameworkUrn: framework.urn,
-          frameworkName: frameworkName,
-          nodeUrn: node.urn,
-          refId: node.ref_id,
-          name: node.name,
-          description: node.description,
-          depth: node.depth,
+  const optionData = {
+    libraryId: library.id,
+    frameworkUrn: framework.urn,
+    frameworkName: frameworkName,
+    nodeUrn: node.urn,
+    refId: node.ref_id,
+    name: node.name,
+    description: node.description,
+    depth: node.depth,
           assessable: node.assessable
-        };
-        
-        allOptions.push(optionData);
-        
+  };
+  
+  allOptions.push(optionData);
+  
         // Use base64 encoding to safely store JSON in data attribute (handles quotes and special chars)
-        const dataAttr = btoa(unescape(encodeURIComponent(JSON.stringify(optionData))));
-        const isSelected = currentSelections.some(s => s.nodeUrn === node.urn);
+  const dataAttr = btoa(unescape(encodeURIComponent(JSON.stringify(optionData))));
+  const isSelected = currentSelections.some(s => s.nodeUrn === node.urn);
         const depthIndicator = getDepthIndicator(node.depth);
-        
+  
         html += `
-          <div class="option-item${isSelected ? ' selected' : ''}" 
-               data-option="${dataAttr}"
-               data-group-id="${groupId}"
-               data-search="${escapeHtml((node.ref_id + ' ' + node.description + ' ' + frameworkName).toLowerCase())}">
-            <div class="option-checkbox">
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                <path d="M2 6L5 9L10 3" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </div>
-            <div class="option-content">
-              ${node.ref_id ? `<span class="option-ref-id">${escapeHtml(node.ref_id)}</span>` : ''}
+    <div class="option-item${isSelected ? ' selected' : ''}" 
+         data-option="${dataAttr}"
+         data-group-id="${groupId}"
+         data-search="${escapeHtml((node.ref_id + ' ' + node.description + ' ' + frameworkName).toLowerCase())}">
+      <div class="option-checkbox">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <path d="M2 6L5 9L10 3" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="option-content">
+        ${node.ref_id ? `<span class="option-ref-id">${escapeHtml(node.ref_id)}</span>` : ''}
               <div class="option-description">
                 <span class="option-depth-indicator">${depthIndicator}</span>
                 ${escapeHtml(node.description)}
               </div>
-            </div>
-          </div>
-        `;
+      </div>
+    </div>
+  `;
       });
       
       html += '</div></div>';
@@ -337,8 +337,8 @@ function filterOptions(query) {
   groups.forEach(group => {
     const items = group.querySelectorAll('.option-item');
     let visibleInGroup = 0;
-    
-    items.forEach(item => {
+      
+      items.forEach(item => {
       const searchText = item.dataset.search || '';
       const matches = query === '' || searchText.includes(query);
       item.style.display = matches ? '' : 'none';

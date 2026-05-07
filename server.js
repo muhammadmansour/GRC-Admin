@@ -902,6 +902,11 @@ const dbInsertGenHistory = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const dbUpdateGenHistoryStatus = db.prepare(`UPDATE policy_generation_history SET status = ?, library_urn = ?, error_message = ? WHERE id = ?`);
+const dbUpdateGenHistoryExtraction = db.prepare(`
+  UPDATE policy_generation_history
+  SET extraction_data = ?, nodes_count = ?, controls_count = ?
+  WHERE id = ? AND collection_id = ?
+`);
 const dbListGenHistory = db.prepare(`SELECT * FROM policy_generation_history WHERE collection_id = ? ORDER BY created_at DESC`);
 const dbGetLatestGenHistory = db.prepare(`SELECT * FROM policy_generation_history WHERE collection_id = ? ORDER BY created_at DESC LIMIT 1`);
 const dbGetGenHistoryById = db.prepare(`SELECT * FROM policy_generation_history WHERE id = ?`);
@@ -4432,6 +4437,77 @@ const server = http.createServer(async (req, res) => {
       if (collId && subResource === 'history' && fileId && req.method === 'GET') {
         const r = dbGetGenHistoryById.get(fileId);
         if (!r) { sendJSON(res, 404, { error: 'History entry not found' }); return; }
+        if (r.collection_id !== collId) { sendJSON(res, 404, { error: 'History entry not found' }); return; }
+        sendJSON(res, 200, {
+          success: true,
+          data: {
+            id: r.id,
+            collectionId: r.collection_id,
+            generationType: r.generation_type,
+            status: r.status,
+            config: JSON.parse(r.config || '{}'),
+            summary: JSON.parse(r.summary || '{}'),
+            libraryUrn: r.library_urn,
+            controlsCount: r.controls_count,
+            nodesCount: r.nodes_count,
+            confidenceScore: r.confidence_score,
+            generationTime: r.generation_time,
+            sourceFileCount: r.source_file_count,
+            errorMessage: r.error_message,
+            extractionData: r.extraction_data ? JSON.parse(r.extraction_data) : null,
+            createdAt: r.created_at,
+          },
+        });
+        return;
+      }
+
+      // PATCH /api/policy-collections/:id/history/:historyId — Update stored extraction_data (e.g. edits in History detail)
+      if (collId && subResource === 'history' && fileId && req.method === 'PATCH') {
+        const row = dbGetGenHistoryById.get(fileId);
+        if (!row) { sendJSON(res, 404, { error: 'History entry not found' }); return; }
+        if (row.collection_id !== collId) { sendJSON(res, 404, { error: 'History entry not found' }); return; }
+        const body = await parseBody(req);
+        let ex = body.extractionData;
+        if (ex === undefined || ex === null) {
+          sendJSON(res, 400, { error: 'extractionData is required' });
+          return;
+        }
+        if (typeof ex === 'string') {
+          try { ex = JSON.parse(ex); } catch (e) {
+            sendJSON(res, 400, { error: 'extractionData must be a JSON object' });
+            return;
+          }
+        }
+        if (typeof ex !== 'object' || Array.isArray(ex)) {
+          sendJSON(res, 400, { error: 'extractionData must be a JSON object' });
+          return;
+        }
+
+        const rn = Array.isArray(ex.requirementNodes) ? ex.requirementNodes : [];
+        const pol = Array.isArray(ex.policies) ? ex.policies : [];
+        ex.requirementNodes = rn;
+        ex.policies = pol;
+        ex.totalNodes = rn.length;
+        ex.assessableNodes = rn.filter(n => n && n.assessable).length;
+
+        const csf = {};
+        const cat = {};
+        for (const p of pol) {
+          if (!p) continue;
+          const c = (p.csfFunction || 'govern').toLowerCase();
+          csf[c] = (csf[c] || 0) + 1;
+          const k = (p.category || 'policy').toLowerCase();
+          cat[k] = (cat[k] || 0) + 1;
+        }
+        ex.csfDistribution = csf;
+        ex.categoryDistribution = cat;
+
+        const nodesCount = rn.length;
+        const controlsCount = pol.length;
+        const extractionStr = JSON.stringify(ex);
+        dbUpdateGenHistoryExtraction.run(extractionStr, nodesCount, controlsCount, fileId, collId);
+
+        const r = dbGetGenHistoryById.get(fileId);
         sendJSON(res, 200, {
           success: true,
           data: {

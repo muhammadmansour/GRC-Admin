@@ -7150,6 +7150,46 @@ async function piLoadHistory(collId) {
 
 // ── History Detail Viewer ──
 let piHistoryDetailCache = {};
+/** Set while history detail DOM is rendered; used by edit/save/delete actions */
+let piHistoryDetailOpenId = null;
+
+/** URN closure: seed urn + descendants linked by parent_urn (for cascading delete). */
+function piFrameworkDescendantUrns(seedUrn, nodes) {
+  const out = new Set();
+  if (seedUrn) out.add(seedUrn);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const x of nodes) {
+      const u = x && x.urn;
+      if (!u || out.has(u)) continue;
+      if (x.parent_urn && out.has(x.parent_urn)) {
+        out.add(u);
+        changed = true;
+      }
+    }
+  }
+  return out;
+}
+
+function piFrameworkReviewIdsToRemove(node, nodes) {
+  const rm = new Set([node.id]);
+  if (!node.urn) return rm;
+  const urns = piFrameworkDescendantUrns(node.urn, nodes);
+  for (const x of nodes) {
+    if (x.urn && urns.has(x.urn)) rm.add(x.id);
+  }
+  return rm;
+}
+
+function piSyncFrameworkResultFromReview() {
+  if (!piGenerationResult) return;
+  const genType = piGenerationResult.generationType || 'both';
+  if (genType !== 'framework' && genType !== 'both') return;
+  piGenerationResult.requirementNodes = piReviewNodes.slice();
+  piGenerationResult.totalNodes = piReviewNodes.length;
+  piGenerationResult.assessableNodes = piReviewNodes.filter(n => n.assessable).length;
+}
 
 async function piViewHistoryEntry(historyId) {
   if (!piSelectedCollectionId) return;
@@ -7192,6 +7232,7 @@ function piRenderHistoryDetail(entry) {
   const pageEl = document.getElementById('pi-content');
   if (!pageEl) return;
   piPhase = 'history-detail';
+  piHistoryDetailOpenId = entry.id;
 
   const date = new Date(entry.createdAt);
   const dateStr = date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
@@ -7224,8 +7265,12 @@ function piRenderHistoryDetail(entry) {
           <span class="pi-hist-detail-node-ref">${esc(n.ref_id || n.urn || `N-${i+1}`)}</span>
           <span class="pi-hist-detail-node-name">${esc(n.name)}</span>
           ${n.assessable ? '<span class="pi-hist-detail-badge pi-hist-detail-badge-assess">Assessable</span>' : ''}
+          <div class="pi-hist-detail-node-actions">
+            <button type="button" class="pi-policy-edit-btn" onclick="event.stopPropagation();piHistEditFrameworkNodeIdx(${i})" title="Edit"><svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M10.5 2.5L11.5 3.5L4 11H2.5V9.5L10.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+            <button type="button" class="pi-policy-delete-btn" onclick="event.stopPropagation();piHistDeleteFrameworkNodeIdx(${i})" title="Delete"><svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M2 4H12M4 4V3C4 2.4 4.4 2 5 2H9C9.6 2 10 2.4 10 3V4M5 6.5V10.5M7 6.5V10.5M9 6.5V10.5M3 4L4 12H10L11 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          </div>
         </div>
-        ${n.description ? `<div class="pi-hist-detail-node-desc">${esc(n.description)}</div>` : ''}
+        <div class="pi-hist-detail-node-body" id="pi-hist-rn-body-${i}">${n.description ? `<div class="pi-hist-detail-node-desc">${esc(n.description)}</div>` : ''}</div>
       </div>`;
     }).join('');
     nodesSection = `
@@ -7251,8 +7296,12 @@ function piRenderHistoryDetail(entry) {
           <span class="pi-hist-detail-control-name">${esc(p.name)}</span>
           <span class="pi-hist-detail-badge" style="background:${csfColor}15;color:${csfColor};border:1px solid ${csfColor}30">${esc((p.csfFunction||'').charAt(0).toUpperCase()+(p.csfFunction||'').slice(1))}</span>
           <span class="pi-hist-detail-badge" style="background:#f3f4f6;color:#374151">${esc((p.category||'').charAt(0).toUpperCase()+(p.category||'').slice(1))}</span>
+          <div class="pi-hist-detail-node-actions">
+            <button type="button" class="pi-policy-edit-btn" onclick="event.stopPropagation();piHistEditControlIdx(${i})" title="Edit"><svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M10.5 2.5L11.5 3.5L4 11H2.5V9.5L10.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+            <button type="button" class="pi-policy-delete-btn" onclick="event.stopPropagation();piHistDeleteControlIdx(${i})" title="Delete"><svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M2 4H12M4 4V3C4 2.4 4.4 2 5 2H9C9.6 2 10 2.4 10 3V4M5 6.5V10.5M7 6.5V10.5M9 6.5V10.5M3 4L4 12H10L11 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          </div>
         </div>
-        ${p.description ? `<div class="pi-hist-detail-control-desc">${esc(p.description)}</div>` : ''}
+        <div id="pi-hist-rc-body-${i}">${p.description ? `<div class="pi-hist-detail-control-desc">${esc(p.description)}</div>` : ''}</div>
       </div>`;
     }).join('');
     controlsSection = `
@@ -7344,6 +7393,177 @@ function piRenderHistoryDetail(entry) {
     ${entry.errorMessage ? `<div style="margin-top:12px;padding:12px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;font-size:12px;color:#b91c1c"><strong>Error:</strong> ${esc(entry.errorMessage)}</div>` : ''}
   `;
 }
+
+async function piHistPersistEntry(entry) {
+  const collId = entry.collectionId || piSelectedCollectionId;
+  if (!collId) {
+    toast('error', 'Error', 'Missing collection');
+    return null;
+  }
+  const ex = entry.extractionData || {};
+  try {
+    const res = await fetch(`${PI_API}/${collId}/history/${entry.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ extractionData: ex }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'Save failed');
+    piHistoryDetailCache[entry.id] = data.data;
+    delete piHistoryCache[collId];
+    return data.data;
+  } catch (e) {
+    toast('error', 'Save failed', e.message);
+    return null;
+  }
+}
+
+function piHistCurrentEntry() {
+  if (!piHistoryDetailOpenId) return null;
+  return piHistoryDetailCache[piHistoryDetailOpenId];
+}
+
+async function piHistEditFrameworkNodeIdx(idx) {
+  const entry = piHistCurrentEntry();
+  if (!entry || !entry.extractionData) return;
+  const nodes = entry.extractionData.requirementNodes || [];
+  const n = nodes[idx];
+  if (!n) return;
+  const wrap = document.getElementById(`pi-hist-rn-body-${idx}`);
+  if (!wrap) return;
+  const assessChk = n.assessable ? ' checked' : '';
+  wrap.innerHTML = `<div class="pi-edit-form">
+    <div class="pi-edit-row"><label>Ref ID</label><input type="text" id="pi-hist-rn-ref-${idx}" class="pi-form-input" value="${esc(n.ref_id || '')}"></div>
+    <div class="pi-edit-row"><label>Name</label><input type="text" id="pi-hist-rn-name-${idx}" class="pi-form-input" value="${esc(n.name || '')}"></div>
+    <div class="pi-edit-row"><label>Description</label><textarea id="pi-hist-rn-desc-${idx}" class="pi-form-input" rows="4">${esc(n.description || '')}</textarea></div>
+    <div class="pi-edit-row-inline">
+      <div class="pi-edit-row"><label>Depth</label><input type="number" id="pi-hist-rn-depth-${idx}" class="pi-form-input" min="1" max="99" value="${Number(n.depth) || 1}"></div>
+      <div class="pi-edit-row" style="align-self:flex-end"><label style="visibility:hidden">Assess</label><label style="text-transform:none;font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="pi-hist-rn-assess-${idx}"${assessChk}> Assessable</label></div>
+    </div>
+    <div class="pi-edit-row"><label>URN (read-only)</label><input type="text" readonly class="pi-form-input" style="opacity:0.85" value="${esc(n.urn || '')}"></div>
+    <div class="pi-edit-actions"><button type="button" class="pi-btn pi-btn-view" onclick="piHistCancelFrameworkEdit(${idx})">Cancel</button><button type="button" class="btn-admin-primary" onclick="piHistSaveFrameworkEdit(${idx})">Save</button></div>
+  </div>`;
+}
+
+function piHistCancelFrameworkEdit(idx) {
+  const entry = piHistCurrentEntry();
+  if (!entry || !entry.extractionData) return;
+  const nodes = entry.extractionData.requirementNodes || [];
+  const n = nodes[idx];
+  const wrap = document.getElementById(`pi-hist-rn-body-${idx}`);
+  if (!wrap || !n) return;
+  wrap.innerHTML = n.description ? `<div class="pi-hist-detail-node-desc">${esc(n.description)}</div>` : '';
+}
+
+async function piHistSaveFrameworkEdit(idx) {
+  const entry = piHistCurrentEntry();
+  if (!entry || !entry.extractionData) return;
+  const nodes = entry.extractionData.requirementNodes || [];
+  const n = nodes[idx];
+  if (!n) return;
+  n.ref_id = document.getElementById(`pi-hist-rn-ref-${idx}`)?.value?.trim() ?? n.ref_id;
+  n.name = document.getElementById(`pi-hist-rn-name-${idx}`)?.value?.trim() || n.name;
+  n.description = document.getElementById(`pi-hist-rn-desc-${idx}`)?.value?.trim() || '';
+  n.depth = Math.max(1, parseInt(document.getElementById(`pi-hist-rn-depth-${idx}`)?.value, 10) || n.depth || 1);
+  n.assessable = !!document.getElementById(`pi-hist-rn-assess-${idx}`)?.checked;
+  const updated = await piHistPersistEntry(entry);
+  if (updated) {
+    toast('success', 'Saved', 'Framework node updated');
+    piRenderHistoryDetail(updated);
+  }
+}
+
+async function piHistDeleteFrameworkNodeIdx(idx) {
+  const entry = piHistCurrentEntry();
+  if (!entry || !entry.extractionData) return;
+  const nodes = entry.extractionData.requirementNodes || [];
+  const n = nodes[idx];
+  if (!n) return;
+  const rmIds = piFrameworkReviewIdsToRemove(n, nodes);
+  const rmCount = rmIds.size;
+  const msg = rmCount > 1
+    ? `Remove this node and ${rmCount - 1} descendant(s) from saved history?`
+    : 'Remove this requirement node from saved history?';
+  if (!(await showConfirm({ title: 'Remove node', message: msg, confirmText: 'Remove', type: 'warning' }))) return;
+  entry.extractionData.requirementNodes = nodes.filter(x => !rmIds.has(x.id));
+  const updated = await piHistPersistEntry(entry);
+  if (updated) {
+    toast('success', 'Removed', 'Framework node deleted');
+    piRenderHistoryDetail(updated);
+  }
+}
+
+function piHistEditControlIdx(idx) {
+  const entry = piHistCurrentEntry();
+  if (!entry || !entry.extractionData) return;
+  const policies = entry.extractionData.policies || [];
+  const p = policies[idx];
+  if (!p) return;
+  const wrap = document.getElementById(`pi-hist-rc-body-${idx}`);
+  if (!wrap) return;
+  const catOpts = ['policy', 'process', 'technical', 'physical', 'procedure'];
+  const csfOpts = ['govern', 'protect', 'detect', 'respond', 'recover', 'identify'];
+  const c = (p.category || 'policy').toLowerCase();
+  const f = (p.csfFunction || 'govern').toLowerCase();
+  const catSel = catOpts.map(x => `<option value="${x}"${c === x ? ' selected' : ''}>${x.charAt(0).toUpperCase() + x.slice(1)}</option>`).join('');
+  const csfSel = csfOpts.map(x => `<option value="${x}"${f === x ? ' selected' : ''}>${x.charAt(0).toUpperCase() + x.slice(1)}</option>`).join('');
+  wrap.innerHTML = `<div class="pi-edit-form">
+    <div class="pi-edit-row"><label>Name</label><input type="text" id="pi-hist-rc-name-${idx}" class="pi-form-input" value="${esc(p.name || '')}"></div>
+    <div class="pi-edit-row"><label>Ref / Code</label><input type="text" id="pi-hist-rc-code-${idx}" class="pi-form-input" value="${esc(p.code || '')}"></div>
+    <div class="pi-edit-row"><label>Description</label><textarea id="pi-hist-rc-desc-${idx}" class="pi-form-input" rows="4">${esc(p.description || '')}</textarea></div>
+    <div class="pi-edit-row-inline"><div class="pi-edit-row"><label>Category</label><select id="pi-hist-rc-cat-${idx}" class="pi-form-select">${catSel}</select></div><div class="pi-edit-row"><label>CSF Function</label><select id="pi-hist-rc-csf-${idx}" class="pi-form-select">${csfSel}</select></div></div>
+    <div class="pi-edit-actions"><button type="button" class="pi-btn pi-btn-view" onclick="piHistCancelControlEdit(${idx})">Cancel</button><button type="button" class="btn-admin-primary" onclick="piHistSaveControlEdit(${idx})">Save</button></div>
+  </div>`;
+}
+
+function piHistCancelControlEdit(idx) {
+  const entry = piHistCurrentEntry();
+  if (!entry || !entry.extractionData) return;
+  const p = entry.extractionData.policies[idx];
+  const wrap = document.getElementById(`pi-hist-rc-body-${idx}`);
+  if (!wrap || !p) return;
+  wrap.innerHTML = p.description ? `<div class="pi-hist-detail-control-desc">${esc(p.description)}</div>` : '';
+}
+
+async function piHistSaveControlEdit(idx) {
+  const entry = piHistCurrentEntry();
+  if (!entry || !entry.extractionData) return;
+  const p = entry.extractionData.policies[idx];
+  if (!p) return;
+  p.name = document.getElementById(`pi-hist-rc-name-${idx}`)?.value?.trim() || p.name;
+  p.code = document.getElementById(`pi-hist-rc-code-${idx}`)?.value?.trim() || p.code;
+  p.description = document.getElementById(`pi-hist-rc-desc-${idx}`)?.value?.trim() || '';
+  p.category = document.getElementById(`pi-hist-rc-cat-${idx}`)?.value || p.category;
+  p.csfFunction = document.getElementById(`pi-hist-rc-csf-${idx}`)?.value || p.csfFunction;
+  const updated = await piHistPersistEntry(entry);
+  if (updated) {
+    toast('success', 'Saved', 'Reference control updated');
+    piRenderHistoryDetail(updated);
+  }
+}
+
+async function piHistDeleteControlIdx(idx) {
+  const entry = piHistCurrentEntry();
+  if (!entry || !entry.extractionData) return;
+  if (!(await showConfirm({ title: 'Remove control', message: 'Remove this reference control from saved history?', confirmText: 'Remove', type: 'warning' }))) return;
+  const policies = entry.extractionData.policies || [];
+  policies.splice(idx, 1);
+  entry.extractionData.policies = policies;
+  const updated = await piHistPersistEntry(entry);
+  if (updated) {
+    toast('success', 'Removed', 'Reference control deleted');
+    piRenderHistoryDetail(updated);
+  }
+}
+
+window.piHistEditFrameworkNodeIdx = piHistEditFrameworkNodeIdx;
+window.piHistDeleteFrameworkNodeIdx = piHistDeleteFrameworkNodeIdx;
+window.piHistSaveFrameworkEdit = piHistSaveFrameworkEdit;
+window.piHistCancelFrameworkEdit = piHistCancelFrameworkEdit;
+window.piHistEditControlIdx = piHistEditControlIdx;
+window.piHistDeleteControlIdx = piHistDeleteControlIdx;
+window.piHistSaveControlEdit = piHistSaveControlEdit;
+window.piHistCancelControlEdit = piHistCancelControlEdit;
 
 function piBackFromHistoryDetail() {
   piPhase = 'collection-detail';
@@ -7908,6 +8128,8 @@ function piRenderReview() {
             <div class="pi-policy-tags">
               ${assessBadge}
               <span style="font-size:9px;color:#9ca3af">${depthLabel}</span>
+              <button type="button" class="pi-policy-edit-btn" onclick="event.stopPropagation();piEditFrameworkNode('${n.id}')" title="Edit"><svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M10.5 2.5L11.5 3.5L4 11H2.5V9.5L10.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+              <button type="button" class="pi-policy-delete-btn" onclick="event.stopPropagation();piDeleteFrameworkNode('${n.id}')" title="Delete"><svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M2 4H12M4 4V3C4 2.4 4.4 2 5 2H9C9.6 2 10 2.4 10 3V4M5 6.5V10.5M7 6.5V10.5M9 6.5V10.5M3 4L4 12H10L11 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
             </div>
           </div>
           <div class="pi-policy-detail${idx === 0 ? ' open' : ''}" id="pi-policy-detail-${n.id}">
@@ -8011,7 +8233,10 @@ function piRenderReview() {
                   <div class="pi-policy-toggle"><svg width="14" height="14" viewBox="0 0 12 12" fill="none"><path d="M5 3L8 6L5 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
                   <span class="pi-policy-code" style="min-width:40px">${esc(n.ref_id || '')}</span>
                   <span class="pi-policy-name">${esc(n.name)}</span>
-                  <div class="pi-policy-tags">${assessBadge}<span style="font-size:9px;color:#9ca3af">${depthLabel}</span></div>
+                  <div class="pi-policy-tags">${assessBadge}<span style="font-size:9px;color:#9ca3af">${depthLabel}</span>
+                  <button type="button" class="pi-policy-edit-btn" onclick="event.stopPropagation();piEditFrameworkNode('${n.id}')" title="Edit"><svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M10.5 2.5L11.5 3.5L4 11H2.5V9.5L10.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+                  <button type="button" class="pi-policy-delete-btn" onclick="event.stopPropagation();piDeleteFrameworkNode('${n.id}')" title="Delete"><svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M2 4H12M4 4V3C4 2.4 4.4 2 5 2H9C9.6 2 10 2.4 10 3V4M5 6.5V10.5M7 6.5V10.5M9 6.5V10.5M3 4L4 12H10L11 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                  </div>
                 </div>
                 <div class="pi-policy-detail" id="pi-policy-detail-${n.id}">
                   ${n.description ? `<div class="pi-policy-detail-section"><div class="pi-policy-detail-label">Description</div><p class="pi-policy-detail-text">${esc(n.description)}</p></div>` : ''}
@@ -8076,6 +8301,57 @@ function piTogglePolicy(id) {
   }
 }
 window.piTogglePolicy = piTogglePolicy;
+
+async function piDeleteFrameworkNode(id) {
+  const n = piReviewNodes.find(x => x.id === id);
+  if (!n) return;
+  const rm = piFrameworkReviewIdsToRemove(n, piReviewNodes);
+  const msg = rm.size > 1
+    ? `Remove this node and ${rm.size - 1} descendant(s)?`
+    : 'Remove this requirement node?';
+  if (!(await showConfirm({ title: 'Remove node', message: msg, confirmText: 'Remove', type: 'warning' }))) return;
+  piReviewNodes = piReviewNodes.filter(x => !rm.has(x.id));
+  piSyncFrameworkResultFromReview();
+  piRender();
+}
+window.piDeleteFrameworkNode = piDeleteFrameworkNode;
+
+function piEditFrameworkNode(id) {
+  const n = piReviewNodes.find(x => x.id === id);
+  if (!n) return;
+  const det = document.getElementById(`pi-policy-detail-${id}`);
+  if (!det) return;
+  det.classList.add('open');
+  const item = det.closest('.pi-policy-item');
+  if (item) { const t = item.querySelector('.pi-policy-toggle svg path'); if (t) t.setAttribute('d', 'M3 5L6 8L9 5'); }
+  const assessChk = n.assessable ? ' checked' : '';
+  det.innerHTML = `<div class="pi-edit-form">
+    <div class="pi-edit-row"><label>Ref ID</label><input type="text" id="pi-fn-edit-ref-${id}" class="pi-form-input" value="${esc(n.ref_id || '')}"></div>
+    <div class="pi-edit-row"><label>Name</label><input type="text" id="pi-fn-edit-name-${id}" class="pi-form-input" value="${esc(n.name)}"></div>
+    <div class="pi-edit-row"><label>Description</label><textarea id="pi-fn-edit-desc-${id}" class="pi-form-input" rows="4">${esc(n.description || '')}</textarea></div>
+    <div class="pi-edit-row-inline">
+      <div class="pi-edit-row"><label>Depth</label><input type="number" id="pi-fn-edit-depth-${id}" class="pi-form-input" min="1" max="99" value="${Number(n.depth) || 1}"></div>
+      <div class="pi-edit-row" style="align-self:flex-end"><label style="visibility:hidden">—</label><label style="text-transform:none;font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="pi-fn-edit-assess-${id}"${assessChk}> Assessable</label></div>
+    </div>
+    <div class="pi-edit-row"><label>URN (read-only)</label><input type="text" readonly class="pi-form-input" style="opacity:0.85" value="${esc(n.urn || '')}"></div>
+    <div class="pi-edit-actions"><button type="button" class="pi-btn pi-btn-view" onclick="piRender()">Cancel</button><button type="button" class="btn-admin-primary" onclick='piSaveFrameworkNodeEdit(${JSON.stringify(id)})'>Save Changes</button></div>
+  </div>`;
+}
+window.piEditFrameworkNode = piEditFrameworkNode;
+
+function piSaveFrameworkNodeEdit(id) {
+  const n = piReviewNodes.find(x => x.id === id);
+  if (!n) return;
+  n.ref_id = document.getElementById(`pi-fn-edit-ref-${id}`)?.value?.trim() ?? n.ref_id;
+  n.name = document.getElementById(`pi-fn-edit-name-${id}`)?.value?.trim() || n.name;
+  n.description = document.getElementById(`pi-fn-edit-desc-${id}`)?.value?.trim() || '';
+  n.depth = Math.max(1, parseInt(document.getElementById(`pi-fn-edit-depth-${id}`)?.value, 10) || n.depth || 1);
+  n.assessable = !!document.getElementById(`pi-fn-edit-assess-${id}`)?.checked;
+  piSyncFrameworkResultFromReview();
+  toast('success', 'Saved', `Updated "${n.name}"`);
+  piRender();
+}
+window.piSaveFrameworkNodeEdit = piSaveFrameworkNodeEdit;
 
 async function piDeletePolicy(id) {
   if (!await showConfirm({ title: 'Remove Control', message: 'Remove this control from the list?', confirmText: 'Remove', type: 'warning' })) return;

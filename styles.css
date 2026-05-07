@@ -3371,13 +3371,13 @@ body.chat-page .navbar {
 
 .prompt-form {
   display: flex;
-  flex-direction: column;
+    flex-direction: column;
   gap: 1rem;
-}
+  }
 
 .prompt-form-group {
   display: flex;
-  flex-direction: column;
+    flex-direction: column;
   gap: 0.375rem;
 }
 
