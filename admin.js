@@ -8456,8 +8456,8 @@ function formatTimestamp(ts) {
   try { return new Date(ts).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }); } catch(_) { return ts; }
 }
 
-const wbIconEye = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 7C1 7 3 3 7 3C11 3 13 7 13 7C13 7 11 11 7 11C3 11 1 7 1 7Z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="7" cy="7" r="2" stroke="currentColor" stroke-width="1.3"/></svg>';
-const wbIconEyeOff = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 7C1 7 3 3 7 3C11 3 13 7 13 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M2 12L12 2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+const wbIconEye = '<svg width="18" height="18" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M1 7C1 7 3 3 7 3C11 3 13 7 13 7C13 7 11 11 7 11C3 11 1 7 1 7Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="7" cy="7" r="2" stroke="currentColor" stroke-width="1.5"/></svg>';
+const wbIconEyeOff = '<svg width="18" height="18" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M1 7C1 7 3 3 7 3C11 3 13 7 13 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M2 12L12 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
 
 function wbShowView(view) {
   document.getElementById('wb-content').style.display = view === 'grid' ? '' : 'none';
@@ -9226,7 +9226,7 @@ function showItemEditor(type, existingItem, onSave) {
       <textarea class="wb-inline-textarea wb-ar-input" rows="3" dir="rtl" placeholder="المحتوى بالعربي...">${escapeHtml(contentAr)}</textarea>
     </div>
     <div class="wb-editor-row">
-      <label class="wb-editor-label">English ${isNote ? '<span class="wb-optional">(optional)</span>' : '<span class="wb-required">*</span>'}</label>
+      <label class="wb-editor-label">English <span class="wb-optional">(optional)</span></label>
       <textarea class="wb-inline-textarea wb-en-input" rows="2" placeholder="English content...">${escapeHtml(contentEn)}</textarea>
     </div>
     <div class="wb-inline-actions">
@@ -9252,7 +9252,6 @@ function showItemEditor(type, existingItem, onSave) {
     const ar = editor.querySelector('.wb-ar-input').value.trim();
     const en = editor.querySelector('.wb-en-input').value.trim();
     if (!ar) { editor.querySelector('.wb-ar-input').classList.add('wb-input-error'); return; }
-    if (!isNote && !en) { editor.querySelector('.wb-en-input').classList.add('wb-input-error'); return; }
 
     const result = { content_ar: ar, content_en: en };
     if (isEvidence) result.title = editor.querySelector('.wb-inline-title').value.trim();
