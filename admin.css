@@ -4930,7 +4930,56 @@
 .pi-file-viewer-image { max-width: 100%; max-height: 100%; object-fit: contain; display: block; margin: auto; padding: 20px; }
 
 /* Upload drop zone */
-.pi-dropzone { margin-top: 20px; border: 2px dashed #e5e7eb; border-radius: 12px; padding: 24px; text-align: center; cursor: pointer; transition: all 0.15s; }
+.pi-detail-upload-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.pi-dropzone-links {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+}
+.pi-dropzone-links-sep {
+  color: #d1d5db;
+  user-select: none;
+}
+.pi-dropzone-btn {
+  background: none;
+  border: none;
+  padding: 4px 6px;
+  margin: 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(var(--admin-primary-rgb, 0,119,204), 1);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.pi-dropzone-btn:hover {
+  color: rgba(var(--admin-primary-rgb, 0,119,204), 0.85);
+}
+
+.pi-dropzone.pi-dropzone-active {
+  border-color: rgba(var(--admin-primary-rgb, 0,119,204), 0.45);
+  background: rgba(var(--admin-primary-rgb, 0,119,204), 0.06);
+}
+.pi-dropzone {
+  margin-top: 20px;
+  border: 2px dashed #e5e7eb;
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
 .pi-dropzone:hover { border-color: rgba(var(--admin-primary-rgb, 0,119,204), 0.3); background: rgba(var(--admin-primary-rgb, 0,119,204), 0.02); }
 .pi-dropzone svg { color: #d1d5db; margin-bottom: 8px; }
 .pi-dropzone p { font-size: 12px; color: #6b7280; margin: 0; }

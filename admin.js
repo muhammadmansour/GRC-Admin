@@ -6752,6 +6752,9 @@ function piRender() {
       el.innerHTML += piRenderConfigModal(coll);
       piLoadFoldersForConfig(); // Load GRC folders into the selector
     }
+    if (coll && piActiveTab === 'files') {
+      queueMicrotask(() => piAttachPolicyDropzone(coll.id));
+    }
   } else if (piPhase === 'generating') {
     el.innerHTML = piRenderProgress();
     piStartProgressAnimation();
@@ -6940,12 +6943,18 @@ function piRenderCollectionDetail(coll) {
   const filesTabContent = `
     ${filesHtml}
     <div id="pi-upload-progress-container"></div>
-    <div class="pi-dropzone" onclick="piTriggerUpload()">
+    <div class="pi-dropzone" id="pi-dropzone-root" onclick="piTriggerUpload()">
       <svg width="24" height="24" viewBox="0 0 16 16" fill="none"><path d="M14 10V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 5L8 2L5 5M8 2V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <p>Drag files here or click to browse</p>
-      <p class="pi-dropzone-hint">PDF, DOCX, PPTX, TXT, PNG, JPG — Max 50 MB per file</p>
+      <p>Drag files or folders here, or browse below</p>
+      <div class="pi-dropzone-links" onclick="event.stopPropagation()">
+        <button type="button" class="pi-dropzone-btn" onclick="piTriggerUpload()">Browse files</button>
+        <span class="pi-dropzone-links-sep">·</span>
+        <button type="button" class="pi-dropzone-btn" onclick="piTriggerFolderUpload()">Browse folder</button>
+      </div>
+      <p class="pi-dropzone-hint">PDF, DOCX, PPTX, TXT, PNG, JPG — subfolders included for folder uploads. Max 50 MB per file.</p>
     </div>
-    <input type="file" id="pi-file-input" style="display:none" multiple accept=".pdf,.docx,.pptx,.txt,.png,.jpg,.jpeg" onchange="piHandleFileUpload(event)">`;
+    <input type="file" id="pi-file-input" style="display:none" multiple accept=".pdf,.docx,.pptx,.txt,.png,.jpg,.jpeg" onchange="piHandleFileUpload(event)">
+    <input type="file" id="pi-folder-input" style="display:none" webkitdirectory directory multiple onchange="piHandleFolderUpload(event)">`;
 
   // ── History Tab Content ──
   const history = piHistoryCache[coll.id] || [];
@@ -7044,8 +7053,9 @@ function piRenderCollectionDetail(coll) {
           <input type="text" class="pi-detail-desc-input" id="pi-desc-input" value="${esc(coll.description)}" style="display:none" placeholder="Add a description..." onblur="piCommitDesc()" onkeydown="piDescKeydown(event)">
           <div class="pi-detail-file-count">${coll.files.length} ${coll.files.length === 1 ? 'file' : 'files'}</div>
         </div>
-        <div class="pi-detail-actions">
-          <button class="pi-btn pi-btn-view" onclick="piTriggerUpload()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M12 8V11C12 11.6 11.6 12 11 12H3C2.4 12 2 11.6 2 11V8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M9.5 4L7 1.5L4.5 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 1.5V8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg> Upload Files</button>
+        <div class="pi-detail-actions pi-detail-upload-actions">
+          <button type="button" class="pi-btn pi-btn-view" onclick="piTriggerUpload()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M12 8V11C12 11.6 11.6 12 11 12H3C2.4 12 2 11.6 2 11V8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M9.5 4L7 1.5L4.5 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 1.5V8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg> Upload Files</button>
+          <button type="button" class="pi-btn pi-btn-view" onclick="piTriggerFolderUpload()" title="Upload all supported files from a folder (including subfolders)"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4.5h3l1.2-1.5h5.8a1 1 0 011 1V11a1 1 0 01-1 1H2a1 1 0 01-1-1V5.5a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 6.5h10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".35"/></svg> Upload folder</button>
           <button class="btn-admin-primary" onclick="piGenerateFromDetail()" ${genDisabled ? 'disabled' : ''} title="${genDisabled ? 'Select files first' : ''}"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L8.5 4L12 4.5L9.5 7L10 10.5L7 9L4 10.5L4.5 7L2 4.5L5.5 4L7 1Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/></svg> ${genLabel}</button>
         </div>
       </div>
@@ -7666,28 +7676,139 @@ async function piDeleteFile(fileId) {
 }
 window.piDeleteFile = piDeleteFile;
 
+/** Policy ingestion: allowed file extensions (basename), case-insensitive */
+const PI_UPLOAD_EXT_RE = /\.(pdf|docx|pptx|txt|png|jpe?g)$/i;
+
+function piPolicyUploadDisplayName(file) {
+  const rp = file.webkitRelativePath || file._piRelPath;
+  if (rp && String(rp).trim()) return String(rp).replace(/\\/g, '/');
+  return file.name;
+}
+
+function piFilterPolicyIngestionFiles(fileList) {
+  return fileList.filter(f => PI_UPLOAD_EXT_RE.test(f.name));
+}
+
+function piReadEntriesBatch(reader) {
+  return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+}
+
+async function piWalkDirectoryEntry(dirEntry, pathPrefix, out) {
+  const reader = dirEntry.createReader();
+  let batch;
+  do {
+    batch = await piReadEntriesBatch(reader);
+    for (let i = 0; i < batch.length; i++) {
+      const ent = batch[i];
+      const rel = pathPrefix ? `${pathPrefix}/${ent.name}` : ent.name;
+      if (ent.isFile) {
+        await new Promise((resolve, reject) => {
+          ent.file(
+            f => {
+              try {
+                Object.defineProperty(f, 'webkitRelativePath', { value: rel, configurable: true });
+              } catch (e) {
+                f._piRelPath = rel;
+              }
+              out.push(f);
+              resolve();
+            },
+            reject
+          );
+        });
+      } else if (ent.isDirectory) {
+        await piWalkDirectoryEntry(ent, rel, out);
+      }
+    }
+  } while (batch.length > 0);
+}
+
+async function piCollectFilesFromDataTransfer(dt) {
+  const out = [];
+  if (!dt) return out;
+  if (dt.items && dt.items.length) {
+    for (let i = 0; i < dt.items.length; i++) {
+      const item = dt.items[i];
+      const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+      if (entry) {
+        if (entry.isFile) {
+          await new Promise((resolve, reject) => entry.file(f => { out.push(f); resolve(); }, reject));
+        } else if (entry.isDirectory) {
+          await piWalkDirectoryEntry(entry, entry.name, out);
+        }
+      } else if (item.kind === 'file') {
+        const f = item.getAsFile();
+        if (f) out.push(f);
+      }
+    }
+    return out;
+  }
+  if (dt.files && dt.files.length) return Array.from(dt.files);
+  return out;
+}
+
 function piTriggerUpload() {
   document.getElementById('pi-file-input')?.click();
 }
 window.piTriggerUpload = piTriggerUpload;
 
-async function piHandleFileUpload(event) {
-  const coll = piCollections.find(c => c.id === piSelectedCollectionId);
-  if (!coll) return;
-  const filesToUpload = Array.from(event.target.files);
-  event.target.value = '';
+function piTriggerFolderUpload() {
+  document.getElementById('pi-folder-input')?.click();
+}
+window.piTriggerFolderUpload = piTriggerFolderUpload;
+
+function piAttachPolicyDropzone(collId) {
+  const root = document.getElementById('pi-dropzone-root');
+  if (!root || collId !== piSelectedCollectionId) return;
+
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  const enterOver = (e) => { stop(e); root.classList.add('pi-dropzone-active'); };
+  const maybeLeave = (e) => {
+    if (!root.contains(e.relatedTarget)) root.classList.remove('pi-dropzone-active');
+  };
+
+  root.addEventListener('dragenter', enterOver);
+  root.addEventListener('dragover', enterOver);
+  root.addEventListener('dragleave', maybeLeave);
+  root.addEventListener('drop', async (e) => {
+    stop(e);
+    root.classList.remove('pi-dropzone-active');
+    const coll = piCollections.find(c => c.id === collId);
+    if (!coll) return;
+    let raw = [];
+    try {
+      raw = await piCollectFilesFromDataTransfer(e.dataTransfer);
+    } catch (err) {
+      console.warn('Drop scan error:', err);
+      toast('error', 'Drop failed', err.message || 'Could not read dropped items');
+      return;
+    }
+    const files = piFilterPolicyIngestionFiles(raw);
+    if (raw.length && !files.length) {
+      toast('info', 'No supported files', 'Only PDF, DOCX, PPTX, TXT, PNG, and JPG are accepted.');
+      return;
+    }
+    if (files.length < raw.length) {
+      toast('info', 'Some files skipped', `${raw.length - files.length} file(s) ignored (unsupported type).`);
+    }
+    await piUploadFilesToCollection(coll, files);
+  });
+}
+
+async function piUploadFilesToCollection(coll, filesToUpload) {
+  if (!coll || !filesToUpload.length) return;
 
   const container = document.getElementById('pi-upload-progress-container');
 
   for (const file of filesToUpload) {
-    // Create a unique progress bar element for this file
+    const displayName = piPolicyUploadDisplayName(file);
     const uid = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
     const progressEl = document.createElement('div');
     progressEl.className = 'pi-upload-progress';
     progressEl.id = uid;
     progressEl.innerHTML = `
       <div class="pi-upload-progress-info">
-        <span class="pi-upload-progress-name" title="${esc(file.name)}">${esc(file.name)}</span>
+        <span class="pi-upload-progress-name" title="${esc(displayName)}">${esc(displayName)}</span>
         <span class="pi-upload-progress-pct">0%</span>
       </div>
       <div class="pi-upload-progress-bar"><div class="pi-upload-progress-fill" style="width:0%"></div></div>
@@ -7705,7 +7826,6 @@ async function piHandleFileUpload(event) {
     };
 
     try {
-      // Step 1: Read file as base64
       setProgress(10, 'Reading file…');
       const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -7714,24 +7834,20 @@ async function piHandleFileUpload(event) {
         reader.readAsDataURL(file);
       });
 
-      // Step 2: Uploading to server + Wathbah AI
       setProgress(30, 'Uploading to server…');
 
-      // Use XMLHttpRequest for real upload progress
-      const data = await new Promise((resolve, reject) => {
+      await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `${PI_API}/${coll.id}/files`);
         xhr.setRequestHeader('Content-Type', 'application/json');
 
-        let uploadDone = false;
         xhr.upload.addEventListener('progress', (e) => {
           if (e.lengthComputable) {
-            const uploadPct = 30 + (e.loaded / e.total) * 40; // 30% → 70%
+            const uploadPct = 30 + (e.loaded / e.total) * 40;
             setProgress(uploadPct, 'Uploading…');
           }
         });
         xhr.upload.addEventListener('load', () => {
-          uploadDone = true;
           setProgress(75, 'Syncing to Wathbah AI… please wait');
         });
 
@@ -7749,19 +7865,19 @@ async function piHandleFileUpload(event) {
         };
         xhr.onerror = () => reject(new Error('Network error'));
         xhr.ontimeout = () => reject(new Error('Upload timed out'));
-        xhr.timeout = 300000; // 5 min timeout
+        xhr.timeout = 300000;
 
-        xhr.send(JSON.stringify({ fileName: file.name, mimeType: file.type || 'application/octet-stream', data: base64 }));
+        xhr.send(JSON.stringify({
+          fileName: displayName,
+          mimeType: file.type || 'application/octet-stream',
+          data: base64,
+        }));
       });
 
-      // Step 3: Processing response
       setProgress(90, 'Processing…');
-
-      // Step 4: Done — show success
       setProgress(100, 'Uploaded successfully ✓');
       progressEl.classList.add('pi-upload-success');
 
-      // Auto-remove success indicator after 3 seconds
       setTimeout(() => {
         progressEl.style.transition = 'opacity 0.4s ease, max-height 0.4s ease, margin 0.4s ease, padding 0.4s ease';
         progressEl.style.opacity = '0';
@@ -7770,13 +7886,10 @@ async function piHandleFileUpload(event) {
         progressEl.style.padding = '0 14px';
         setTimeout(() => progressEl.remove(), 450);
       }, 3000);
-
     } catch (err) {
-      // Show error state — keep visible so user can see what failed
       setProgress(100, `Failed: ${err.message}`);
       progressEl.classList.add('pi-upload-error');
 
-      // Auto-remove error indicator after 6 seconds
       setTimeout(() => {
         progressEl.style.transition = 'opacity 0.4s ease, max-height 0.4s ease, margin 0.4s ease, padding 0.4s ease';
         progressEl.style.opacity = '0';
@@ -7786,10 +7899,10 @@ async function piHandleFileUpload(event) {
         setTimeout(() => progressEl.remove(), 450);
       }, 6000);
 
-      toast('error', 'Upload Error', `"${file.name}": ${err.message}`);
+      toast('error', 'Upload Error', `"${displayName}": ${err.message}`);
     }
   }
-  // Refresh collection data from server (files come from Gemini now)
+
   try {
     const freshData = await fetchJSON(`${PI_API}/${coll.id}`);
     if (freshData.success && freshData.data) {
@@ -7798,16 +7911,39 @@ async function piHandleFileUpload(event) {
     }
   } catch (e) { console.warn('Could not refresh collection:', e); }
 
-  // Save any still-visible progress bars before re-render
   const liveProgressBars = container ? Array.from(container.children) : [];
   piRender();
-  // Re-attach surviving progress bars
   const newContainer = document.getElementById('pi-upload-progress-container');
   if (newContainer) {
     liveProgressBars.forEach(bar => newContainer.appendChild(bar));
   }
 }
+
+async function piHandleFileUpload(event) {
+  const coll = piCollections.find(c => c.id === piSelectedCollectionId);
+  if (!coll) return;
+  const filesToUpload = Array.from(event.target.files || []);
+  event.target.value = '';
+  await piUploadFilesToCollection(coll, filesToUpload);
+}
 window.piHandleFileUpload = piHandleFileUpload;
+
+async function piHandleFolderUpload(event) {
+  const coll = piCollections.find(c => c.id === piSelectedCollectionId);
+  if (!coll) return;
+  const raw = Array.from(event.target.files || []);
+  event.target.value = '';
+  const files = piFilterPolicyIngestionFiles(raw);
+  if (raw.length && !files.length) {
+    toast('info', 'No supported files', 'This folder has no PDF, DOCX, PPTX, TXT, PNG, or JPG files.');
+    return;
+  }
+  if (files.length < raw.length) {
+    toast('info', 'Some files skipped', `${raw.length - files.length} file(s) ignored (unsupported type).`);
+  }
+  await piUploadFilesToCollection(coll, files);
+}
+window.piHandleFolderUpload = piHandleFolderUpload;
 
 function piGenerateFromDetail() {
   piPhase = 'config-modal';
