@@ -915,34 +915,45 @@ const dbListGenHistory = db.prepare(`SELECT * FROM policy_generation_history WHE
 const dbGetLatestGenHistory = db.prepare(`SELECT * FROM policy_generation_history WHERE collection_id = ? ORDER BY created_at DESC LIMIT 1`);
 const dbGetGenHistoryById = db.prepare(`SELECT * FROM policy_generation_history WHERE id = ?`);
 
-async function policyCollectionToJSON(row, apiKey) {
-  const storeId = row.store_id || '';
+function mapGeminiDocToPolicyFile(doc) {
+  const displayName = doc.displayName || doc.name || '';
+  const docName = doc.name || '';
+  const docId = docName.split('/').pop();
+  const ext = displayName.split('.').pop().toLowerCase();
+  const sizeBytes = parseInt(doc.sizeBytes || '0', 10);
+  return {
+    id: docId,
+    documentName: docName,
+    name: displayName,
+    type: ext,
+    state: doc.state || 'UNKNOWN',
+    mimeType: doc.mimeType || '',
+    sizeBytes,
+    size: sizeBytes > 1024 * 1024 ? (sizeBytes / (1024 * 1024)).toFixed(1) + ' MB' : (sizeBytes / 1024).toFixed(0) + ' KB',
+    createTime: doc.createTime || '',
+    updateTime: doc.updateTime || '',
+  };
+}
 
-  // Fetch files directly from Gemini File Search Store (same as Audit Studio)
+async function policyCollectionToJSON(row, apiKey, opts = {}) {
+  const summaryOnly = opts.summaryOnly === true;
+  const filesPageToken = typeof opts.filesPageToken === 'string' ? opts.filesPageToken : '';
+
+  const storeId = row.store_id || '';
   let files = [];
+  let fileCount = 0;
+  let filesNextPageToken = '';
+
   if (storeId && apiKey) {
     try {
       const storeName = storeId.startsWith('fileSearchStores/') ? storeId : `fileSearchStores/${storeId}`;
-      const result = await listStoreDocuments(storeName, apiKey);
-      files = (result.documents || []).map(doc => {
-        const displayName = doc.displayName || doc.name || '';
-        const docName = doc.name || '';
-        const docId = docName.split('/').pop(); // e.g. "documents/abc" → "abc"
-        const ext = displayName.split('.').pop().toLowerCase();
-        const sizeBytes = parseInt(doc.sizeBytes || '0', 10);
-        return {
-          id: docId,
-          documentName: docName,
-          name: displayName,
-          type: ext,
-          state: doc.state || 'UNKNOWN',
-          mimeType: doc.mimeType || '',
-          sizeBytes,
-          size: sizeBytes > 1024 * 1024 ? (sizeBytes / (1024 * 1024)).toFixed(1) + ' MB' : (sizeBytes / 1024).toFixed(0) + ' KB',
-          createTime: doc.createTime || '',
-          updateTime: doc.updateTime || '',
-        };
-      });
+      fileCount = await getCachedDocumentCount(storeName, apiKey);
+
+      if (!summaryOnly) {
+        const page = await listStoreDocumentsPage(storeName, apiKey, FILE_SEARCH_DOCUMENT_PAGE_SIZE_UI, filesPageToken);
+        files = (page.documents || []).map(mapGeminiDocToPolicyFile);
+        filesNextPageToken = page.nextPageToken || '';
+      }
     } catch (err) {
       console.warn(`[Policy] Could not list docs for store ${storeId}:`, err.message);
     }
@@ -953,11 +964,13 @@ async function policyCollectionToJSON(row, apiKey) {
     name: row.name,
     description: row.description || '',
     storeId,
-    status: files.length > 0 ? 'ready' : 'empty',
+    status: fileCount > 0 ? 'ready' : 'empty',
     config: JSON.parse(row.config || '{}'),
     extractionResult: row.extraction_result ? JSON.parse(row.extraction_result) : null,
     files,
-    fileCount: files.length,
+    fileCount,
+    filesNextPageToken: summaryOnly ? '' : filesNextPageToken,
+    filesPageSize: summaryOnly ? undefined : FILE_SEARCH_DOCUMENT_PAGE_SIZE_UI,
     lastUpdated: new Date(row.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -1845,27 +1858,69 @@ async function uploadFileToStore(storeName, fileName, mimeType, fileBuffer, apiK
   return uploadRes.json();
 }
 
-// List documents in a file search store (paginates; pageSize requested — API may cap lower)
-async function listStoreDocuments(storeName, apiKey) {
+/** UI list page size for policy collection file grids (Gemini `pageSize` / `pageToken`). */
+const FILE_SEARCH_DOCUMENT_PAGE_SIZE_UI = 20;
+/** Larger pages when aggregating all documents (extract, sync, overview). */
+const LIST_STORE_DOCUMENTS_PAGE_SIZE_BULK = 100;
+
+const policyStoreDocCountCache = new Map(); // bare store id -> { count, ts }
+
+function invalidatePolicyStoreDocCountCache(storeIdBare) {
+  if (storeIdBare == null || storeIdBare === '') return;
+  policyStoreDocCountCache.delete(String(storeIdBare).replace(/^fileSearchStores\//, ''));
+}
+
+async function listStoreDocumentsPage(storeName, apiKey, pageSize, pageToken) {
+  const safeSize = Math.min(100, Math.max(1, pageSize | 0 || FILE_SEARCH_DOCUMENT_PAGE_SIZE_UI));
+  const qs = new URLSearchParams({ key: apiKey, pageSize: String(safeSize) });
+  if (pageToken) qs.set('pageToken', pageToken);
+  const res = await fetch(`${GEMINI_BASE_URL}/${storeName}/documents?${qs}`);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`List documents failed (${res.status}): ${err}`);
+  }
+  const page = await res.json();
+  return {
+    documents: page.documents || [],
+    nextPageToken: typeof page.nextPageToken === 'string' ? page.nextPageToken : '',
+  };
+}
+
+async function listAllStoreDocuments(storeName, apiKey) {
   const allDocuments = [];
   let pageToken = '';
-  const pageSize = 100;
-
   do {
-    const qs = new URLSearchParams({ key: apiKey, pageSize: String(pageSize) });
-    if (pageToken) qs.set('pageToken', pageToken);
-    const res = await fetch(`${GEMINI_BASE_URL}/${storeName}/documents?${qs}`);
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`List documents failed (${res.status}): ${err}`);
-    }
-    const page = await res.json();
-    const docs = page.documents || [];
-    allDocuments.push(...docs);
-    pageToken = typeof page.nextPageToken === 'string' ? page.nextPageToken : '';
+    const page = await listStoreDocumentsPage(storeName, apiKey, LIST_STORE_DOCUMENTS_PAGE_SIZE_BULK, pageToken);
+    allDocuments.push(...(page.documents || []));
+    pageToken = page.nextPageToken || '';
   } while (pageToken);
-
   return { documents: allDocuments };
+}
+
+// List documents in a file search store (paginates until exhaustion)
+async function listStoreDocuments(storeName, apiKey) {
+  return listAllStoreDocuments(storeName, apiKey);
+}
+
+async function countDocumentsInStore(storeName, apiKey) {
+  let n = 0;
+  let pageToken = '';
+  do {
+    const page = await listStoreDocumentsPage(storeName, apiKey, LIST_STORE_DOCUMENTS_PAGE_SIZE_BULK, pageToken);
+    n += (page.documents || []).length;
+    pageToken = page.nextPageToken || '';
+  } while (pageToken);
+  return n;
+}
+
+async function getCachedDocumentCount(storeName, apiKey) {
+  const bare = storeName.replace(/^fileSearchStores\//, '');
+  const hit = policyStoreDocCountCache.get(bare);
+  const TTL_MS = 60000;
+  if (hit && Date.now() - hit.ts < TTL_MS) return hit.count;
+  const count = await countDocumentsInStore(storeName, apiKey);
+  policyStoreDocCountCache.set(bare, { count, ts: Date.now() });
+  return count;
 }
 
 // Delete a document from a file search store (force=true to delete even if it has chunks)
@@ -3907,10 +3962,10 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // GET /api/policy-collections — List all
+      // GET /api/policy-collections — List all (file counts only; no per-file payload)
       if (!collId && req.method === 'GET') {
         const rows = dbListPolicyCollections.all();
-        const collections = await Promise.all(rows.map(r => policyCollectionToJSON(r, apiKey)));
+        const collections = await Promise.all(rows.map(r => policyCollectionToJSON(r, apiKey, { summaryOnly: true })));
         sendJSON(res, 200, { success: true, data: collections });
         return;
       }
@@ -3966,6 +4021,7 @@ const server = http.createServer(async (req, res) => {
 
         // Delete the File Search Store (automatically deletes all docs inside)
         if (collRow && collRow.store_id) {
+          invalidatePolicyStoreDocCountCache(collRow.store_id);
           try {
             const storeName = `fileSearchStores/${collRow.store_id}`;
             console.log(`[Policy] Deleting store: ${storeName}`);
@@ -4003,11 +4059,15 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // GET /api/policy-collections/:id — Get single collection
+      // GET /api/policy-collections/:id — Get single collection (files page via Gemini pageToken)
       if (collId && !subResource && req.method === 'GET') {
         const row = dbGetPolicyCollection.get(collId);
         if (!row) { sendJSON(res, 404, { error: 'Not found' }); return; }
-        sendJSON(res, 200, { success: true, data: await policyCollectionToJSON(row, apiKey) });
+        const filesPageToken = url.searchParams.get('filesPageToken') || '';
+        sendJSON(res, 200, {
+          success: true,
+          data: await policyCollectionToJSON(row, apiKey, { filesPageToken }),
+        });
         return;
       }
 
@@ -4088,6 +4148,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         console.log(`[Policy] File "${fileName}" uploaded to store ${storeId}`);
+        invalidatePolicyStoreDocCountCache(storeId);
         const indexingStatus = await buildPolicyIndexingStatus(finalResult, apiKey);
         sendJSON(res, 200, { success: true, data: finalResult, indexingStatus });
         return;
@@ -4168,6 +4229,7 @@ const server = http.createServer(async (req, res) => {
         const documentName = `fileSearchStores/${storeId}/documents/${fileId}`;
         console.log(`[Policy] Deleting document: ${documentName}`);
         await deleteDocument(documentName, apiKey);
+        invalidatePolicyStoreDocCountCache(storeId);
 
         sendJSON(res, 200, { success: true });
         return;

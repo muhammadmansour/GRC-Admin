@@ -6678,6 +6678,44 @@ let piHistoryCache = {}; // collectionId -> history array
 // API base for policy collections
 const PI_API = '/api/policy-collections';
 
+function piCollectionFileCount(c) {
+  if (!c) return 0;
+  const n = c.fileCount != null ? Number(c.fileCount) : (Array.isArray(c.files) ? c.files.length : 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Gemini page tokens for Previous / Next in collection file grid */
+let piFilesPagePrevTokens = [];
+let piFilesPageActiveToken = '';
+let piFilesDisplayStart = 0;
+let piFilesDisplayEnd = 0;
+let piFilesPageLoading = false;
+
+async function piRefreshCollectionDetail(collId, filesPageToken, rangeMode = 'reset') {
+  const qs = new URLSearchParams();
+  if (filesPageToken) qs.set('filesPageToken', filesPageToken);
+  const suffix = qs.toString() ? `?${qs}` : '';
+  const fresh = await fetchJSON(`${PI_API}/${collId}${suffix}`);
+  if (!fresh.success || !fresh.data) throw new Error(fresh.error || 'Failed to load collection');
+  const data = fresh.data;
+  const idx = piCollections.findIndex(c => c.id === collId);
+  if (idx >= 0) piCollections[idx] = data;
+  else piCollections.push(data);
+
+  piFilesPageActiveToken = filesPageToken;
+
+  const len = (data.files || []).length;
+  if (rangeMode === 'reset') {
+    piFilesDisplayStart = len ? 1 : 0;
+    piFilesDisplayEnd = len;
+  } else if (rangeMode === 'next') {
+    piFilesDisplayStart = piFilesDisplayEnd + 1;
+    piFilesDisplayEnd = piFilesDisplayStart + len - 1;
+  } else if (rangeMode === 'prev') {
+    piFilesDisplayEnd = piFilesDisplayStart - 1;
+    piFilesDisplayStart = len ? piFilesDisplayEnd - len + 1 : 0;
+  }
+}
 // Fetch GRC frameworks for the config modal (reuses existing cache)
 async function piFetchFrameworks() {
   if (piGrcFrameworksCache) return piGrcFrameworksCache;
@@ -6793,7 +6831,7 @@ function piRenderCollectionsList() {
     const genCount = c.generatedPoliciesCount != null ? ` (${c.generatedPoliciesCount} policies)` : '';
     return `<tr>
       <td><div class="pi-coll-name"><div class="pi-coll-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H10L13 5V13C13 13.6 12.6 14 12 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5"/><path d="M5 8H10M5 10.5H8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div><div class="pi-coll-info"><div class="pi-coll-title">${esc(c.name)}</div>${c.description ? `<div class="pi-coll-desc">${esc(c.description)}</div>` : ''}</div></div></td>
-      <td class="center"><span class="pi-files-count">${c.files.length} ${c.files.length === 1 ? 'file' : 'files'}</span></td>
+      <td class="center"><span class="pi-files-count">${piCollectionFileCount(c)} ${piCollectionFileCount(c) === 1 ? 'file' : 'files'}</span></td>
       <td class="center"><span class="pi-status ${sc.cls}">${c.status === 'generated' ? '<svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M2 6L5 9L10 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg> ' : ''}${sc.label}${genCount}</span></td>
       <td class="center"><span class="pi-date">${esc(c.lastUpdated)}</span></td>
       <td class="right"><div class="pi-actions">
@@ -6829,6 +6867,11 @@ async function piCreateNew() {
     const data = await res.json();
     if (!data.success) throw new Error(data.error || 'Failed to create collection');
     piCollections.push(data.data);
+    piFilesPagePrevTokens = [];
+    piFilesPageActiveToken = '';
+    const d = data.data;
+    piFilesDisplayStart = (d.files || []).length ? 1 : 0;
+    piFilesDisplayEnd = (d.files || []).length;
     piSelectedCollectionId = data.data.id;
     piSelectedFileIds = [];
     piPhase = 'collection-detail';
@@ -6849,17 +6892,32 @@ async function piOpenCollection(id) {
   // Update URL to include collection ID
   updateRoute('policy-ingestion', id);
 
-  // Files are already fetched in policyCollectionToJSON (from Gemini Store) — no separate call needed
-  const coll = piCollections.find(c => c.id === id);
-  if (coll && !coll.files) coll.files = [];
+  piFilesPagePrevTokens = [];
+  piFilesPageActiveToken = '';
+  try {
+    await piRefreshCollectionDetail(id, '', 'reset');
+  } catch (err) {
+    console.warn('piOpenCollection refresh:', err);
+    toast('error', 'Load failed', err.message || 'Could not load files for this collection');
+    const coll = piCollections.find(c => c.id === id);
+    if (coll && !coll.files) coll.files = [];
+  }
   piRender();
 }
 window.piOpenCollection = piOpenCollection;
 
-function piStartGeneration(id) {
+async function piStartGeneration(id) {
   piSelectedCollectionId = id;
   piSelectedFileIds = [];
   piPhase = 'config-modal';
+  piFilesPagePrevTokens = [];
+  try {
+    await piRefreshCollectionDetail(id, '', 'reset');
+  } catch (err) {
+    console.warn('piStartGeneration:', err);
+    toast('error', 'Load failed', err.message || 'Could not load collection for generation');
+    piPhase = 'collections';
+  }
   piRender();
 }
 window.piStartGeneration = piStartGeneration;
@@ -6905,20 +6963,23 @@ window.piDeleteCollection = piDeleteCollection;
 // ─── Collection Detail ─────────────────────────────────
 function piRenderCollectionDetail(coll) {
   const fileTypeIcons = { pdf: 'pi-file-icon-pdf', docx: 'pi-file-icon-docx', pptx: 'pi-file-icon-pptx', txt: 'pi-file-icon-txt', png: 'pi-file-icon-png', jpg: 'pi-file-icon-jpg' };
-  const allSelected = piSelectedFileIds.length === coll.files.length && coll.files.length > 0;
+  const totalFiles = piCollectionFileCount(coll);
+  const pageFiles = coll.files || [];
+  const pageIds = pageFiles.map(f => f.id);
+  const allPageSelected = pageIds.length > 0 && pageIds.every(id => piSelectedFileIds.includes(id));
   const hasSelectedFiles = piSelectedFileIds.length > 0;
-  const genLabel = hasSelectedFiles ? `Generate (${piSelectedFileIds.length} files)` : 'Generate';
-  const genDisabled = !hasSelectedFiles;
+  const genLabel = hasSelectedFiles ? `Generate (${piSelectedFileIds.length} selected)` : 'Generate (all files)';
+  const genDisabled = totalFiles === 0;
 
   // ── Files Tab Content ──
   let filesHtml = '';
-  if (coll.files.length > 0) {
+  if (pageFiles.length > 0) {
     const selectAll = `<div class="pi-select-all">
-      <label><input type="checkbox" ${allSelected ? 'checked' : ''} onchange="piToggleAllFiles()"><span>Select All</span></label>
+      <label><input type="checkbox" ${allPageSelected ? 'checked' : ''} onchange="piToggleAllFiles()"><span>Select all on this page</span></label>
       ${piSelectedFileIds.length > 0 ? `<span class="pi-selected-count">(${piSelectedFileIds.length} selected)</span>` : ''}
     </div>`;
 
-    const cards = coll.files.map(f => {
+    const cards = pageFiles.map(f => {
       const sel = piSelectedFileIds.includes(f.id);
       const isActive = f.state === 'STATE_ACTIVE';
       const stateLabel = isActive ? '☁ Active' : (f.state === 'STATE_PENDING' ? '⏳ Processing...' : '⏳ ' + (f.state || ''));
@@ -6935,7 +6996,23 @@ function piRenderCollectionDetail(coll) {
       </div>`;
     }).join('');
 
-    filesHtml = selectAll + `<div class="pi-files-grid">${cards}</div>`;
+    const needsPager = piFilesPagePrevTokens.length > 0 || !!(coll.filesNextPageToken);
+    const prevDis = piFilesPagePrevTokens.length === 0 || piFilesPageLoading ? 'disabled' : '';
+    const nextDis = !(coll.filesNextPageToken) || piFilesPageLoading ? 'disabled' : '';
+    let filesFooter = '';
+    if (totalFiles > 0 && piFilesDisplayEnd >= piFilesDisplayStart && piFilesDisplayStart > 0) {
+      filesFooter = `<div class="pi-files-footer">
+        <span class="pi-files-page-range">${esc(`Showing ${piFilesDisplayStart}–${piFilesDisplayEnd} of ${totalFiles}`)}</span>
+        ${needsPager ? `<div class="pi-files-pagination-btns">
+          <button type="button" class="pi-btn pi-btn-view pi-files-page-btn" ${prevDis} onclick="piFilesPagePrev()">Previous</button>
+          <button type="button" class="pi-btn pi-btn-view pi-files-page-btn" ${nextDis} onclick="piFilesPageNext()">Next</button>
+        </div>` : ''}
+      </div>`;
+    }
+
+    filesHtml = selectAll + `<div class="pi-files-grid">${cards}</div>` + filesFooter;
+  } else if (totalFiles > 0) {
+    filesHtml = `<div class="pi-files-empty"><div class="pi-files-empty-icon"><svg width="20" height="20" viewBox="0 0 16 16" fill="none"><path d="M14 10V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 5L8 2L5 5M8 2V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div><p>No files on this page</p></div>`;
   } else {
     filesHtml = `<div class="pi-files-empty"><div class="pi-files-empty-icon"><svg width="20" height="20" viewBox="0 0 16 16" fill="none"><path d="M14 10V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 5L8 2L5 5M8 2V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div><p>No files in this collection</p></div>`;
   }
@@ -7048,12 +7125,12 @@ function piRenderCollectionDetail(coll) {
         <div>
           <div class="pi-detail-desc" onclick="piStartEditDesc()" id="pi-desc-display">${coll.description || 'Add a description...'} <svg class="pi-edit-icon" width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M10.5 2.5L11.5 3.5L4 11H2.5V9.5L10.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></div>
           <input type="text" class="pi-detail-desc-input" id="pi-desc-input" value="${esc(coll.description)}" style="display:none" placeholder="Add a description..." onblur="piCommitDesc()" onkeydown="piDescKeydown(event)">
-          <div class="pi-detail-file-count">${coll.files.length} ${coll.files.length === 1 ? 'file' : 'files'}</div>
+          <div class="pi-detail-file-count">${totalFiles} ${totalFiles === 1 ? 'file' : 'files'}</div>
         </div>
         <div class="pi-detail-actions pi-detail-upload-actions">
           <button type="button" class="pi-btn pi-btn-view" onclick="piTriggerUpload()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M12 8V11C12 11.6 11.6 12 11 12H3C2.4 12 2 11.6 2 11V8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M9.5 4L7 1.5L4.5 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 1.5V8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg> Upload Files</button>
           <button type="button" class="pi-btn pi-btn-view" onclick="piTriggerFolderUpload()" title="Upload all supported files from a folder (including subfolders)"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4.5h3l1.2-1.5h5.8a1 1 0 011 1V11a1 1 0 01-1 1H2a1 1 0 01-1-1V5.5a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 6.5h10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".35"/></svg> Upload folder</button>
-          <button class="btn-admin-primary" onclick="piGenerateFromDetail()" ${genDisabled ? 'disabled' : ''} title="${genDisabled ? 'Select files first' : ''}"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L8.5 4L12 4.5L9.5 7L10 10.5L7 9L4 10.5L4.5 7L2 4.5L5.5 4L7 1Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/></svg> ${genLabel}</button>
+          <button class="btn-admin-primary" onclick="piGenerateFromDetail()" ${genDisabled ? 'disabled' : ''} title="${genDisabled ? 'Upload files first' : (!hasSelectedFiles ? 'All files in this collection will be used' : '')}"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L8.5 4L12 4.5L9.5 7L10 10.5L7 9L4 10.5L4.5 7L2 4.5L5.5 4L7 1Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/></svg> ${genLabel}</button>
         </div>
       </div>
       <div id="pi-upload-progress-container"></div>
@@ -7062,7 +7139,7 @@ function piRenderCollectionDetail(coll) {
       <div class="pi-tabs">
         <button class="pi-tab${piActiveTab === 'files' ? ' active' : ''}" onclick="piSwitchTab('files')">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 2H10L13 5V13C13 13.6 12.6 14 12 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.3"/></svg>
-          Files <span class="pi-tab-count">${coll.files.length}</span>
+          Files <span class="pi-tab-count">${totalFiles}</span>
         </button>
         <button class="pi-tab${piActiveTab === 'history' ? ' active' : ''}" onclick="piSwitchTab('history')">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 1H10L13 4V14C13 14.6 12.6 15 12 15H3C2.4 15 2 14.6 2 14V2C2 1.4 2.4 1 3 1Z" stroke="currentColor" stroke-width="1.3"/><path d="M5 8H11M5 10.5H9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
@@ -7597,12 +7674,54 @@ window.piToggleFile = piToggleFile;
 
 function piToggleAllFiles() {
   const coll = piCollections.find(c => c.id === piSelectedCollectionId);
-  if (!coll) return;
-  if (piSelectedFileIds.length === coll.files.length) piSelectedFileIds = [];
-  else piSelectedFileIds = coll.files.map(f => f.id);
+  if (!coll || !coll.files || coll.files.length === 0) return;
+  const pageIds = coll.files.map(f => f.id);
+  const allPageSelected = pageIds.every(id => piSelectedFileIds.includes(id));
+  if (allPageSelected) {
+    piSelectedFileIds = piSelectedFileIds.filter(id => !pageIds.includes(id));
+  } else {
+    const set = new Set(piSelectedFileIds);
+    pageIds.forEach(pid => set.add(pid));
+    piSelectedFileIds = Array.from(set);
+  }
   piRender();
 }
 window.piToggleAllFiles = piToggleAllFiles;
+
+async function piFilesPageNext() {
+  if (piFilesPageLoading) return;
+  const coll = piCollections.find(c => c.id === piSelectedCollectionId);
+  if (!coll || !coll.filesNextPageToken) return;
+  piFilesPageLoading = true;
+  try {
+    const nextTok = coll.filesNextPageToken;
+    piFilesPagePrevTokens.push(piFilesPageActiveToken);
+    await piRefreshCollectionDetail(coll.id, nextTok, 'next');
+  } catch (err) {
+    piFilesPagePrevTokens.pop();
+    toast('error', 'Pagination', err.message || 'Could not load next page');
+  } finally {
+    piFilesPageLoading = false;
+    piRender();
+  }
+}
+window.piFilesPageNext = piFilesPageNext;
+
+async function piFilesPagePrev() {
+  if (piFilesPageLoading || piFilesPagePrevTokens.length === 0) return;
+  piFilesPageLoading = true;
+  const prevTok = piFilesPagePrevTokens.pop();
+  try {
+    await piRefreshCollectionDetail(piSelectedCollectionId, prevTok, 'prev');
+  } catch (err) {
+    piFilesPagePrevTokens.push(prevTok);
+    toast('error', 'Pagination', err.message || 'Could not load previous page');
+  } finally {
+    piFilesPageLoading = false;
+    piRender();
+  }
+}
+window.piFilesPagePrev = piFilesPagePrev;
 
 function piOpenFile(fileId, fileName, fileType) {
   const url = `${PI_API}/${piSelectedCollectionId}/files/${fileId}`;
@@ -7661,12 +7780,8 @@ async function piDeleteFile(fileId) {
     const data = await res.json();
     if (!data.success) throw new Error(data.error || 'Delete failed');
 
-    // Refresh collection from server (files come from Gemini)
-    const freshData = await fetchJSON(`${PI_API}/${coll.id}`);
-    if (freshData.success && freshData.data) {
-      const idx = piCollections.findIndex(c => c.id === coll.id);
-      if (idx >= 0) piCollections[idx] = freshData.data;
-    }
+    piFilesPagePrevTokens = [];
+    await piRefreshCollectionDetail(coll.id, '', 'reset');
     piSelectedFileIds = piSelectedFileIds.filter(id => id !== fileId);
     piRender();
     toast('success', 'Deleted', 'File removed from collection');
@@ -8069,11 +8184,8 @@ async function piUploadFilesToCollection(coll, filesToUpload) {
   rowEls.forEach(row => row.classList.remove('pi-upload-active'));
 
   try {
-    const freshData = await fetchJSON(`${PI_API}/${coll.id}`);
-    if (freshData.success && freshData.data) {
-      const idx = piCollections.findIndex(c => c.id === coll.id);
-      if (idx >= 0) piCollections[idx] = freshData.data;
-    }
+    piFilesPagePrevTokens = [];
+    await piRefreshCollectionDetail(coll.id, '', 'reset');
   } catch (e) { console.warn('Could not refresh collection:', e); }
 
   const liveProgressBars = container ? Array.from(container.children) : [];
@@ -8133,11 +8245,18 @@ window.piGenerateFromDetail = piGenerateFromDetail;
 
 // ─── Config Modal ──────────────────────────────────────
 function piRenderConfigModal(coll) {
-  const files = piSelectedFileIds.length > 0 ? coll.files.filter(f => piSelectedFileIds.includes(f.id)) : coll.files;
-
-  const filesList = files.map(f => `
+  const total = piCollectionFileCount(coll);
+  let filesBlock = '';
+  if (piSelectedFileIds.length > 0) {
+    const files = (coll.files || []).filter(f => piSelectedFileIds.includes(f.id));
+    filesBlock = files.map(f => `
     <div class="pi-included-file"><span>${esc(f.name)}</span><button onclick="piRemoveIncludedFile('${f.id}')"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M9 3L3 9M3 3L9 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button></div>
   `).join('');
+  } else if (total > 0) {
+    filesBlock = `<div class="pi-included-all-hint">${esc(`All ${total} file${total !== 1 ? 's' : ''} in this collection will be included.`)}</div>`;
+  } else {
+    filesBlock = '<div style="text-align:center;padding:8px"><span style="font-size:10px;color:#9ca3af">No files in collection</span></div>';
+  }
 
   return `
     <div class="pi-modal-overlay" onclick="piCloseConfigModal(event)">
@@ -8194,7 +8313,7 @@ function piRenderConfigModal(coll) {
               <label class="pi-radio-option" id="pi-radio-summary" onclick="piSetDetailLevel('summary')"><input type="radio" name="pi-detail"><div><div class="pi-radio-title">Summary</div><div class="pi-radio-desc">Main sections only</div></div></label>
             </div>
           </div>
-          <div><label class="pi-form-label">Included Files</label><div class="pi-included-files" id="pi-cfg-files">${filesList || '<div style="text-align:center;padding:8px"><span style="font-size:10px;color:#9ca3af">No files selected</span></div>'}</div></div>
+          <div><label class="pi-form-label">Included Files</label><div class="pi-included-files" id="pi-cfg-files">${filesBlock}</div></div>
         </div>
         <div class="pi-modal-footer">
           <button class="pi-btn pi-btn-view" onclick="piCloseConfig()">Cancel</button>
