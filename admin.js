@@ -11563,6 +11563,8 @@ async function runDataStudioGrCImport() {
       `GRC: ${j.grcApi || ''}`,
       `Created: ${j.createdCount} / ${j.totalParsed}`,
       `Failed: ${j.failedCount}`,
+      `Requirement assessments in CA: ${j.raCountInCA != null ? j.raCountInCA : '—'}`,
+      `Distinct ref_ids indexed from RAs: ${j.raIndexedRefIds != null ? j.raIndexedRefIds : '—'}`,
       `Requirement-assessment PATCHes: ${j.linkedPatchCount != null ? j.linkedPatchCount : '—'}`,
     ].join('\n');
     const errLines = (j.errors || []).slice(0, 30).map(e => `Row ${e.row} (${e.ref_id}): ${e.error}`);

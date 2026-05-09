@@ -1312,11 +1312,101 @@ function dsBuildDescriptionFromRow(o) {
 }
 
 function dsNormalizeImportRow(raw) {
-  const ref_id = dsFirstString(raw, ['كود المتطلب', 'ref_id', 'Ref ID', 'requirement_ref']);
+  const refRaw = dsFirstString(raw, ['كود المتطلب', 'ref_id', 'Ref ID', 'requirement_ref']);
+  const ref_id = refRaw ? dsNormalizeRefId(refRaw) : '';
   const name = dsFirstString(raw, ['اسم الكنترول', 'name', 'Name', 'control_name']);
   let description = dsFirstString(raw, ['description', 'Description', 'full_description']);
   if (!description) description = dsBuildDescriptionFromRow(raw);
   return { ref_id, name, description };
+}
+
+/** Normalize requirement ref_id for comparison (trim + Unicode NFKC). */
+function dsNormalizeRefId(s) {
+  if (s == null || s === '') return '';
+  return String(s).trim().normalize('NFKC');
+}
+
+function dsRequirementUuidFromRa(ra) {
+  const req = ra && ra.requirement;
+  if (!req) return '';
+  if (typeof req === 'string') return req.trim();
+  if (typeof req === 'object') return String(req.id || req.uuid || '').trim();
+  return '';
+}
+
+function dsEmbeddedRequirementRefId(ra) {
+  const req = ra && ra.requirement;
+  if (req && typeof req === 'object') {
+    return dsNormalizeRefId(req.ref_id || req.refId || '');
+  }
+  return '';
+}
+
+async function dsFetchAllRequirementAssessmentsForCA(caId, grcUrl, reqToken, res) {
+  let allRAs = [];
+  let raUrl = `${grcUrl}/api/requirement-assessments/?compliance_assessment=${encodeURIComponent(caId)}&page_size=500`;
+  while (raUrl) {
+    const raRes = await grcFetch(raUrl, {}, reqToken);
+    if (!raRes.ok) {
+      if (res && (await finalizeGrcUpstreamError(res, reqToken, raRes))) return null;
+      const t = await raRes.text();
+      throw new Error(`Failed to list requirement assessments: ${raRes.status} ${t.slice(0, 300)}`);
+    }
+    const raData = await raRes.json();
+    allRAs = allRAs.concat(Array.isArray(raData.results) ? raData.results : []);
+    raUrl = raData.next || null;
+  }
+  return allRAs;
+}
+
+/**
+ * Build map: normalized requirement ref_id → [RA objects from list endpoint].
+ * Fetches requirement-nodes when list view omits ref_id (common).
+ */
+async function dsBuildRefIdToRAsMap(allRAs, grcUrl, reqToken, res) {
+  const fetchedRefByUuid = new Map();
+  const uuidsNeedingFetch = new Set();
+
+  for (const ra of allRAs) {
+    const emb = dsEmbeddedRequirementRefId(ra);
+    const uuid = dsRequirementUuidFromRa(ra);
+    if (!emb && uuid) uuidsNeedingFetch.add(uuid);
+  }
+
+  for (const uuid of uuidsNeedingFetch) {
+    let ref = '';
+    const tryUrls = [
+      `${grcUrl}/api/requirement-nodes/${encodeURIComponent(uuid)}/`,
+      `${grcUrl}/api/requirement-nodes/${encodeURIComponent(uuid)}`,
+      `${grcUrl}/api/requirements/${encodeURIComponent(uuid)}/`,
+      `${grcUrl}/api/requirements/${encodeURIComponent(uuid)}`,
+    ];
+    for (const u of tryUrls) {
+      const r = await grcFetch(u, {}, reqToken);
+      if (!r.ok) {
+        if (res && (await finalizeGrcUpstreamError(res, reqToken, r))) return null;
+        continue;
+      }
+      const node = await r.json();
+      ref = dsNormalizeRefId(node.ref_id || node.refId || '');
+      break;
+    }
+    if (!ref) {
+      console.warn(`[DataStudio] No ref_id resolved for requirement UUID ${uuid}`);
+    }
+    fetchedRefByUuid.set(uuid, ref);
+  }
+
+  const refToRas = new Map();
+  for (const ra of allRAs) {
+    const uuid = dsRequirementUuidFromRa(ra);
+    let refKey = dsEmbeddedRequirementRefId(ra);
+    if (!refKey && uuid) refKey = fetchedRefByUuid.get(uuid) || '';
+    if (!refKey) continue;
+    if (!refToRas.has(refKey)) refToRas.set(refKey, []);
+    refToRas.get(refKey).push(ra);
+  }
+  return refToRas;
 }
 
 function dsParseWorkbookToNormalizedRows(fileBuffer) {
@@ -2442,59 +2532,70 @@ const server = http.createServer(async (req, res) => {
 
       let linkedPatchCount = 0;
       const linkErrors = [];
+      let raCountInCA = 0;
+      let raIndexedRefIds = 0;
 
       if (complianceAssessment && typeof complianceAssessment === 'string') {
         const ca = complianceAssessment.trim();
-        for (const [refId, controlId] of refToControlId) {
-          try {
-            const qs = `?compliance_assessment=${encodeURIComponent(ca)}&requirement__ref_id=${encodeURIComponent(refId)}&page_size=100`;
-            const listRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${qs}`, {}, reqToken);
-            if (!listRes.ok) {
-              if (await finalizeGrcUpstreamError(res, reqToken, listRes)) return;
-              const t = await listRes.text();
-              linkErrors.push({ ref_id: refId, error: t.slice(0, 400) });
-              continue;
-            }
-            const listData = await listRes.json();
-            const ras = Array.isArray(listData.results) ? listData.results : [];
+        try {
+          const allRAs = await dsFetchAllRequirementAssessmentsForCA(ca, GRC_API_URL, reqToken, res);
+          if (allRAs === null) return;
+          raCountInCA = allRAs.length;
+          console.log(`[DataStudio] Linking: ${allRAs.length} requirement assessments in CA ${ca}`);
+          const refToRas = await dsBuildRefIdToRAsMap(allRAs, GRC_API_URL, reqToken, res);
+          if (refToRas === null) return;
+          raIndexedRefIds = refToRas.size;
+          console.log(`[DataStudio] Indexed ${refToRas.size} distinct requirement ref_ids (resolved from RAs + requirement detail)`);
+
+          for (const [refId, controlId] of refToControlId) {
+            const key = dsNormalizeRefId(refId);
+            const ras = refToRas.get(key) || [];
             if (ras.length === 0) {
-              linkErrors.push({ ref_id: refId, error: 'No requirement assessment matched this ref_id for the selected compliance assessment.' });
+              linkErrors.push({
+                ref_id: refId,
+                error: 'No requirement assessment found for this ref_id in the selected compliance assessment.',
+              });
               continue;
             }
             for (const ra of ras) {
               const raId = ra.id || ra.uuid;
               if (!raId) continue;
-              const getRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {}, reqToken);
-              if (!getRes.ok) {
-                if (await finalizeGrcUpstreamError(res, reqToken, getRes)) return;
-                const gt = await getRes.text();
-                linkErrors.push({ ref_id: refId, raId, error: gt.slice(0, 400) });
-                continue;
-              }
-              const raDetail = await getRes.json();
-              const existingRaw = raDetail.applied_controls;
-              const acList = Array.isArray(existingRaw) ? existingRaw : [];
-              const existingIds = acList.map(ac =>
-                typeof ac === 'object' && ac !== null ? (ac.id || ac.uuid || '') : String(ac)
-              ).filter(Boolean);
-              const merged = [...new Set([...existingIds, controlId])];
-              if (merged.length === existingIds.length) continue;
-              const patchRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ applied_controls: merged }),
-              }, reqToken);
-              if (!patchRes.ok) {
-                if (await finalizeGrcUpstreamError(res, reqToken, patchRes)) return;
-                const pe = await patchRes.text();
-                linkErrors.push({ ref_id: refId, raId, error: pe.slice(0, 500) });
-              } else {
-                linkedPatchCount++;
+              try {
+                const getRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {}, reqToken);
+                if (!getRes.ok) {
+                  if (await finalizeGrcUpstreamError(res, reqToken, getRes)) return;
+                  const gt = await getRes.text();
+                  linkErrors.push({ ref_id: refId, raId, error: gt.slice(0, 400) });
+                  continue;
+                }
+                const raDetail = await getRes.json();
+                const existingRaw = raDetail.applied_controls;
+                const acList = Array.isArray(existingRaw) ? existingRaw : [];
+                const existingIds = acList.map(ac =>
+                  typeof ac === 'object' && ac !== null ? (ac.id || ac.uuid || '') : String(ac)
+                ).filter(Boolean);
+                const merged = [...new Set([...existingIds, controlId])];
+                if (merged.length === existingIds.length) continue;
+                const patchRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ applied_controls: merged }),
+                }, reqToken);
+                if (!patchRes.ok) {
+                  if (await finalizeGrcUpstreamError(res, reqToken, patchRes)) return;
+                  const pe = await patchRes.text();
+                  linkErrors.push({ ref_id: refId, raId, error: pe.slice(0, 500) });
+                } else {
+                  linkedPatchCount++;
+                }
+              } catch (patchErr) {
+                linkErrors.push({ ref_id: refId, raId: ra.id, error: patchErr.message });
               }
             }
-          } catch (e) {
-            linkErrors.push({ ref_id: refId, error: e.message });
           }
+        } catch (linkBlockErr) {
+          console.error('[DataStudio] RA linking failed:', linkBlockErr.message);
+          linkErrors.push({ ref_id: '(bulk)', error: linkBlockErr.message });
         }
       }
 
@@ -2506,6 +2607,8 @@ const server = http.createServer(async (req, res) => {
         createdCount: created.length,
         failedCount: errors.length,
         linkedPatchCount,
+        raCountInCA,
+        raIndexedRefIds,
         created,
         errors,
         linkErrors: complianceAssessment ? linkErrors : [],

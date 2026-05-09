@@ -578,7 +578,7 @@
                     <option value="">— Do not link requirement assessments —</option>
                   </select>
                 </div>
-                <p class="ds-import-note">Creates one applied control per row via <code>POST /api/applied-controls/</code> on the server’s <code>GRC_API_URL</code>. With an assessment selected, each row is linked by <code>requirement__ref_id</code> (كود المتطلب).</p>
+                <p class="ds-import-note">Target domain: <strong>folder</strong> (required). To attach each new applied control to the matching <strong>requirement assessment</strong>, choose the <strong>same compliance assessment</strong> that uses the framework whose requirement <code>ref_id</code> matches column كود المتطلب (e.g. 5.1.1.1). The server scans all RAs in that assessment and resolves requirement <code>ref_id</code> from GRC, then PATCHes <code>applied_controls</code>.</p>
                 <button type="button" class="btn-admin-primary" id="ds-btn-import-grc" disabled>Import all rows to GRC</button>
                 <pre id="ds-import-log" class="ds-import-log" style="display:none"></pre>
               </div>
