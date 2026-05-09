@@ -1409,6 +1409,42 @@ async function dsBuildRefIdToRAsMap(allRAs, grcUrl, reqToken, res) {
   return refToRas;
 }
 
+/** Ensure AppliedControl.requirement_assessments includes all raIds (GRC UI reads this M2M). */
+async function dsEnsureAppliedControlHasRequirementAssessments(controlId, raIds, grcUrl, reqToken, res, linkErrors, ctx) {
+  if (!controlId || !raIds || !raIds.length) return true;
+  const want = [...new Set(raIds.map(id => String(id)))];
+  const acGet = await grcFetch(`${grcUrl}/api/applied-controls/${controlId}/`, {}, reqToken);
+  if (!acGet.ok) {
+    if (res && (await finalizeGrcUpstreamError(res, reqToken, acGet))) return false;
+    const t = await acGet.text();
+    linkErrors.push({ ...ctx, step: 'ac_get_after_create', error: t.slice(0, 400) });
+    return true;
+  }
+  const d = await acGet.json();
+  const existing = [];
+  const raw = d.requirement_assessments;
+  if (Array.isArray(raw)) {
+    for (const x of raw) {
+      const id = typeof x === 'object' && x && x !== null ? String(x.id || x.uuid || '') : String(x);
+      if (id) existing.push(id);
+    }
+  }
+  const need = want.filter(id => !existing.includes(id));
+  if (!need.length) return true;
+  const merged = [...new Set([...existing, ...want])];
+  const acPatch = await grcFetch(`${grcUrl}/api/applied-controls/${controlId}/`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requirement_assessments: merged }),
+  }, reqToken);
+  if (!acPatch.ok) {
+    if (res && (await finalizeGrcUpstreamError(res, reqToken, acPatch))) return false;
+    const pe = await acPatch.text();
+    linkErrors.push({ ...ctx, step: 'ac_patch_requirement_assessments', error: pe.slice(0, 500) });
+  }
+  return true;
+}
+
 function dsParseWorkbookToNormalizedRows(fileBuffer) {
   const wb = XLSX.read(fileBuffer, { type: 'buffer' });
   const sn = wb.SheetNames || [];
@@ -2487,12 +2523,46 @@ const server = http.createServer(async (req, res) => {
       const created = [];
       const errors = [];
 
+      let refToRasMap = null;
+      let raCountInCA = 0;
+      let raIndexedRefIds = 0;
+      const linkErrors = [];
+
+      if (complianceAssessment && typeof complianceAssessment === 'string') {
+        const ca = complianceAssessment.trim();
+        try {
+          const allRAs = await dsFetchAllRequirementAssessmentsForCA(ca, GRC_API_URL, reqToken, res);
+          if (allRAs === null) return;
+          raCountInCA = allRAs.length;
+          refToRasMap = await dsBuildRefIdToRAsMap(allRAs, GRC_API_URL, reqToken, res);
+          if (refToRasMap === null) return;
+          raIndexedRefIds = refToRasMap.size;
+          console.log(`[DataStudio] Import: ${refToRasMap.size} distinct ref_ids indexed from ${allRAs.length} requirement assessments`);
+        } catch (mapErr) {
+          console.error('[DataStudio] Failed to build RA index:', mapErr.message);
+          linkErrors.push({ ref_id: '(index)', error: mapErr.message });
+        }
+      }
+
+      let linkedAtCreateCount = 0;
+
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         if (!row.ref_id || !row.name) {
           errors.push({ row: i + 2, ref_id: row.ref_id || '', error: 'Missing ref_id or name' });
           continue;
         }
+        const key = dsNormalizeRefId(row.ref_id);
+        const ras = refToRasMap ? (refToRasMap.get(key) || []) : [];
+        const raIds = ras.map(ra => String(ra.id || ra.uuid || '')).filter(Boolean);
+        if (refToRasMap && raIds.length === 0) {
+          linkErrors.push({
+            row: i + 2,
+            ref_id: row.ref_id,
+            error: 'No requirement assessment in this audit matches this ref_id.',
+          });
+        }
+
         const grcBody = {
           name: row.name,
           description: row.description || '',
@@ -2505,13 +2575,34 @@ const server = http.createServer(async (req, res) => {
           reference_control: null,
           effort: 'M',
         };
+        if (raIds.length) grcBody.requirement_assessments = raIds;
+
         try {
-          const grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/`, {
+          let grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(grcBody),
           }, reqToken);
-          if (!grcRes.ok) {
+          if (!grcRes.ok && raIds.length) {
+            const errFirst = await grcRes.text();
+            if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+            const { requirement_assessments: _omit, ...grcBodyNoRa } = grcBody;
+            grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(grcBodyNoRa),
+            }, reqToken);
+            if (!grcRes.ok) {
+              if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+              errors.push({ row: i + 2, ref_id: row.ref_id, error: errFirst.slice(0, 800) });
+              continue;
+            }
+            linkErrors.push({
+              row: i + 2,
+              ref_id: row.ref_id,
+              error: `Control created but API rejected requirement_assessments on POST — ${errFirst.slice(0, 280)}`,
+            });
+          } else if (!grcRes.ok) {
             if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
             const errText = await grcRes.text();
             errors.push({ row: i + 2, ref_id: row.ref_id, error: errText.slice(0, 800) });
@@ -2520,82 +2611,17 @@ const server = http.createServer(async (req, res) => {
           const createdObj = await grcRes.json();
           const cid = createdObj.id || createdObj.uuid;
           created.push({ ref_id: row.ref_id, id: cid, name: row.name });
+
+          if (raIds.length && cid) {
+            const syncOk = await dsEnsureAppliedControlHasRequirementAssessments(
+              cid, raIds, GRC_API_URL, reqToken, res, linkErrors,
+              { row: i + 2, ref_id: row.ref_id }
+            );
+            if (!syncOk) return;
+            linkedAtCreateCount++;
+          }
         } catch (e) {
           errors.push({ row: i + 2, ref_id: row.ref_id, error: e.message });
-        }
-      }
-
-      const refToControlId = new Map();
-      for (const c of created) {
-        if (c.ref_id && c.id) refToControlId.set(c.ref_id, c.id);
-      }
-
-      let linkedPatchCount = 0;
-      const linkErrors = [];
-      let raCountInCA = 0;
-      let raIndexedRefIds = 0;
-
-      if (complianceAssessment && typeof complianceAssessment === 'string') {
-        const ca = complianceAssessment.trim();
-        try {
-          const allRAs = await dsFetchAllRequirementAssessmentsForCA(ca, GRC_API_URL, reqToken, res);
-          if (allRAs === null) return;
-          raCountInCA = allRAs.length;
-          console.log(`[DataStudio] Linking: ${allRAs.length} requirement assessments in CA ${ca}`);
-          const refToRas = await dsBuildRefIdToRAsMap(allRAs, GRC_API_URL, reqToken, res);
-          if (refToRas === null) return;
-          raIndexedRefIds = refToRas.size;
-          console.log(`[DataStudio] Indexed ${refToRas.size} distinct requirement ref_ids (resolved from RAs + requirement detail)`);
-
-          for (const [refId, controlId] of refToControlId) {
-            const key = dsNormalizeRefId(refId);
-            const ras = refToRas.get(key) || [];
-            if (ras.length === 0) {
-              linkErrors.push({
-                ref_id: refId,
-                error: 'No requirement assessment found for this ref_id in the selected compliance assessment.',
-              });
-              continue;
-            }
-            for (const ra of ras) {
-              const raId = ra.id || ra.uuid;
-              if (!raId) continue;
-              try {
-                const getRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {}, reqToken);
-                if (!getRes.ok) {
-                  if (await finalizeGrcUpstreamError(res, reqToken, getRes)) return;
-                  const gt = await getRes.text();
-                  linkErrors.push({ ref_id: refId, raId, error: gt.slice(0, 400) });
-                  continue;
-                }
-                const raDetail = await getRes.json();
-                const existingRaw = raDetail.applied_controls;
-                const acList = Array.isArray(existingRaw) ? existingRaw : [];
-                const existingIds = acList.map(ac =>
-                  typeof ac === 'object' && ac !== null ? (ac.id || ac.uuid || '') : String(ac)
-                ).filter(Boolean);
-                const merged = [...new Set([...existingIds, controlId])];
-                if (merged.length === existingIds.length) continue;
-                const patchRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {
-                  method: 'PATCH',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ applied_controls: merged }),
-                }, reqToken);
-                if (!patchRes.ok) {
-                  if (await finalizeGrcUpstreamError(res, reqToken, patchRes)) return;
-                  const pe = await patchRes.text();
-                  linkErrors.push({ ref_id: refId, raId, error: pe.slice(0, 500) });
-                } else {
-                  linkedPatchCount++;
-                }
-              } catch (patchErr) {
-                linkErrors.push({ ref_id: refId, raId: ra.id, error: patchErr.message });
-              }
-            }
-          }
-        } catch (linkBlockErr) {
-          console.error('[DataStudio] RA linking failed:', linkBlockErr.message);
-          linkErrors.push({ ref_id: '(bulk)', error: linkBlockErr.message });
         }
       }
 
@@ -2606,7 +2632,7 @@ const server = http.createServer(async (req, res) => {
         totalParsed: rows.length,
         createdCount: created.length,
         failedCount: errors.length,
-        linkedPatchCount,
+        linkedAtCreateCount,
         raCountInCA,
         raIndexedRefIds,
         created,
@@ -2839,6 +2865,44 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ success: true, results: data.results || data }));
     } catch (error) {
       console.error('[GRC] Compliance assessments error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ---- GRC Platform Proxy: Get / PATCH single applied control ----
+  const acItemMatch = url.pathname.match(/^\/api\/grc\/applied-controls\/([^/]+)$/);
+  if (acItemMatch && req.method === 'GET') {
+    try {
+      const acId = acItemMatch[1];
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/${acId}/`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data }));
+    } catch (error) {
+      console.error('[GRC] GET applied-control error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (acItemMatch && req.method === 'PATCH') {
+    try {
+      const acId = acItemMatch[1];
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/${acId}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data }));
+    } catch (error) {
+      console.error('[GRC] PATCH applied-control error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }

@@ -578,7 +578,7 @@
                     <option value="">— Do not link requirement assessments —</option>
                   </select>
                 </div>
-                <p class="ds-import-note">Target domain: <strong>folder</strong> (required). To attach each new applied control to the matching <strong>requirement assessment</strong>, choose the <strong>same compliance assessment</strong> that uses the framework whose requirement <code>ref_id</code> matches column كود المتطلب (e.g. 5.1.1.1). The server scans all RAs in that assessment and resolves requirement <code>ref_id</code> from GRC, then PATCHes <code>applied_controls</code>.</p>
+                <p class="ds-import-note">Target domain: <strong>folder</strong> (required). Choose the <strong>compliance assessment</strong> that contains the requirement assessments whose <code>ref_id</code> matches كود المتطلب. New controls are created with <code>requirement_assessments</code> set so the GRC “Requirement assessments” tab lists associated requirements. Existing controls from a prior import are unchanged — delete duplicates in GRC or link manually via API.</p>
                 <button type="button" class="btn-admin-primary" id="ds-btn-import-grc" disabled>Import all rows to GRC</button>
                 <pre id="ds-import-log" class="ds-import-log" style="display:none"></pre>
               </div>

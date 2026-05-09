@@ -11565,7 +11565,7 @@ async function runDataStudioGrCImport() {
       `Failed: ${j.failedCount}`,
       `Requirement assessments in CA: ${j.raCountInCA != null ? j.raCountInCA : '—'}`,
       `Distinct ref_ids indexed from RAs: ${j.raIndexedRefIds != null ? j.raIndexedRefIds : '—'}`,
-      `Requirement-assessment PATCHes: ${j.linkedPatchCount != null ? j.linkedPatchCount : '—'}`,
+      `Requirement-assessment links (via AppliedControl.requirement_assessments): ${j.linkedAtCreateCount != null ? j.linkedAtCreateCount : '—'}`,
     ].join('\n');
     const errLines = (j.errors || []).slice(0, 30).map(e => `Row ${e.row} (${e.ref_id}): ${e.error}`);
     const linkErr = (j.linkErrors || []).slice(0, 30).map(e => `${e.ref_id}${e.raId ? ' RA ' + e.raId : ''}: ${e.error}`);
