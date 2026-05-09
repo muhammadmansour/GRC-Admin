@@ -71,6 +71,10 @@
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 13V4C2 3.4 2.4 3 3 3H13C13.6 3 14 3.4 14 4V13M5 7H11M5 10H9M8 3V1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Org Contexts
           </button>
+          <button class="sidebar-item" data-page="data-studio">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H7L9 4H13C13.6 4 14 4.4 14 5V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 7H14M3 10H14M6 7V14M10 7V14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            Data Studio
+          </button>
         </div>
 
         <button class="sidebar-section-toggle" data-section="workbench">
@@ -525,6 +529,42 @@
               <input type="text" placeholder="Search by name, sector..." id="org-search">
             </div>
             <div id="org-contexts-list"><!-- Populated by JS --></div>
+          </div>
+        </section>
+
+        <!-- =================== DATA STUDIO =================== -->
+        <section class="admin-page" id="page-data-studio">
+          <div class="page-container">
+            <div class="page-header">
+              <h1 class="page-title">Data Studio</h1>
+              <p class="page-subtitle">Import applied controls and structured data from Excel workbooks</p>
+            </div>
+
+            <div class="admin-card">
+              <div class="admin-card-header">
+                <div class="admin-card-header-left">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H7L9 4H13C13.6 4 14 4.4 14 5V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <h2>Upload spreadsheet</h2>
+                </div>
+              </div>
+              <p class="ds-intro">Drop an Excel file here or click to browse. The first sheet is parsed; column headers come from row 1.</p>
+              <input type="file" id="ds-file-input" class="ds-file-input" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv">
+              <div id="ds-dropzone" class="ds-dropzone" role="button" tabindex="0">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none"><path d="M12 15V3M12 3L8 7M12 3L16 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 14V18C4 19.1 4.9 20 6 20H18C19.1 20 20 19.1 20 18V14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <p><strong>Excel or CSV</strong> — .xlsx, .xls, or .csv</p>
+                <p class="ds-dropzone-hint">Used for importing applied controls (and future structured imports).</p>
+              </div>
+              <p id="ds-status" class="ds-status" aria-live="polite"></p>
+              <div id="ds-preview" class="ds-preview" style="display:none">
+                <div id="ds-preview-meta" class="ds-preview-meta"></div>
+                <div class="ds-preview-scroll">
+                  <table class="ds-preview-table" id="ds-preview-table">
+                    <thead><tr id="ds-preview-thead"></tr></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 

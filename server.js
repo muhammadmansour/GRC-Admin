@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { GoogleGenAI } = require('@google/genai');
 const Database = require('better-sqlite3');
 const yaml = require('js-yaml');
+const XLSX = require('xlsx');
 
 const PORT = 5555; // Wathbah server port
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent';
@@ -2227,7 +2228,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       // For page requests (HTML or SPA routes), redirect to login
-      const SPA_PREFIXES = ['/', '/dashboard', '/audit-sessions', '/audit-studio', '/controls-studio', '/merge-optimizer', '/policy-ingestion', '/org-contexts', '/prompts', '/file-collections', '/workbench', '/audit-log'];
+      const SPA_PREFIXES = ['/', '/dashboard', '/audit-sessions', '/audit-studio', '/controls-studio', '/merge-optimizer', '/policy-ingestion', '/org-contexts', '/data-studio', '/prompts', '/file-collections', '/workbench', '/audit-log'];
       const isSpaRoute = SPA_PREFIXES.some(p => url.pathname === p || (p !== '/' && url.pathname.startsWith(p + '/')));
       if (isSpaRoute || url.pathname.endsWith('.html')) {
         res.writeHead(302, { 'Location': '/login.html' });
@@ -2250,6 +2251,72 @@ const server = http.createServer(async (req, res) => {
 
   // Extract local token for GRC-authenticated fetch calls
   const reqToken = getTokenFromRequest(req);
+
+  // ---- Data Studio: Excel preview (applied controls import path) ----
+  if (url.pathname === '/api/data-studio/preview-excel' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const { fileName, data } = body;
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      const lower = String(fileName || '').toLowerCase();
+      if (!lower.endsWith('.xlsx') && !lower.endsWith('.xls') && !lower.endsWith('.csv')) {
+        sendJSON(res, 400, { error: 'Only Excel (.xlsx, .xls) or CSV files are supported.' });
+        return;
+      }
+      let fileBuffer;
+      try {
+        fileBuffer = Buffer.from(data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 payload.' });
+        return;
+      }
+      if (!fileBuffer.length) {
+        sendJSON(res, 400, { error: 'Empty file.' });
+        return;
+      }
+      const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+      const sheetNames = wb.SheetNames || [];
+      if (!sheetNames.length) {
+        sendJSON(res, 400, { error: 'Workbook has no sheets.' });
+        return;
+      }
+      const firstSheet = sheetNames[0];
+      const sheet = wb.Sheets[firstSheet];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+      const headerRow = Array.isArray(rows[0]) ? rows[0] : [];
+      const headers = headerRow.map((h, i) => {
+        const s = h != null && String(h).trim() !== '' ? String(h).trim() : `Column ${i + 1}`;
+        return s;
+      });
+      const dataRows = rows.slice(1);
+      const previewLimit = 25;
+      const preview = dataRows.slice(0, previewLimit).map(row => {
+        const arr = Array.isArray(row) ? row : [];
+        const o = {};
+        headers.forEach((h, i) => {
+          o[h] = arr[i] != null && arr[i] !== '' ? arr[i] : '';
+        });
+        return o;
+      });
+      sendJSON(res, 200, {
+        success: true,
+        fileName: fileName || 'upload',
+        sheetNames,
+        activeSheet: firstSheet,
+        totalRows: dataRows.length,
+        previewHeaders: headers,
+        previewRowCount: preview.length,
+        preview,
+      });
+    } catch (err) {
+      console.error('[DataStudio] preview-excel:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to parse workbook.' });
+    }
+    return;
+  }
 
   // ---- Analyze API ----
   if (url.pathname === '/api/analyze' && req.method === 'POST') {
@@ -5345,7 +5412,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- Client-side routes (serve admin.html for SPA pages) ----
-  const SPA_PREFIXES = ['/', '/dashboard', '/audit-sessions', '/audit-studio', '/controls-studio', '/merge-optimizer', '/policy-ingestion', '/org-contexts', '/prompts', '/file-collections', '/workbench', '/audit-log'];
+  const SPA_PREFIXES = ['/', '/dashboard', '/audit-sessions', '/audit-studio', '/controls-studio', '/merge-optimizer', '/policy-ingestion', '/org-contexts', '/data-studio', '/prompts', '/file-collections', '/workbench', '/audit-log'];
   const isSpaRoute = SPA_PREFIXES.some(p => url.pathname === p || (p !== '/' && url.pathname.startsWith(p + '/')));
   if (isSpaRoute) {
     serveStaticFile(res, path.join(__dirname, 'admin.html'));

@@ -6603,3 +6603,109 @@
   .al-log-change-row { flex-wrap: wrap; }
   .al-log-old, .al-log-new { max-width: 100%; }
 }
+
+/* ─── Data Studio (Excel import) ───────────────────────────── */
+.ds-intro {
+  font-size: 13px;
+  color: #64748b;
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+.ds-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.ds-dropzone {
+  margin-top: 4px;
+  border: 2px dashed #e5e7eb;
+  border-radius: 12px;
+  padding: 28px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ds-dropzone:hover {
+  border-color: rgba(var(--admin-primary-rgb, 0, 119, 204), 0.35);
+  background: rgba(var(--admin-primary-rgb, 0, 119, 204), 0.03);
+}
+.ds-dropzone.ds-dropzone-active {
+  border-color: rgba(var(--admin-primary-rgb, 0, 119, 204), 0.5);
+  background: rgba(var(--admin-primary-rgb, 0, 119, 204), 0.07);
+}
+.ds-dropzone:focus-visible {
+  outline: 2px solid rgba(var(--admin-primary-rgb, 0, 119, 204), 0.6);
+  outline-offset: 2px;
+}
+.ds-dropzone svg {
+  color: #cbd5e1;
+  margin-bottom: 10px;
+}
+.ds-dropzone p {
+  font-size: 13px;
+  color: #475569;
+  margin: 0;
+}
+.ds-dropzone .ds-dropzone-hint {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 8px;
+}
+.ds-status {
+  margin-top: 14px;
+  font-size: 12px;
+  color: #64748b;
+  min-height: 1.2em;
+}
+.ds-preview {
+  margin-top: 20px;
+  border-top: 1px solid #f1f5f9;
+  padding-top: 16px;
+}
+.ds-preview-meta {
+  font-size: 13px;
+  color: #334155;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+.ds-preview-meta code {
+  font-size: 12px;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.ds-preview-scroll {
+  overflow: auto;
+  max-height: min(420px, 55vh);
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fafafa;
+}
+.ds-preview-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.ds-preview-table th,
+.ds-preview-table td {
+  border: 1px solid #e5e7eb;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  max-width: 280px;
+  background: #fff;
+}
+.ds-preview-table th {
+  background: #f8fafc;
+  font-weight: 600;
+  color: #334155;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.ds-preview-table tbody tr:nth-child(even) td {
+  background: #fafbfc;
+}

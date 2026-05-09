@@ -88,6 +88,7 @@ const PAGE_NAMES = {
   'merge-optimizer': 'Control Merge Optimizer',
   'policy-ingestion': 'Organization Policy Ingestion',
   'org-contexts': 'Organization Contexts',
+  'data-studio': 'Data Studio',
   'prompts': 'Prompts',
   'file-collections': 'File Collections',
   'workbench': 'Workbench',
@@ -6996,17 +6997,19 @@ function piRenderCollectionDetail(coll) {
       </div>`;
     }).join('');
 
-    const needsPager = piFilesPagePrevTokens.length > 0 || !!(coll.filesNextPageToken);
     const prevDis = piFilesPagePrevTokens.length === 0 || piFilesPageLoading ? 'disabled' : '';
     const nextDis = !(coll.filesNextPageToken) || piFilesPageLoading ? 'disabled' : '';
     let filesFooter = '';
     if (totalFiles > 0 && piFilesDisplayEnd >= piFilesDisplayStart && piFilesDisplayStart > 0) {
+      const pageSize = coll.filesPageSize || 20;
+      const onSinglePage = !coll.filesNextPageToken && piFilesPagePrevTokens.length === 0;
+      const rangeHint = onSinglePage ? ` · ${pageSize} per page` : '';
       filesFooter = `<div class="pi-files-footer">
-        <span class="pi-files-page-range">${esc(`Showing ${piFilesDisplayStart}–${piFilesDisplayEnd} of ${totalFiles}`)}</span>
-        ${needsPager ? `<div class="pi-files-pagination-btns">
-          <button type="button" class="pi-btn pi-btn-view pi-files-page-btn" ${prevDis} onclick="piFilesPagePrev()">Previous</button>
-          <button type="button" class="pi-btn pi-btn-view pi-files-page-btn" ${nextDis} onclick="piFilesPageNext()">Next</button>
-        </div>` : ''}
+        <span class="pi-files-page-range">${esc(`Showing ${piFilesDisplayStart}–${piFilesDisplayEnd} of ${totalFiles}${rangeHint}`)}</span>
+        <div class="pi-files-pagination-btns">
+          <button type="button" class="pi-btn pi-btn-view pi-files-page-btn" ${prevDis} onclick="piFilesPagePrev()" title="Previous page">Previous</button>
+          <button type="button" class="pi-btn pi-btn-view pi-files-page-btn" ${nextDis} onclick="piFilesPageNext()" title="${coll.filesNextPageToken ? 'Next page' : 'No further pages'}">Next</button>
+        </div>
       </div>`;
     }
 
@@ -11477,11 +11480,127 @@ document.getElementById('al-ca-search').addEventListener('input', (e) => {
   alRenderCAGrid(e.target.value);
 });
 
+// ─── Data Studio (Excel upload / import preview) ──────────────
+
+let dataStudioUploadWired = false;
+
+function initDataStudioUpload() {
+  if (dataStudioUploadWired) return;
+  const drop = document.getElementById('ds-dropzone');
+  const input = document.getElementById('ds-file-input');
+  if (!drop || !input) return;
+  dataStudioUploadWired = true;
+
+  const openPicker = () => input.click();
+
+  drop.addEventListener('click', e => {
+    if (e.target.closest('a,button')) return;
+    openPicker();
+  });
+  drop.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openPicker();
+    }
+  });
+
+  ['dragenter', 'dragover'].forEach(ev => {
+    drop.addEventListener(ev, e => {
+      e.preventDefault();
+      e.stopPropagation();
+      drop.classList.add('ds-dropzone-active');
+    });
+  });
+  drop.addEventListener('dragleave', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!drop.contains(e.relatedTarget)) drop.classList.remove('ds-dropzone-active');
+  });
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    drop.classList.remove('ds-dropzone-active');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleDataStudioFile(f);
+  });
+
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    if (f) handleDataStudioFile(f);
+    input.value = '';
+  });
+}
+
+async function handleDataStudioFile(file) {
+  const statusEl = document.getElementById('ds-status');
+  const preview = document.getElementById('ds-preview');
+  const theadRow = document.getElementById('ds-preview-thead');
+  const tbody = document.querySelector('#ds-preview-table tbody');
+  const metaEl = document.getElementById('ds-preview-meta');
+  const nameLower = (file.name || '').toLowerCase();
+  if (!/\.(xlsx|xls|csv)$/.test(nameLower)) {
+    toast('error', 'Invalid file', 'Choose an Excel (.xlsx, .xls) or .csv file.');
+    return;
+  }
+  statusEl.textContent = 'Reading file…';
+  preview.style.display = 'none';
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('Could not read file.'));
+      r.readAsDataURL(file);
+    });
+    const data = typeof dataUrl === 'string' && dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+
+    const r = await fetch('/api/data-studio/preview-excel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: file.name, data }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(j.error || r.statusText || 'Upload failed');
+    }
+    if (!j.success) throw new Error(j.error || 'Preview failed');
+
+    metaEl.innerHTML = `
+      <strong>${esc(j.fileName || file.name)}</strong>
+      · Sheet: <code>${esc(j.activeSheet || '')}</code>
+      · <span class="ds-meta-rows">${Number(j.totalRows) || 0} data rows</span>
+      ${(j.sheetNames && j.sheetNames.length > 1) ? ` · ${j.sheetNames.length} sheets (preview uses the first)` : ''}
+    `;
+
+    const headers = j.previewHeaders || [];
+    theadRow.innerHTML = headers.map(h => `<th>${esc(String(h))}</th>`).join('');
+    const rows = j.preview || [];
+    tbody.innerHTML = rows.map(row => {
+      const cells = headers.map(h => {
+        const v = row[h];
+        const s = v != null && v !== '' ? String(v) : '';
+        return `<td>${esc(s)}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    preview.style.display = 'block';
+    statusEl.textContent = rows.length
+      ? `Showing ${rows.length} preview row${rows.length === 1 ? '' : 's'}${(j.totalRows > rows.length) ? ` of ${j.totalRows}` : ''}. Import to GRC will be wired in a follow-up step.`
+      : 'No data rows after the header row.';
+    toast('success', 'File loaded', 'Preview is ready.');
+  } catch (err) {
+    console.error('[Data Studio]', err);
+    statusEl.textContent = '';
+    toast('error', 'Could not read spreadsheet', err.message || 'Unknown error');
+  }
+}
+
 // ─── Init ─────────────────────────────────────────────────────
 
 console.log('[admin.js] Script loaded, readyState:', document.readyState);
 
 function initApp() {
+  initDataStudioUpload();
   const { page, subId } = parseRoute();
   console.log(`[admin.js] Initializing → route: /${page}${subId ? '/' + subId : ''}`);
   navigateTo(page, true, subId);
