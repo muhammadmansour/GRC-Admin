@@ -141,6 +141,7 @@ function navigateTo(page, pushState = true, subId = null) {
   if (page === 'controls-studio') loadControlsStudio();
   if (page === 'merge-optimizer') loadMergeOptimizer();
   if (page === 'policy-ingestion') loadPolicyIngestion(subId);
+  if (page === 'data-studio') loadDataStudioPage();
   if (page === 'workbench') loadWorkbench(subId);
   if (page === 'audit-log') loadAuditLog(subId);
 
@@ -11483,6 +11484,105 @@ document.getElementById('al-ca-search').addEventListener('input', (e) => {
 // ─── Data Studio (Excel upload / import preview) ──────────────
 
 let dataStudioUploadWired = false;
+let dataStudioLastFile = null;
+
+function loadDataStudioPage() {
+  loadDataStudioGrcOptions().catch(() => {});
+}
+
+async function loadDataStudioGrcOptions() {
+  const folderSel = document.getElementById('ds-folder-select');
+  const caSel = document.getElementById('ds-ca-select');
+  if (!folderSel) return;
+  const prevFolder = folderSel.value;
+  const prevCa = caSel ? caSel.value : '';
+  folderSel.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const fr = await fetch('/api/grc/folders?page_size=500');
+    const fj = await fr.json();
+    if (!fr.ok) throw new Error(fj.error || 'Folders request failed');
+    let folders = fj.folders;
+    if (!Array.isArray(folders)) folders = Array.isArray(folders?.results) ? folders.results : [];
+    folderSel.innerHTML = '<option value="">— Choose folder —</option>' +
+      folders.map(f => {
+        const id = f.id || f.uuid;
+        const label = f.name || f.name_en || f.title || id;
+        return `<option value="${esc(id)}">${esc(label)}</option>`;
+      }).join('');
+    if (prevFolder) folderSel.value = prevFolder;
+  } catch (e) {
+    folderSel.innerHTML = `<option value="">${esc(e.message)}</option>`;
+  }
+  if (!caSel) return;
+  caSel.innerHTML = '<option value="">— Do not link requirement assessments —</option>';
+  try {
+    const cr = await fetch('/api/grc/compliance-assessments?page_size=500');
+    const cj = await cr.json();
+    if (!cr.ok) throw new Error(cj.error || 'Compliance assessments request failed');
+    let cas = cj.results;
+    if (!Array.isArray(cas)) cas = [];
+    for (const ca of cas) {
+      const id = ca.id || ca.uuid;
+      const label = ca.name || ca.basename || id;
+      caSel.insertAdjacentHTML('beforeend', `<option value="${esc(id)}">${esc(label)}</option>`);
+    }
+    if (prevCa) caSel.value = prevCa;
+  } catch (_) { /* optional dropdown */ }
+}
+
+async function runDataStudioGrCImport() {
+  const folder = document.getElementById('ds-folder-select')?.value;
+  const ca = document.getElementById('ds-ca-select')?.value || '';
+  const logEl = document.getElementById('ds-import-log');
+  const btn = document.getElementById('ds-btn-import-grc');
+  if (!dataStudioLastFile || !folder) {
+    toast('error', 'Missing inputs', 'Choose a GRC folder and load an Excel file first.');
+    return;
+  }
+  if (!btn) return;
+  btn.disabled = true;
+  if (logEl) {
+    logEl.style.display = 'block';
+    logEl.textContent = 'Importing… This can take several minutes for large sheets.';
+  }
+  try {
+    const body = {
+      fileName: dataStudioLastFile.name,
+      data: dataStudioLastFile.data,
+      folder,
+    };
+    if (ca) body.complianceAssessment = ca;
+    const r = await fetch('/api/data-studio/import-applied-controls', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText || 'Import failed');
+    const summary = [
+      `GRC: ${j.grcApi || ''}`,
+      `Created: ${j.createdCount} / ${j.totalParsed}`,
+      `Failed: ${j.failedCount}`,
+      `Requirement-assessment PATCHes: ${j.linkedPatchCount != null ? j.linkedPatchCount : '—'}`,
+    ].join('\n');
+    const errLines = (j.errors || []).slice(0, 30).map(e => `Row ${e.row} (${e.ref_id}): ${e.error}`);
+    const linkErr = (j.linkErrors || []).slice(0, 30).map(e => `${e.ref_id}${e.raId ? ' RA ' + e.raId : ''}: ${e.error}`);
+    if (logEl) {
+      const parts = [summary];
+      if (errLines.length) parts.push('', 'Row errors:', ...errLines);
+      if (linkErr.length) parts.push('', 'Link errors:', ...linkErr);
+      logEl.textContent = parts.join('\n');
+    }
+    if (j.failedCount === 0) toast('success', 'Import finished', `${j.createdCount} controls created.`);
+    else toast('info', 'Import finished with errors', `${j.createdCount} created, ${j.failedCount} failed — see log below.`);
+  } catch (e) {
+    console.error('[Data Studio import]', e);
+    if (logEl) logEl.textContent = e.message || String(e);
+    toast('error', 'Import failed', e.message || '');
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 function initDataStudioUpload() {
   if (dataStudioUploadWired) return;
@@ -11529,6 +11629,9 @@ function initDataStudioUpload() {
     if (f) handleDataStudioFile(f);
     input.value = '';
   });
+
+  const importBtn = document.getElementById('ds-btn-import-grc');
+  if (importBtn) importBtn.addEventListener('click', () => runDataStudioGrCImport());
 }
 
 async function handleDataStudioFile(file) {
@@ -11584,8 +11687,17 @@ async function handleDataStudioFile(file) {
     }).join('');
 
     preview.style.display = 'block';
+    dataStudioLastFile = { name: file.name, data };
+    const importPanel = document.getElementById('ds-import-panel');
+    const importBtn = document.getElementById('ds-btn-import-grc');
+    if (importPanel) importPanel.style.display = 'block';
+    if (importBtn) importBtn.disabled = false;
+    const logEl = document.getElementById('ds-import-log');
+    if (logEl) { logEl.style.display = 'none'; logEl.textContent = ''; }
+    loadDataStudioGrcOptions().catch(() => {});
+
     statusEl.textContent = rows.length
-      ? `Showing ${rows.length} preview row${rows.length === 1 ? '' : 's'}${(j.totalRows > rows.length) ? ` of ${j.totalRows}` : ''}. Import to GRC will be wired in a follow-up step.`
+      ? `Showing ${rows.length} preview row${rows.length === 1 ? '' : 's'}${(j.totalRows > rows.length) ? ` of ${j.totalRows}` : ''}. Choose a folder and run import to push all ${j.totalRows} row(s) to GRC.`
       : 'No data rows after the header row.';
     toast('success', 'File loaded', 'Preview is ready.');
   } catch (err) {

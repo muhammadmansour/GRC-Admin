@@ -6709,3 +6709,55 @@
 .ds-preview-table tbody tr:nth-child(even) td {
   background: #fafbfc;
 }
+
+/* Data Studio — GRC import */
+.ds-import-panel {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #e5e7eb;
+}
+.ds-import-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1e293b;
+  margin: 0 0 14px;
+}
+.ds-import-row {
+  margin-bottom: 12px;
+  max-width: 560px;
+}
+.ds-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  margin-bottom: 6px;
+}
+.ds-req { color: #dc2626; }
+.ds-select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #fff;
+}
+.ds-import-note {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.45;
+  max-width: 640px;
+  margin: 0 0 12px;
+}
+.ds-import-log {
+  margin-top: 14px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  max-height: 280px;
+  overflow: auto;
+}

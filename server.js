@@ -36,7 +36,7 @@ loadEnv();
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // GRC Platform configuration
-const GRC_API_URL = process.env.GRC_API_URL || 'https://grc-stage.wathbahs.com';
+const GRC_API_URL = process.env.GRC_API_URL || 'https://grc.wathbah.dev';
 
 // ==========================================
 // Authentication (via GRC IAM)
@@ -1288,6 +1288,52 @@ function parseBody(req) {
   });
 }
 
+// ─── Data Studio: Excel row → GRC applied control fields ─────────────
+
+function dsFirstString(obj, keys) {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const k of keys) {
+    if (obj[k] != null && String(obj[k]).trim() !== '') return String(obj[k]).trim();
+  }
+  return '';
+}
+
+function dsBuildDescriptionFromRow(o) {
+  const lines = [];
+  const persp = [dsFirstString(o, ['كود المنظور']), dsFirstString(o, ['اسم المنظور'])].filter(Boolean).join(' — ');
+  if (persp) lines.push(`المنظور: ${persp}`);
+  const axis = [dsFirstString(o, ['كود المحور']), dsFirstString(o, ['اسم المحور'])].filter(Boolean).join(' — ');
+  if (axis) lines.push(`المحور: ${axis}`);
+  const std = [dsFirstString(o, ['كود المعيار']), dsFirstString(o, ['اسم المعيار'])].filter(Boolean).join(' — ');
+  if (std) lines.push(`المعيار: ${std}`);
+  const reqText = dsFirstString(o, ['نص المتطلب بحسب وثيقة هيئة الحكومة الرقمية', 'description', 'Requirement text']);
+  if (reqText) lines.push(reqText);
+  return lines.join('\n\n').trim();
+}
+
+function dsNormalizeImportRow(raw) {
+  const ref_id = dsFirstString(raw, ['كود المتطلب', 'ref_id', 'Ref ID', 'requirement_ref']);
+  const name = dsFirstString(raw, ['اسم الكنترول', 'name', 'Name', 'control_name']);
+  let description = dsFirstString(raw, ['description', 'Description', 'full_description']);
+  if (!description) description = dsBuildDescriptionFromRow(raw);
+  return { ref_id, name, description };
+}
+
+function dsParseWorkbookToNormalizedRows(fileBuffer) {
+  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const sn = wb.SheetNames || [];
+  if (!sn.length) return { error: 'Workbook has no sheets.' };
+  const sheet = wb.Sheets[sn[0]];
+  const objects = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+  const rows = [];
+  for (const o of objects) {
+    const n = dsNormalizeImportRow(o);
+    if (!n.ref_id && !n.name) continue;
+    rows.push(n);
+  }
+  return { sheetName: sn[0], rows };
+}
+
 // ==========================================
 // Gemini Analysis API
 // ==========================================
@@ -2318,6 +2364,159 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/data-studio/import-applied-controls' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const { fileName, data, folder, complianceAssessment } = body;
+      if (!folder || typeof folder !== 'string') {
+        sendJSON(res, 400, { error: 'folder (UUID) is required.' });
+        return;
+      }
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      const lower = String(fileName || '').toLowerCase();
+      if (!lower.endsWith('.xlsx') && !lower.endsWith('.xls') && !lower.endsWith('.csv')) {
+        sendJSON(res, 400, { error: 'Only Excel (.xlsx, .xls) or CSV files are supported.' });
+        return;
+      }
+      let fileBuffer;
+      try {
+        fileBuffer = Buffer.from(data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 payload.' });
+        return;
+      }
+      const parsed = dsParseWorkbookToNormalizedRows(fileBuffer);
+      if (parsed.error) {
+        sendJSON(res, 400, { error: parsed.error });
+        return;
+      }
+      const { rows, sheetName } = parsed;
+      const created = [];
+      const errors = [];
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row.ref_id || !row.name) {
+          errors.push({ row: i + 2, ref_id: row.ref_id || '', error: 'Missing ref_id or name' });
+          continue;
+        }
+        const grcBody = {
+          name: row.name,
+          description: row.description || '',
+          ref_id: row.ref_id,
+          folder,
+          status: 'to_do',
+          csf_function: 'govern',
+          priority: 2,
+          category: null,
+          reference_control: null,
+          effort: 'M',
+        };
+        try {
+          const grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(grcBody),
+          }, reqToken);
+          if (!grcRes.ok) {
+            if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+            const errText = await grcRes.text();
+            errors.push({ row: i + 2, ref_id: row.ref_id, error: errText.slice(0, 800) });
+            continue;
+          }
+          const createdObj = await grcRes.json();
+          const cid = createdObj.id || createdObj.uuid;
+          created.push({ ref_id: row.ref_id, id: cid, name: row.name });
+        } catch (e) {
+          errors.push({ row: i + 2, ref_id: row.ref_id, error: e.message });
+        }
+      }
+
+      const refToControlId = new Map();
+      for (const c of created) {
+        if (c.ref_id && c.id) refToControlId.set(c.ref_id, c.id);
+      }
+
+      let linkedPatchCount = 0;
+      const linkErrors = [];
+
+      if (complianceAssessment && typeof complianceAssessment === 'string') {
+        const ca = complianceAssessment.trim();
+        for (const [refId, controlId] of refToControlId) {
+          try {
+            const qs = `?compliance_assessment=${encodeURIComponent(ca)}&requirement__ref_id=${encodeURIComponent(refId)}&page_size=100`;
+            const listRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${qs}`, {}, reqToken);
+            if (!listRes.ok) {
+              if (await finalizeGrcUpstreamError(res, reqToken, listRes)) return;
+              const t = await listRes.text();
+              linkErrors.push({ ref_id: refId, error: t.slice(0, 400) });
+              continue;
+            }
+            const listData = await listRes.json();
+            const ras = Array.isArray(listData.results) ? listData.results : [];
+            if (ras.length === 0) {
+              linkErrors.push({ ref_id: refId, error: 'No requirement assessment matched this ref_id for the selected compliance assessment.' });
+              continue;
+            }
+            for (const ra of ras) {
+              const raId = ra.id || ra.uuid;
+              if (!raId) continue;
+              const getRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {}, reqToken);
+              if (!getRes.ok) {
+                if (await finalizeGrcUpstreamError(res, reqToken, getRes)) return;
+                const gt = await getRes.text();
+                linkErrors.push({ ref_id: refId, raId, error: gt.slice(0, 400) });
+                continue;
+              }
+              const raDetail = await getRes.json();
+              const existingRaw = raDetail.applied_controls;
+              const acList = Array.isArray(existingRaw) ? existingRaw : [];
+              const existingIds = acList.map(ac =>
+                typeof ac === 'object' && ac !== null ? (ac.id || ac.uuid || '') : String(ac)
+              ).filter(Boolean);
+              const merged = [...new Set([...existingIds, controlId])];
+              if (merged.length === existingIds.length) continue;
+              const patchRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ applied_controls: merged }),
+              }, reqToken);
+              if (!patchRes.ok) {
+                if (await finalizeGrcUpstreamError(res, reqToken, patchRes)) return;
+                const pe = await patchRes.text();
+                linkErrors.push({ ref_id: refId, raId, error: pe.slice(0, 500) });
+              } else {
+                linkedPatchCount++;
+              }
+            }
+          } catch (e) {
+            linkErrors.push({ ref_id: refId, error: e.message });
+          }
+        }
+      }
+
+      sendJSON(res, 200, {
+        success: errors.length === 0,
+        grcApi: GRC_API_URL,
+        sheetName,
+        totalParsed: rows.length,
+        createdCount: created.length,
+        failedCount: errors.length,
+        linkedPatchCount,
+        created,
+        errors,
+        linkErrors: complianceAssessment ? linkErrors : [],
+      });
+    } catch (err) {
+      console.error('[DataStudio] import-applied-controls:', err);
+      sendJSON(res, 500, { error: err.message || 'Import failed.' });
+    }
+    return;
+  }
+
   // ---- Analyze API ----
   if (url.pathname === '/api/analyze' && req.method === 'POST') {
     try {
@@ -2353,26 +2552,26 @@ const server = http.createServer(async (req, res) => {
       }
 
       const result = await callGeminiAPIForSingle(requirement, prompt, apiKey, contextFiles);
-        let promptTemplateVersion = null;
-        try {
-          const stat = fs.statSync(promptTemplatePath);
-          promptTemplateVersion = stat.mtime.toISOString();
-        } catch (_) {}
-        const templateMeta = {
-          model: 'gemini-2.5-pro',
-          prompt_template: 'requirement-analyzer',
-          prompt_template_version: promptTemplateVersion
-        };
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, data: result, meta: templateMeta }));
+      let promptTemplateVersion = null;
+      try {
+        const stat = fs.statSync(promptTemplatePath);
+        promptTemplateVersion = stat.mtime.toISOString();
+      } catch (_) {}
+      const templateMeta = {
+        model: 'gemini-2.5-pro',
+        prompt_template: 'requirement-analyzer',
+        prompt_template_version: promptTemplateVersion
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data: result, meta: templateMeta }));
     } catch (error) {
       console.error('Analyze API Error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }
-        return;
-      }
-      
+    return;
+  }
+
   // ---- Controls Generation API ----
   if (url.pathname === '/api/controls/generate' && req.method === 'POST') {
     try {
@@ -2529,7 +2728,8 @@ const server = http.createServer(async (req, res) => {
   // ---- GRC Platform Proxy: Get compliance assessments ----
   if (url.pathname === '/api/grc/compliance-assessments' && req.method === 'GET') {
     try {
-      const grcRes = await grcFetch(`${GRC_API_URL}/api/compliance-assessments/`, {}, reqToken);
+      const qs = url.search || '';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/compliance-assessments/${qs}`, {}, reqToken);
       if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
       const data = await grcRes.json();
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2703,11 +2903,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ---- GRC Platform Proxy: PATCH requirement assessment (link applied controls) ----
-  const raPatchMatch = url.pathname.match(/^\/api\/grc\/requirement-assessments\/([^/]+)$/);
-  if (raPatchMatch && req.method === 'PATCH') {
+  // ---- GRC Platform Proxy: GET / PATCH single requirement assessment ----
+  const raOneMatch = url.pathname.match(/^\/api\/grc\/requirement-assessments\/([^/]+)$/);
+  if (raOneMatch && req.method === 'GET') {
     try {
-      const raId = raPatchMatch[1];
+      const raId = raOneMatch[1];
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data }));
+    } catch (error) {
+      console.error('[GRC] GET requirement-assessment error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (raOneMatch && req.method === 'PATCH') {
+    try {
+      const raId = raOneMatch[1];
       const body = await parseBody(req);
       console.log(`[GRC] PATCH requirement-assessment ${raId}:`, JSON.stringify(body));
       const grcRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {
@@ -2770,6 +2985,7 @@ const server = http.createServer(async (req, res) => {
             csf_function: c.csf_function || c.csfFunction || '',
             effort: effortMap[(c.effort || c.effort_estimate || 'M').toLowerCase()] || c.effort || 'M',
           };
+          if (c.ref_id) grcBody.ref_id = c.ref_id;
 
           // Only include folder if provided (otherwise GRC uses root folder)
           if (folder) grcBody.folder = folder;

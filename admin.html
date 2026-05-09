@@ -564,6 +564,24 @@
                   </table>
                 </div>
               </div>
+              <div id="ds-import-panel" class="ds-import-panel" style="display:none">
+                <h3 class="ds-import-title">Import to GRC</h3>
+                <div class="ds-import-row">
+                  <label class="ds-label" for="ds-folder-select">Folder (domain) <span class="ds-req">*</span></label>
+                  <select id="ds-folder-select" class="ds-select">
+                    <option value="">Select after loading…</option>
+                  </select>
+                </div>
+                <div class="ds-import-row">
+                  <label class="ds-label" for="ds-ca-select">Compliance assessment (optional)</label>
+                  <select id="ds-ca-select" class="ds-select">
+                    <option value="">— Do not link requirement assessments —</option>
+                  </select>
+                </div>
+                <p class="ds-import-note">Creates one applied control per row via <code>POST /api/applied-controls/</code> on the server’s <code>GRC_API_URL</code>. With an assessment selected, each row is linked by <code>requirement__ref_id</code> (كود المتطلب).</p>
+                <button type="button" class="btn-admin-primary" id="ds-btn-import-grc" disabled>Import all rows to GRC</button>
+                <pre id="ds-import-log" class="ds-import-log" style="display:none"></pre>
+              </div>
             </div>
           </div>
         </section>
