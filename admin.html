@@ -599,8 +599,15 @@
             </div>
             <div class="admin-card">
               <div class="ds-import-row">
-                <label class="ds-label" for="pup-org-context">Organisation context</label>
-                <textarea id="pup-org-context" class="admin-form-textarea" rows="5" placeholder="Industry, jurisdiction, scope…"></textarea>
+                <label class="ds-label" for="pup-org-select">Organization profile</label>
+                <select id="pup-org-select" class="ds-select">
+                  <option value="">Loading contexts…</option>
+                </select>
+                <p class="ds-import-note" style="margin-top:8px">Choose a saved profile from <strong>Organization Contexts</strong>. The field below is filled automatically; you can edit the text before running.</p>
+              </div>
+              <div class="ds-import-row" style="margin-top:12px">
+                <label class="ds-label" for="pup-org-context">Organisation context (sent to pipeline)</label>
+                <textarea id="pup-org-context" class="admin-form-textarea" rows="5" placeholder="Select a profile above, or type industry, jurisdiction, scope…"></textarea>
               </div>
               <div class="ds-import-row" style="margin-top:12px">
                 <label class="ds-label" for="pup-regulation">Regulation text <span class="ds-req">*</span></label>

@@ -11487,6 +11487,8 @@ document.getElementById('al-ca-search').addEventListener('input', (e) => {
 
 let dataStudioUploadWired = false;
 let policyUpdatePipelineWired = false;
+/** Cached list for Policy update pipeline org dropdown (from GET /api/org-contexts) */
+let pupOrgContextsCache = [];
 let dataStudioLastFile = null;
 
 function loadDataStudioPage() {
@@ -11712,16 +11714,84 @@ async function handleDataStudioFile(file) {
   }
 }
 
+/**
+ * Same shape as server.js buildOrgProfileText — plain text for F1 org context (no "missing profile" filler).
+ */
+function formatOrgProfileTextForPipeline(orgContext) {
+  if (!orgContext) return '';
+  const p = [];
+  if (orgContext.nameEn) p.push(`Organization: ${orgContext.nameEn}`);
+  if (orgContext.nameAr) p.push(`Arabic Name: ${orgContext.nameAr}`);
+  const sectorLabels = { banking: 'Banking & Financial Services', government: 'Government', healthcare: 'Healthcare', energy: 'Energy & Utilities', telecom: 'Telecommunications', education: 'Education', retail: 'Retail & E-Commerce', insurance: 'Insurance', technology: 'Technology', other: 'Other' };
+  const sizeLabels = { small: 'Small (1–50)', medium: 'Medium (51–500)', large: 'Large (501–5000)', enterprise: 'Enterprise (5000+)' };
+  const sector = orgContext.sectorCustom || sectorLabels[orgContext.sector] || orgContext.sector;
+  if (sector) p.push(`Industry Vertical: ${sector}`);
+  if (orgContext.size) p.push(`Entity Size: ${sizeLabels[orgContext.size] || orgContext.size}`);
+  if (orgContext.complianceMaturity) p.push(`Compliance Maturity Level: ${orgContext.complianceMaturity} / 5`);
+  if (orgContext.regulatoryMandates && orgContext.regulatoryMandates.length) p.push(`Active Regulatory Mandates: ${orgContext.regulatoryMandates.join(', ')}`);
+  if (orgContext.governanceStructure) p.push(`Governance Structure: ${orgContext.governanceStructure}`);
+  if (orgContext.dataClassification) p.push(`Data Classification Level: ${orgContext.dataClassification}`);
+  if (orgContext.geographicScope) p.push(`Geographic Scope: ${orgContext.geographicScope}`);
+  if (orgContext.itInfrastructure) p.push(`IT Infrastructure Type: ${orgContext.itInfrastructure}`);
+  if (orgContext.strategicObjectives && orgContext.strategicObjectives.length) p.push(`Strategic Objectives:\n${orgContext.strategicObjectives.map(o => '  - ' + o).join('\n')}`);
+  if (orgContext.obligatoryFrameworks && orgContext.obligatoryFrameworks.length) p.push(`Obligatory Frameworks: ${orgContext.obligatoryFrameworks.join(', ')}`);
+  if (orgContext.policies && orgContext.policies.length) p.push(`Linked Policies:\n${orgContext.policies.map(pol => '  - ' + (pol.name || pol)).join('\n')}`);
+  if (orgContext.trackingMetrics && orgContext.trackingMetrics.length) p.push(`Tracking Metrics:\n${orgContext.trackingMetrics.map(m => '  - ' + (m.name || m)).join('\n')}`);
+  if (orgContext.riskScenarios && orgContext.riskScenarios.length) p.push(`Risk Scenarios:\n${orgContext.riskScenarios.map(r => '  - ' + (r.name || r)).join('\n')}`);
+  if (orgContext.notes) p.push(`Additional Notes: ${orgContext.notes}`);
+  return p.join('\n');
+}
+
+async function refreshPolicyUpdatePipelineOrgDropdown() {
+  const sel = document.getElementById('pup-org-select');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— Select organization context —</option>';
+  try {
+    const d = await fetchJSON(API.orgContexts);
+    pupOrgContextsCache = Array.isArray(d.contexts) ? d.contexts : [];
+  } catch (e) {
+    console.error('[Policy pipeline] org contexts fetch failed:', e);
+    pupOrgContextsCache = [];
+    sel.innerHTML = `<option value="">Unable to load contexts</option>`;
+    return;
+  }
+  for (const c of pupOrgContextsCache) {
+    const id = c.id || '';
+    const label = c.nameEn || c.name || id || 'Untitled';
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = label;
+    sel.appendChild(opt);
+  }
+  if (prev && pupOrgContextsCache.some(x => String(x.id) === String(prev))) {
+    sel.value = prev;
+  }
+}
+
+function onPolicyUpdatePipelineOrgSelect() {
+  const sel = document.getElementById('pup-org-select');
+  const ta = document.getElementById('pup-org-context');
+  if (!sel || !ta) return;
+  const id = sel.value;
+  if (!id) return;
+  const ctx = pupOrgContextsCache.find(x => String(x.id) === String(id));
+  if (ctx) ta.value = formatOrgProfileTextForPipeline(ctx);
+}
+
 function loadPolicyUpdatePipelinePage() {
   initPolicyUpdatePipeline();
+  refreshPolicyUpdatePipelineOrgDropdown().catch(() => {});
 }
 
 function initPolicyUpdatePipeline() {
   if (policyUpdatePipelineWired) return;
   const btn = document.getElementById('pup-run-btn');
-  if (!btn) return;
+  const orgSel = document.getElementById('pup-org-select');
+  if (!btn || !orgSel) return;
   policyUpdatePipelineWired = true;
   btn.addEventListener('click', () => runPolicyUpdatePipeline());
+  orgSel.addEventListener('change', () => onPolicyUpdatePipelineOrgSelect());
 }
 
 async function runPolicyUpdatePipeline() {
