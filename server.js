@@ -6,6 +6,7 @@ const { GoogleGenAI } = require('@google/genai');
 const Database = require('better-sqlite3');
 const yaml = require('js-yaml');
 const XLSX = require('xlsx');
+const { runPolicyUpdatePipeline } = require('./policyUpdatePipeline');
 
 const PORT = 5555; // Wathbah server port
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent';
@@ -2642,6 +2643,37 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       console.error('[DataStudio] import-applied-controls:', err);
       sendJSON(res, 500, { error: err.message || 'Import failed.' });
+    }
+    return;
+  }
+
+  // ---- AI Tools: Policy update pipeline (F1–F4, Gemini) ----
+  if (url.pathname === '/api/ai-tools/policy-update-pipeline' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const apiKey = GEMINI_API_KEY || req.headers['x-api-key'];
+      if (!apiKey) {
+        sendJSON(res, 401, { error: 'API key not configured. Add GEMINI_API_KEY to .env file.' });
+        return;
+      }
+      const orgContext = body.orgContext != null ? String(body.orgContext) : '';
+      const regulationText = body.regulationText != null ? String(body.regulationText) : '';
+      const policies = Array.isArray(body.policies) ? body.policies : [];
+      if (!regulationText.trim()) {
+        sendJSON(res, 400, { error: 'regulationText is required.' });
+        return;
+      }
+      const result = await runPolicyUpdatePipeline({
+        apiKey,
+        orgContext,
+        regulationText,
+        policies,
+        overrides: body.overrides && typeof body.overrides === 'object' ? body.overrides : undefined,
+      });
+      sendJSON(res, 200, { success: true, data: result });
+    } catch (err) {
+      console.error('[PolicyUpdatePipeline]', err);
+      sendJSON(res, 500, { error: err.message || 'Pipeline failed.' });
     }
     return;
   }
@@ -5821,6 +5853,7 @@ server.listen(PORT, () => {
 ║   Endpoints:                                              ║
 ║   • GET  /                        - Serve the app         ║
 ║   • POST /api/analyze             - Analyze requirements  ║
+║   • POST /api/ai-tools/policy-update-pipeline - F1–F4     ║
 ║   • GET  /api/collections         - List collections      ║
 ║   • POST /api/collections         - Create collection     ║
 ║   • DELETE /api/collections/:id   - Delete collection     ║

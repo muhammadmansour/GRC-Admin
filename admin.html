@@ -75,6 +75,10 @@
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H7L9 4H13C13.6 4 14 4.4 14 5V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 7H14M3 10H14M6 7V14M10 7V14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
             Data Studio
           </button>
+          <button class="sidebar-item" data-page="policy-update-pipeline">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 3H13M3 8H13M3 13H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 11L13 13M11 13L13 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            Policy update pipeline
+          </button>
         </div>
 
         <button class="sidebar-section-toggle" data-section="workbench">
@@ -582,6 +586,39 @@
                 <button type="button" class="btn-admin-primary" id="ds-btn-import-grc" disabled>Import all rows to GRC</button>
                 <pre id="ds-import-log" class="ds-import-log" style="display:none"></pre>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- =================== POLICY UPDATE PIPELINE =================== -->
+        <section class="admin-page" id="page-policy-update-pipeline">
+          <div class="page-container">
+            <div class="page-header">
+              <h1 class="page-title">Policy update pipeline</h1>
+              <p class="page-subtitle">F1 relevance → F2 extract policy points → F3 embedding match → F4 impact (Gemini). Uses <code>GEMINI_API_KEY</code> on the server.</p>
+            </div>
+            <div class="admin-card">
+              <div class="ds-import-row">
+                <label class="ds-label" for="pup-org-context">Organisation context</label>
+                <textarea id="pup-org-context" class="admin-form-textarea" rows="5" placeholder="Industry, jurisdiction, scope…"></textarea>
+              </div>
+              <div class="ds-import-row" style="margin-top:12px">
+                <label class="ds-label" for="pup-regulation">Regulation text <span class="ds-req">*</span></label>
+                <textarea id="pup-regulation" class="admin-form-textarea" rows="10" placeholder="Full or partial regulation text to analyse…"></textarea>
+              </div>
+              <div class="ds-import-row" style="margin-top:12px">
+                <label class="ds-label" for="pup-policies-json">Policies (JSON array)</label>
+                <p class="ds-import-note" style="margin-bottom:8px">Each item needs <code>id</code> and <code>content</code>; optional <code>title</code>. Example: <code>[{&quot;id&quot;:&quot;p1&quot;,&quot;title&quot;:&quot;Access&quot;,&quot;content&quot;:&quot;…&quot;}]</code></p>
+                <textarea id="pup-policies-json" class="admin-form-textarea" rows="8" placeholder='[{"id":"pol-1","title":"Example policy","content":"Policy body text…"}]'></textarea>
+              </div>
+              <div style="margin-top:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button type="button" class="btn-admin-primary" id="pup-run-btn">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7H11M8 4L11 7L8 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Run pipeline
+                </button>
+                <span id="pup-status" class="ds-status" aria-live="polite"></span>
+              </div>
+              <pre id="pup-result" class="ds-import-log" style="display:none;margin-top:16px;max-height:480px;overflow:auto"></pre>
             </div>
           </div>
         </section>

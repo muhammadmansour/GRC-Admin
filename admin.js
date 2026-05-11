@@ -89,6 +89,7 @@ const PAGE_NAMES = {
   'policy-ingestion': 'Organization Policy Ingestion',
   'org-contexts': 'Organization Contexts',
   'data-studio': 'Data Studio',
+  'policy-update-pipeline': 'Policy update pipeline',
   'prompts': 'Prompts',
   'file-collections': 'File Collections',
   'workbench': 'Workbench',
@@ -142,6 +143,7 @@ function navigateTo(page, pushState = true, subId = null) {
   if (page === 'merge-optimizer') loadMergeOptimizer();
   if (page === 'policy-ingestion') loadPolicyIngestion(subId);
   if (page === 'data-studio') loadDataStudioPage();
+  if (page === 'policy-update-pipeline') loadPolicyUpdatePipelinePage();
   if (page === 'workbench') loadWorkbench(subId);
   if (page === 'audit-log') loadAuditLog(subId);
 
@@ -11484,6 +11486,7 @@ document.getElementById('al-ca-search').addEventListener('input', (e) => {
 // ─── Data Studio (Excel upload / import preview) ──────────────
 
 let dataStudioUploadWired = false;
+let policyUpdatePipelineWired = false;
 let dataStudioLastFile = null;
 
 function loadDataStudioPage() {
@@ -11709,12 +11712,89 @@ async function handleDataStudioFile(file) {
   }
 }
 
+function loadPolicyUpdatePipelinePage() {
+  initPolicyUpdatePipeline();
+}
+
+function initPolicyUpdatePipeline() {
+  if (policyUpdatePipelineWired) return;
+  const btn = document.getElementById('pup-run-btn');
+  if (!btn) return;
+  policyUpdatePipelineWired = true;
+  btn.addEventListener('click', () => runPolicyUpdatePipeline());
+}
+
+async function runPolicyUpdatePipeline() {
+  const orgEl = document.getElementById('pup-org-context');
+  const regEl = document.getElementById('pup-regulation');
+  const polEl = document.getElementById('pup-policies-json');
+  const outEl = document.getElementById('pup-result');
+  const statusEl = document.getElementById('pup-status');
+  const btn = document.getElementById('pup-run-btn');
+  if (!regEl || !btn) return;
+
+  const regulationText = (regEl.value || '').trim();
+  if (!regulationText) {
+    toast('error', 'Missing regulation', 'Paste regulation text first.');
+    return;
+  }
+
+  let policies = [];
+  const rawPol = (polEl && polEl.value) ? polEl.value.trim() : '';
+  if (rawPol) {
+    try {
+      const parsed = JSON.parse(rawPol);
+      policies = Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      toast('error', 'Invalid JSON', 'Policies must be a JSON array.');
+      return;
+    }
+  }
+
+  btn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Running F1–F4…';
+  if (outEl) {
+    outEl.style.display = 'none';
+    outEl.textContent = '';
+  }
+
+  try {
+    const r = await fetch('/api/ai-tools/policy-update-pipeline', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgContext: orgEl ? orgEl.value : '',
+        regulationText,
+        policies,
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText || 'Request failed');
+    if (outEl) {
+      outEl.style.display = 'block';
+      outEl.textContent = JSON.stringify(j.data != null ? j.data : j, null, 2);
+    }
+    toast('success', 'Pipeline finished', `Stage: ${(j.data && j.data.stage_reached) || 'done'}`);
+  } catch (e) {
+    console.error('[Policy update pipeline]', e);
+    if (outEl) {
+      outEl.style.display = 'block';
+      outEl.textContent = e.message || String(e);
+    }
+    toast('error', 'Pipeline failed', e.message || '');
+  } finally {
+    btn.disabled = false;
+    if (statusEl) statusEl.textContent = '';
+  }
+}
+
 // ─── Init ─────────────────────────────────────────────────────
 
 console.log('[admin.js] Script loaded, readyState:', document.readyState);
 
 function initApp() {
   initDataStudioUpload();
+  initPolicyUpdatePipeline();
   const { page, subId } = parseRoute();
   console.log(`[admin.js] Initializing → route: /${page}${subId ? '/' + subId : ''}`);
   navigateTo(page, true, subId);
