@@ -8,17 +8,15 @@
 - **Method:** `.env` file loaded manually at startup (`server.js:14–27`). No `dotenv` package — custom line-by-line parser.
 - **Known env vars:**
   - `GEMINI_API_KEY` — Google Generative AI API key
-  - `GRC_API_URL` — Base URL for the WathbahGRC (CISO Assistant) API. Defaults to `https://grc.wathbah.dev` (`server.js:34`)
+  - `GRC_API_URL` — Base URL for the WathbahGRC (CISO Assistant) API. Defaults to `https://stage-hrsd.wathbahs.com` (`server.js:39`). Trailing slashes are stripped at load.
 
 ## Known Environments
 
 | Environment | URL (inferred) | Evidence |
 |---|---|---|
 | Production | `https://wathbahs.com` | nginx config (`nginx/prompt.wathbahs.com`) proxies to `127.0.0.1:8888` |
-| Dev / Default | `https://grc.wathbah.dev` | Default value of `GRC_API_URL` in `server.js:34` |
+| Staging / Default | `https://stage-hrsd.wathbahs.com` | Default value of `GRC_API_URL` in `server.js:39` |
 | Local | `http://localhost:5555` | Hardcoded `PORT = 5555` in `server.js:8` |
-
-⚠ The nginx config references `wathbahs.com` (note the `s`), while the GRC API default references `grc.wathbah.dev` (no `s`, `.dev` TLD). No reference to `grc.wathbahs.com` was found. No reference to GCP projects or GCS buckets was found.
 
 ## SSL / TLS
 

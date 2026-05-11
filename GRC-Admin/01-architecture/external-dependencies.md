@@ -21,7 +21,7 @@
 
 | Aspect | Detail |
 |---|---|
-| Base URL | `GRC_API_URL` env var, defaults to `https://grc.wathbah.dev` |
+| Base URL | `GRC_API_URL` env var, defaults to `https://stage-hrsd.wathbahs.com` |
 | Auth | Token-based — user logs into Admin, which forwards credentials to `GRC_API_URL/api/iam/login/`. The returned GRC token is stored in-memory and forwarded on subsequent requests. |
 | Endpoints consumed | `/api/iam/login/`, `/api/frameworks/`, `/api/requirement-nodes/`, `/api/compliance-assessments/`, `/api/requirement-assessments/`, `/api/applied-controls/`, `/api/organisation-objectives/`, `/api/risk-scenarios/`, `/api/folders/`, `/api/stored-libraries/upload/`, `/api/reference-controls/`, `/api/metrology/metric-instances/` |
 | Wiring | `grcFetch()` helper at `server.js:57–64`, proxy endpoints at `server.js:2028–2500` |

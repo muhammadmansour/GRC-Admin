@@ -198,6 +198,7 @@ function toast(type, title, msg, dur) {
   const ic = {
     success: '<path d="M9 12L11 14L15 10M21 12C21 16.97 16.97 21 12 21C7.03 21 3 16.97 3 12C3 7.03 7.03 3 12 3C16.97 3 21 7.03 21 12Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     error: '<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 8V12M12 16V16.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    warning: '<path d="M12 9V13M12 17H12.01M4.93 19H19.07C20.14 19 20.81 17.83 20.28 16.91L13.21 4.58C12.68 3.67 11.32 3.67 10.79 4.58L3.72 16.91C3.19 17.83 3.86 19 4.93 19Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     info: '<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 16V12M12 8V8.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
   };
   el.innerHTML = '<div class="toast-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none">' + (ic[type] || ic.info) + '</svg></div><div class="toast-content"><div class="toast-title">' + esc(title) + '</div><div class="toast-message">' + esc(msg) + '</div></div><button class="toast-close"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>';
@@ -11483,19 +11484,37 @@ document.getElementById('al-ca-search').addEventListener('input', (e) => {
 
 // ─── Data Studio (Excel upload / import preview) ──────────────
 
+const DATA_STUDIO_CA_STORAGE_KEY = 'ds_data_studio_compliance_assessment_uuid';
+
 let dataStudioUploadWired = false;
 let dataStudioLastFile = null;
 
+function restoreDataStudioSavedAudit() {
+  const caEl = document.getElementById('ds-compliance-assessment');
+  if (!caEl || caEl.value.trim()) return;
+  try {
+    const saved = localStorage.getItem(DATA_STUDIO_CA_STORAGE_KEY);
+    if (saved) caEl.value = saved;
+  } catch (_) { /* ignore */ }
+}
+
+function persistDataStudioAuditUuid(uuid) {
+  const v = String(uuid || '').trim();
+  if (!v) return;
+  try {
+    localStorage.setItem(DATA_STUDIO_CA_STORAGE_KEY, v);
+  } catch (_) { /* ignore */ }
+}
+
 function loadDataStudioPage() {
+  restoreDataStudioSavedAudit();
   loadDataStudioGrcOptions().catch(() => {});
 }
 
 async function loadDataStudioGrcOptions() {
   const folderSel = document.getElementById('ds-folder-select');
-  const caSel = document.getElementById('ds-ca-select');
   if (!folderSel) return;
   const prevFolder = folderSel.value;
-  const prevCa = caSel ? caSel.value : '';
   folderSel.innerHTML = '<option value="">Loading…</option>';
   try {
     const fr = await fetch('/api/grc/folders?page_size=500');
@@ -11513,76 +11532,436 @@ async function loadDataStudioGrcOptions() {
   } catch (e) {
     folderSel.innerHTML = `<option value="">${esc(e.message)}</option>`;
   }
-  if (!caSel) return;
-  caSel.innerHTML = '<option value="">— Do not link requirement assessments —</option>';
-  try {
-    const cr = await fetch('/api/grc/compliance-assessments?page_size=500');
-    const cj = await cr.json();
-    if (!cr.ok) throw new Error(cj.error || 'Compliance assessments request failed');
-    let cas = cj.results;
-    if (!Array.isArray(cas)) cas = [];
-    for (const ca of cas) {
-      const id = ca.id || ca.uuid;
-      const label = ca.name || ca.basename || id;
-      caSel.insertAdjacentHTML('beforeend', `<option value="${esc(id)}">${esc(label)}</option>`);
-    }
-    if (prevCa) caSel.value = prevCa;
-  } catch (_) { /* optional dropdown */ }
+  loadDataStudioFrameworkOptions().catch(() => {});
 }
 
-async function runDataStudioGrCImport() {
+async function loadDataStudioFrameworkOptions() {
+  const sel = document.getElementById('ds-framework-select');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">Loading frameworks…</option>';
+  try {
+    const r = await fetch('/api/grc/frameworks');
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Frameworks request failed');
+    const list = Array.isArray(j.results) ? j.results : (Array.isArray(j) ? j : []);
+    if (!list.length) {
+      sel.innerHTML = '<option value="">— no frameworks loaded in GRC —</option>';
+      return;
+    }
+    sel.innerHTML = '<option value="">— Choose framework —</option>' +
+      list.map(f => {
+        const id = f.id || f.uuid;
+        const label = `${f.name || f.ref_id || id}${f.ref_id ? ` (${f.ref_id})` : ''}`;
+        return `<option value="${esc(id)}" data-name="${esc(f.name || '')}">${esc(label)}</option>`;
+      }).join('');
+    if (prev) sel.value = prev;
+  } catch (e) {
+    sel.innerHTML = `<option value="">${esc(e.message)}</option>`;
+  }
+}
+
+async function runDataStudioCreateAudit() {
+  const fwSel = document.getElementById('ds-framework-select');
+  const nameInput = document.getElementById('ds-audit-name');
+  const auditInput = document.getElementById('ds-compliance-assessment');
+  const folderSel = document.getElementById('ds-folder-select');
+  const btn = document.getElementById('ds-btn-create-audit');
+  const logEl = document.getElementById('ds-import-log');
+
+  const framework = fwSel && fwSel.value ? String(fwSel.value).trim() : '';
+  if (!framework) {
+    toast('error', 'Pick a framework', 'Choose the framework that the new audit should host (RAs are auto-generated from this framework on insert).');
+    return;
+  }
+  const name = nameInput && nameInput.value ? String(nameInput.value).trim() : '';
+  const folder = folderSel && folderSel.value ? String(folderSel.value).trim() : '';
+  const perimeterEl = document.getElementById('ds-perimeter-uuid');
+  const perimeter = perimeterEl && perimeterEl.value ? String(perimeterEl.value).trim() : '';
+
+  if (btn) btn.disabled = true;
+  if (logEl) {
+    logEl.style.display = 'block';
+    logEl.textContent = 'Creating compliance assessment in GRC…\nPOST /api/compliance-assessments/ → GRC will auto-generate one RequirementAssessment per requirement node in the framework.';
+  }
+  try {
+    const body = { framework };
+    if (name) body.name = name;
+    if (folder) body.folder = folder;
+    if (perimeter) body.perimeter = perimeter;
+    const r = await fetch('/api/data-studio/create-audit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.success) {
+      const grcDetail = j.grcResponse ? `\n\nGRC said: ${j.grcResponse}` : '';
+      const detail = j.detail ? `\n\nDetail: ${j.detail}` : '';
+      const hint = j.hint ? `\n\nHint: ${j.hint}` : '';
+      throw new Error((j.error || r.statusText || 'Create audit failed') + grcDetail + detail + hint);
+    }
+    if (auditInput) {
+      auditInput.value = j.id;
+      persistDataStudioAuditUuid(j.id);
+    }
+    const lines = [
+      'Created compliance assessment ✓',
+      `  id:        ${j.id}`,
+      `  name:      ${j.name || ''}`,
+      `  framework: ${j.frameworkName || j.framework}`,
+      j.folder ? `  folder:    ${j.folder}` : '',
+      `  RAs auto-generated by GRC: ${j.raCount == null ? '(unknown — count endpoint did not respond)' : j.raCount}`,
+      '',
+      'Audit UUID has been pasted into the field above.',
+      'Next: click "Link only (existing controls + audit)" to attach the controls you already imported, OR click "Import all rows to GRC" if you have not imported yet.',
+    ].filter(Boolean);
+    if (logEl) logEl.textContent = lines.join('\n');
+    toast('success', 'Audit created', `${j.name || 'Compliance assessment'} (${j.raCount != null ? `${j.raCount} RAs auto-generated` : 'RAs auto-generated'}).`);
+  } catch (e) {
+    console.error('[Data Studio create-audit]', e);
+    if (logEl) logEl.textContent = e.message || String(e);
+    toast('error', 'Create audit failed', (e.message || '').split('\n')[0]);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function getDataStudioComplianceAssessmentUuid() {
+  const caEl = document.getElementById('ds-compliance-assessment');
+  const caManual = caEl && caEl.value ? String(caEl.value).trim() : '';
+  const caSession =
+    !caManual && typeof csSessionData !== 'undefined' && csSessionData && csSessionData.complianceAssessment
+      ? String(csSessionData.complianceAssessment).trim()
+      : '';
+  return caManual || caSession || '';
+}
+
+async function runDataStudioDiagnoseAudits() {
+  const logEl = document.getElementById('ds-import-log');
+  const btn = document.getElementById('ds-btn-diagnose-audits');
+  if (btn) btn.disabled = true;
+  if (logEl) {
+    logEl.style.display = 'block';
+    logEl.textContent = 'Diagnosing GRC audits and frameworks…';
+  }
+  try {
+    const r = await fetch('/api/data-studio/diagnose-grc-audits', { credentials: 'same-origin' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText || 'Diagnose failed');
+
+    const sheetRefs = (() => {
+      try {
+        const tbody = document.querySelector('#ds-preview-table tbody');
+        if (!tbody) return [];
+        const out = new Set();
+        const headerCells = Array.from(document.querySelectorAll('#ds-preview-thead th')).map(th => th.textContent.trim());
+        const refColIdx = headerCells.findIndex(h => /كود المتطلب|^ref_id$|^Ref ID$/i.test(h));
+        if (refColIdx < 0) return [];
+        for (const tr of tbody.querySelectorAll('tr')) {
+          const td = tr.children[refColIdx];
+          if (td) {
+            const v = td.textContent.trim();
+            if (v) out.add(v);
+          }
+        }
+        return [...out];
+      } catch (_) { return []; }
+    })();
+
+    const norm = s => String(s || '').trim().normalize('NFKC');
+    const sheetSet = new Set(sheetRefs.map(norm));
+    const audits = (j.audits || []).map(a => {
+      const overlap = (a.raRefIdsSample || []).filter(r => sheetSet.has(norm(r)));
+      return { ...a, overlapWithPreviewSheet: overlap.length, overlapSample: overlap.slice(0, 8) };
+    }).sort((x, y) => (y.overlapWithPreviewSheet - x.overlapWithPreviewSheet) || (y.distinctRefIds - x.distinctRefIds));
+    const fwSummaries = (j.frameworks || []).map(f => {
+      const overlap = (f.nodeRefIdsSample || []).filter(r => sheetSet.has(norm(r)));
+      return { ...f, overlapWithPreviewSheet: overlap.length, overlapSample: overlap.slice(0, 8) };
+    }).sort((x, y) => y.overlapWithPreviewSheet - x.overlapWithPreviewSheet);
+
+    const lines = [];
+    lines.push(`GRC: ${j.grcApi || ''}`);
+    lines.push(`Compliance assessments (audits) total: ${j.totalComplianceAssessments}`);
+    lines.push(`Frameworks total: ${j.totalFrameworks}`);
+    if (sheetRefs.length) {
+      lines.push(`Comparing against ${sheetRefs.length} ref_id(s) visible in the loaded preview (the full sheet is bigger; this is a quick visual check).`);
+    } else {
+      lines.push('No sheet loaded — overlap counts are not computed. Load your Excel first to see which audit/framework matches.');
+    }
+
+    lines.push('');
+    lines.push('AUDITS (compliance assessments):');
+    if (!audits.length) {
+      lines.push('  (none) — there is no compliance assessment in your GRC. STEP 2 has nothing to PATCH.');
+      lines.push('  Action: in GRC, create a ComplianceAssessment from the MHRSD framework. RAs will be auto-generated.');
+    } else {
+      for (const a of audits.slice(0, 25)) {
+        const fw = a.framework ? `${a.framework.name || ''} (${a.framework.id || ''})` : '—';
+        lines.push(`  • ${a.name}  id=${a.id}`);
+        lines.push(`      framework: ${fw}`);
+        lines.push(`      RAs: ${a.raCount}, distinct ref_ids: ${a.distinctRefIds}`);
+        if (sheetRefs.length) {
+          lines.push(`      overlap with preview ref_ids: ${a.overlapWithPreviewSheet}${a.overlapSample.length ? '  e.g. ' + a.overlapSample.join(', ') : ''}`);
+        }
+        if (a.raRefIdsSample && a.raRefIdsSample.length) {
+          lines.push(`      sample RA ref_ids: ${a.raRefIdsSample.slice(0, 12).join(', ')}`);
+        }
+      }
+      if (audits.length > 25) lines.push(`  …and ${audits.length - 25} more.`);
+    }
+
+    lines.push('');
+    lines.push('FRAMEWORKS:');
+    if (!fwSummaries.length) {
+      lines.push('  (none) — no Library/framework loaded. Action: import the MHRSD library into GRC, then create a ComplianceAssessment from it.');
+    } else {
+      for (const f of fwSummaries.slice(0, 25)) {
+        lines.push(`  • ${f.name}  id=${f.id}  ref_id=${f.ref_id || '—'}  requirementCount=${f.requirementCount}`);
+        if (sheetRefs.length) {
+          lines.push(`      overlap with preview ref_ids: ${f.overlapWithPreviewSheet}${f.overlapSample.length ? '  e.g. ' + f.overlapSample.join(', ') : ''}`);
+        }
+        if (f.nodeRefIdsSample && f.nodeRefIdsSample.length) {
+          lines.push(`      sample requirement-node ref_ids: ${f.nodeRefIdsSample.slice(0, 12).join(', ')}`);
+        }
+      }
+      if (fwSummaries.length > 25) lines.push(`  …and ${fwSummaries.length - 25} more.`);
+    }
+
+    lines.push('');
+    lines.push('INTERPRETATION:');
+    if (!audits.length && !fwSummaries.length) {
+      lines.push('  GRC has no frameworks and no audits — nothing for STEP 2 to attach to.');
+      lines.push('  → Import the MHRSD library into GRC first, then create an audit from it.');
+    } else if (audits.some(a => a.overlapWithPreviewSheet > 0)) {
+      const best = audits.find(a => a.overlapWithPreviewSheet > 0);
+      lines.push(`  ✓ Audit "${best.name}" (${best.id}) has ref_ids matching your sheet — paste this UUID into the Audit UUID field, then click Link only.`);
+    } else if (fwSummaries.some(f => f.overlapWithPreviewSheet > 0)) {
+      const bestFw = fwSummaries.find(f => f.overlapWithPreviewSheet > 0);
+      lines.push(`  ✓ A framework "${bestFw.name}" (${bestFw.id}) has matching ref_ids, but NO audit has been created from it yet.`);
+      lines.push('  → In GRC, create a ComplianceAssessment from this framework (RAs are auto-generated). Then re-run Link only with the new audit UUID.');
+    } else if (audits.length) {
+      const sampleAudit = audits[0];
+      const samples = (sampleAudit.raRefIdsSample || []).slice(0, 5).join(', ');
+      lines.push('  ✗ Audits exist but their requirement ref_ids do not match your sheet.');
+      lines.push(`  → Likely a ref_id format mismatch. Sheet uses values like ${sheetRefs.slice(0, 5).join(', ') || '5.1.1.1'}; an existing audit has ref_ids like ${samples || '—'}.`);
+      lines.push('  → Either fix the framework ref_ids in GRC, or rename the كود المتطلب column in your Excel to match.');
+    }
+
+    if (logEl) logEl.textContent = lines.join('\n');
+    toast('info', 'Diagnosis complete', `${j.totalComplianceAssessments} audit(s), ${j.totalFrameworks} framework(s) found in GRC.`);
+  } catch (e) {
+    console.error('[Data Studio diagnose]', e);
+    if (logEl) logEl.textContent = e.message || String(e);
+    toast('error', 'Diagnose failed', e.message || '');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function runDataStudioGrCImport(linkOnly = false) {
   const folder = document.getElementById('ds-folder-select')?.value;
-  const ca = document.getElementById('ds-ca-select')?.value || '';
   const logEl = document.getElementById('ds-import-log');
   const btn = document.getElementById('ds-btn-import-grc');
+  const linkBtn = document.getElementById('ds-btn-link-only-grc');
   if (!dataStudioLastFile || !folder) {
     toast('error', 'Missing inputs', 'Choose a GRC folder and load an Excel file first.');
     return;
   }
-  if (!btn) return;
-  btn.disabled = true;
+  const complianceAssessmentUuid = getDataStudioComplianceAssessmentUuid();
+  const autoPickEl = document.getElementById('ds-auto-pick-audit');
+  const autoPickComplianceAssessment = !!(autoPickEl && autoPickEl.checked);
+  const autoCreateEl = document.getElementById('ds-auto-create-audit');
+  const autoCreateAuditIfMissing = !autoCreateEl || autoCreateEl.checked;
+  const fwSelectEl = document.getElementById('ds-framework-select');
+  const frameworkUuid = fwSelectEl && fwSelectEl.value ? String(fwSelectEl.value).trim() : '';
+  const perimeterEl = document.getElementById('ds-perimeter-uuid');
+  const perimeterUuid = perimeterEl && perimeterEl.value ? String(perimeterEl.value).trim() : '';
+  const rollUpEl = document.getElementById('ds-roll-up-refs');
+  const rollUpUnknownRefs = !rollUpEl || rollUpEl.checked;
+  if (linkOnly && !complianceAssessmentUuid && !autoPickComplianceAssessment && !autoCreateAuditIfMissing) {
+    toast('error', 'Audit UUID required', 'Link only needs an audit UUID when auto-pick AND auto-create are both off. Turn one on, or paste a compliance assessment id.');
+    return;
+  }
+  if (!btn && !linkOnly) return;
+  if (linkOnly && !linkBtn) return;
+  if (btn) btn.disabled = true;
+  if (linkBtn) linkBtn.disabled = true;
   if (logEl) {
     logEl.style.display = 'block';
-    logEl.textContent = 'Importing… This can take several minutes for large sheets.';
+    logEl.textContent = linkOnly
+      ? 'Link only: matching controls by ref_id and patching requirement assessments…'
+      : 'Importing… This can take several minutes for large sheets.';
   }
   try {
     const body = {
       fileName: dataStudioLastFile.name,
       data: dataStudioLastFile.data,
       folder,
+      autoPickComplianceAssessment,
+      autoCreateAuditIfMissing,
+      rollUpUnknownRefs,
+      ...(complianceAssessmentUuid ? { complianceAssessment: complianceAssessmentUuid } : {}),
+      ...(frameworkUuid ? { framework: frameworkUuid } : {}),
+      ...(perimeterUuid ? { perimeter: perimeterUuid } : {}),
+      ...(linkOnly ? { linkOnly: true } : {}),
     };
-    if (ca) body.complianceAssessment = ca;
+    console.log('[Data Studio] import request', {
+      folder,
+      linkOnly,
+      autoPickComplianceAssessment,
+      autoCreateAuditIfMissing,
+      rollUpUnknownRefs,
+      complianceAssessment: complianceAssessmentUuid || '(none)',
+      framework: frameworkUuid || '(none)',
+      perimeter: perimeterUuid || '(auto-discover)',
+    });
     const r = await fetch('/api/data-studio/import-applied-controls', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
       body: JSON.stringify(body),
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || r.statusText || 'Import failed');
+    if (!r.ok) {
+      console.log('[Data Studio] import response (error)', r.status, j);
+      let msg = [j.error, j.hint].filter(Boolean).join(' — ');
+      if (j.diagnostics && typeof j.diagnostics === 'object' && Object.keys(j.diagnostics).length) {
+        msg = `${msg}\n${JSON.stringify(j.diagnostics)}`;
+      }
+      throw new Error(msg || r.statusText || 'Import failed');
+    }
+    console.log('[Data Studio] import response', j);
+    const modeLine = j.linkOnly ? 'Mode: link only (no new applied controls)' : 'Mode: import (create controls)';
+    const ph1 = (j.phases && j.phases.phase1) || {};
+    const ph2 = (j.phases && j.phases.phase2) || {};
+    const execMode = (j.phases && j.phases.executionMode) || 'row_by_row';
+    const phase1Lines = [
+      `STEP 1 (per row) — ${j.linkOnly ? 'match existing applied control by ref_id' : 'POST /api/applied-controls/ and capture UUID'}`,
+      `  Resolved: ${ph1.resolved != null ? ph1.resolved : (j.linkOnly ? j.matchedExistingCount : j.createdCount)} / ${ph1.attempted != null ? ph1.attempted : j.totalParsed}`,
+      `  Failed:   ${ph1.failed != null ? ph1.failed : '—'}`,
+    ];
+    const raPostAllowed = !!(ph2.raPostAllowed);
+    const step2Headline = raPostAllowed
+      ? 'STEP 2 (per row) — POST /api/requirement-assessments/ using the STEP 1 UUID (PATCH existing RA on fallback)'
+      : 'STEP 2 (per row) — PATCH the existing /api/requirement-assessments/ found by (compliance_assessment, requirement.ref_id) — never creates new RAs';
+    const phase2Lines = [
+      step2Headline,
+      typeof j.rollUpUnknownRefs === 'boolean'
+        ? `  Roll-up workbook refs → parent RA: ${j.rollUpUnknownRefs ? 'ON (numeric codes like 5.1.1.x attach to standard 5.1.1 when present)' : 'OFF (exact requirement__ref_id only)'}`
+        : '',
+      `  Audit: ${ph2.ranAgainstAudit ? (j.complianceAssessmentName ? `${j.complianceAssessmentName} (${ph2.ranAgainstAudit})` : ph2.ranAgainstAudit) : '— none (skipped on every row) —'}`,
+      ph2.skippedReason ? `  Skipped: ${ph2.skippedReason}` : '',
+      `  Linked:   ${ph2.linked != null ? ph2.linked : (j.linkedAtCreateCount || 0)} / ${ph2.attempted != null ? ph2.attempted : '—'}`,
+      `    — via PATCH existing RA:                  ${(ph2.breakdown && ph2.breakdown.via_patch_existing_ra) != null ? ph2.breakdown.via_patch_existing_ra : (j.linkedByPatchCount || 0)}`,
+      raPostAllowed
+        ? `    — via POST /api/requirement-assessments/: ${(ph2.breakdown && ph2.breakdown.via_post_requirement_assessment) != null ? ph2.breakdown.via_post_requirement_assessment : (j.linkedByPostCount || 0)}`
+        : '',
+      `  Rows where requirement__ref_id resolved to an RA: ${j.refIdOverlapCount != null ? j.refIdOverlapCount : '—'}`,
+    ].filter(Boolean);
     const summary = [
+      modeLine,
+      `Execution: ${execMode === 'row_by_row' ? 'row-by-row (POST control → link RA → next row)' : execMode}`,
       `GRC: ${j.grcApi || ''}`,
-      `Created: ${j.createdCount} / ${j.totalParsed}`,
-      `Failed: ${j.failedCount}`,
-      `Requirement assessments in CA: ${j.raCountInCA != null ? j.raCountInCA : '—'}`,
-      `Distinct ref_ids indexed from RAs: ${j.raIndexedRefIds != null ? j.raIndexedRefIds : '—'}`,
-      `Requirement-assessment links (via AppliedControl.requirement_assessments): ${j.linkedAtCreateCount != null ? j.linkedAtCreateCount : '—'}`,
-    ].join('\n');
+      j.complianceAssessmentAutoCreated
+        ? `Audit: AUTO-CREATED "${j.complianceAssessmentName || ''}" (${j.complianceAssessmentId}) from framework "${(j.autoCreatedFramework && j.autoCreatedFramework.name) || (j.autoCreatedFramework && j.autoCreatedFramework.id) || '?'}"${j.autoCreatedFrameworkScore ? ` — ref_id overlap ${j.autoCreatedFrameworkScore}` : ''}`
+        : (j.complianceAssessmentAutoSelected ? 'Audit: auto-selected (best ref_id match)' : ''),
+      `Total rows parsed: ${j.totalParsed}`,
+      `Failed (any step): ${j.failedCount}`,
+      '',
+      ...phase1Lines,
+      '',
+      ...phase2Lines,
+    ].filter(Boolean).join('\n');
+    if (j.complianceAssessmentId) persistDataStudioAuditUuid(j.complianceAssessmentId);
+    if (j.refIdMatchHint) {
+      console.warn('[Data Studio]', j.refIdMatchHint);
+    }
+    const auditS = (j.auditRefIdSample || []).join(', ');
+    const excelS = (j.excelRefIdSample || []).join(', ');
+    const cross = [summary, '', `Audit ref_id sample: ${auditS || '—'}`, `Excel ref_id sample: ${excelS || '—'}`];
+    if (j.refIdMatchHint) cross.push('', j.refIdMatchHint);
+    if (Array.isArray(j.linkWarnings) && j.linkWarnings.length) {
+      cross.push('', 'Warnings:', ...j.linkWarnings.map(w => `• ${w}`));
+    }
     const errLines = (j.errors || []).slice(0, 30).map(e => `Row ${e.row} (${e.ref_id}): ${e.error}`);
-    const linkErr = (j.linkErrors || []).slice(0, 30).map(e => `${e.ref_id}${e.raId ? ' RA ' + e.raId : ''}: ${e.error}`);
+    const linkErr = (j.linkErrors || []).slice(0, 30).map(e => {
+      const loc = e.row != null ? `Row ${e.row}` : (e.ref_id || '—');
+      const ra = e.raId ? ` RA ${e.raId}` : '';
+      const step = e.step ? ` [${e.step}]` : '';
+      const msg = e.error != null ? e.error : e.warning != null ? e.warning : '';
+      return `${loc}${ra}${step}: ${msg}`;
+    });
+    const phase1Sample = Array.isArray(j.phase1)
+      ? j.phase1.filter(p => p.controlId).slice(0, 8).map(p =>
+          `  Row ${p.row} ${p.ref_id || '—'} → control ${p.controlId} (${p.mode})`
+        )
+      : [];
+    const phase1Errors = Array.isArray(j.phase1)
+      ? j.phase1.filter(p => !p.controlId).slice(0, 8).map(p =>
+          `  Row ${p.row} ${p.ref_id || '—'} → ${p.mode}: ${p.error || ''}`
+        )
+      : [];
+    const phase2Sample = Array.isArray(j.phase2)
+      ? j.phase2.filter(p => p.linked).slice(0, 8).map(p =>
+          `  Row ${p.row} ${p.ref_id || '—'} → control ${p.controlId} ⇄ RA ${p.raId || '?'} (${p.mode || ''})`
+        )
+      : [];
+    const phase2Errors = Array.isArray(j.phase2)
+      ? j.phase2.filter(p => !p.linked).slice(0, 8).map(p =>
+          `  Row ${p.row} ${p.ref_id || '—'} → control ${p.controlId} → not linked${p.error ? ` (${p.error})` : ''}`
+        )
+      : [];
+
     if (logEl) {
-      const parts = [summary];
+      const parts = [cross.join('\n')];
+      if (phase1Sample.length) parts.push('', 'STEP 1 sample (first 8 UUIDs received):', ...phase1Sample);
+      if (phase1Errors.length) parts.push('', 'STEP 1 errors (first 8):', ...phase1Errors);
+      if (phase2Sample.length) parts.push('', 'STEP 2 sample (first 8 RAs linked from those UUIDs):', ...phase2Sample);
+      if (phase2Errors.length) parts.push('', 'STEP 2 not-linked (first 8):', ...phase2Errors);
       if (errLines.length) parts.push('', 'Row errors:', ...errLines);
       if (linkErr.length) parts.push('', 'Link errors:', ...linkErr);
       logEl.textContent = parts.join('\n');
     }
-    if (j.failedCount === 0) toast('success', 'Import finished', `${j.createdCount} controls created.`);
-    else toast('info', 'Import finished with errors', `${j.createdCount} created, ${j.failedCount} failed — see log below.`);
+    if (j.refIdMatchHint) {
+      toast('warning', 'Import: requirement refs', 'No rows matched requirement__ref_id for the audit you set — see import log.');
+    }
+    if (Array.isArray(j.linkWarnings) && j.linkWarnings.length) {
+      toast('warning', 'Import: linking', j.linkWarnings[0]);
+    }
+    const hadRefs = Array.isArray(j.excelRefIdSample) && j.excelRefIdSample.length > 0;
+    const noAudit = !j.complianceAssessmentId;
+    if (j.linkOnly) {
+      if (j.failedCount === 0) {
+        toast(
+          'success',
+          'Link finished',
+          `${j.linkedAtCreateCount != null ? j.linkedAtCreateCount : 0} row(s) linked to requirement assessments.`
+        );
+      } else {
+        toast('info', 'Link finished with errors', `${j.linkedAtCreateCount || 0} linked, ${j.failedCount} failed — see log.`);
+      }
+    } else if (j.failedCount === 0) {
+      if (noAudit && hadRefs) {
+        toast(
+          'warning',
+          'Import finished — controls not linked',
+          `${j.createdCount} control(s) created without audit UUID; Requirement assessments tab will be empty until you link (${j.createdCount ? 'use Link only or re-import with audit' : 'see log'}).`
+        );
+      } else {
+        toast('success', 'Import finished', `${j.createdCount} controls created.`);
+      }
+    } else {
+      toast('info', 'Import finished with errors', `${j.createdCount} created, ${j.failedCount} failed — see log below.`);
+    }
   } catch (e) {
     console.error('[Data Studio import]', e);
     if (logEl) logEl.textContent = e.message || String(e);
     toast('error', 'Import failed', e.message || '');
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
+    if (linkBtn) linkBtn.disabled = false;
   }
 }
 
@@ -11633,7 +12012,29 @@ function initDataStudioUpload() {
   });
 
   const importBtn = document.getElementById('ds-btn-import-grc');
-  if (importBtn) importBtn.addEventListener('click', () => runDataStudioGrCImport());
+  if (importBtn) importBtn.addEventListener('click', () => runDataStudioGrCImport(false));
+  const linkOnlyBtn = document.getElementById('ds-btn-link-only-grc');
+  if (linkOnlyBtn) linkOnlyBtn.addEventListener('click', () => runDataStudioGrCImport(true));
+  const diagBtn = document.getElementById('ds-btn-diagnose-audits');
+  if (diagBtn) diagBtn.addEventListener('click', () => runDataStudioDiagnoseAudits());
+  const createAuditBtn = document.getElementById('ds-btn-create-audit');
+  if (createAuditBtn) createAuditBtn.addEventListener('click', () => runDataStudioCreateAudit());
+  const fwSelect = document.getElementById('ds-framework-select');
+  const auditNameInput = document.getElementById('ds-audit-name');
+  if (fwSelect && auditNameInput) {
+    fwSelect.addEventListener('change', () => {
+      const opt = fwSelect.options[fwSelect.selectedIndex];
+      const fwName = opt ? (opt.getAttribute('data-name') || opt.textContent || '').trim() : '';
+      if (fwName && !auditNameInput.value) {
+        auditNameInput.value = `${fwName.split(' (')[0]} – Controls Catalog`;
+      }
+    });
+  }
+
+  const caInput = document.getElementById('ds-compliance-assessment');
+  if (caInput) {
+    caInput.addEventListener('change', () => persistDataStudioAuditUuid(caInput.value));
+  }
 }
 
 async function handleDataStudioFile(file) {
@@ -11692,8 +12093,10 @@ async function handleDataStudioFile(file) {
     dataStudioLastFile = { name: file.name, data };
     const importPanel = document.getElementById('ds-import-panel');
     const importBtn = document.getElementById('ds-btn-import-grc');
+    const linkOnlyBtn = document.getElementById('ds-btn-link-only-grc');
     if (importPanel) importPanel.style.display = 'block';
     if (importBtn) importBtn.disabled = false;
+    if (linkOnlyBtn) linkOnlyBtn.disabled = false;
     const logEl = document.getElementById('ds-import-log');
     if (logEl) { logEl.style.display = 'none'; logEl.textContent = ''; }
     loadDataStudioGrcOptions().catch(() => {});
