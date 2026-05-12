@@ -118,6 +118,37 @@ function isPublicPath(pathname) {
   return false;
 }
 
+/**
+ * Admin SPA client routes — must match admin.js (navigateTo / history paths).
+ * Serves admin.html so refresh/deep-links work after auth passes.
+ */
+const ADMIN_SPA_ROUTE_PREFIXES = [
+  '/dashboard',
+  '/audit-sessions',
+  '/audit-studio',
+  '/controls-studio',
+  '/merge-optimizer',
+  '/policy-ingestion',
+  '/policy-update-pipeline',
+  '/org-contexts',
+  '/data-studio',
+  '/prompts',
+  '/file-collections',
+  '/workbench',
+  '/audit-log',
+];
+
+function isAdminSpaPath(pathname) {
+  let p = pathname == null ? '' : String(pathname);
+  try {
+    p = decodeURIComponent(p.replace(/\+/g, ' '));
+  } catch (_) { /* malformed encoding */ }
+  if (!p.startsWith('/')) p = `/${p}`;
+  while (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+  if (p === '/' || p === '') return true;
+  return ADMIN_SPA_ROUTE_PREFIXES.some((prefix) => p === prefix || p.startsWith(`${prefix}/`));
+}
+
 function getTokenFromRequest(req) {
   // Check cookie
   const cookies = (req.headers.cookie || '').split(';').map(c => c.trim());
@@ -2401,9 +2432,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       // For page requests (HTML or SPA routes), redirect to login
-      const SPA_PREFIXES = ['/', '/dashboard', '/audit-sessions', '/audit-studio', '/controls-studio', '/merge-optimizer', '/policy-ingestion', '/org-contexts', '/data-studio', '/prompts', '/file-collections', '/workbench', '/audit-log'];
-      const isSpaRoute = SPA_PREFIXES.some(p => url.pathname === p || (p !== '/' && url.pathname.startsWith(p + '/')));
-      if (isSpaRoute || url.pathname.endsWith('.html')) {
+      if (isAdminSpaPath(url.pathname) || url.pathname.endsWith('.html')) {
         res.writeHead(302, { 'Location': '/login.html' });
         res.end();
         return;
@@ -5827,9 +5856,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- Client-side routes (serve admin.html for SPA pages) ----
-  const SPA_PREFIXES = ['/', '/dashboard', '/audit-sessions', '/audit-studio', '/controls-studio', '/merge-optimizer', '/policy-ingestion', '/org-contexts', '/data-studio', '/prompts', '/file-collections', '/workbench', '/audit-log'];
-  const isSpaRoute = SPA_PREFIXES.some(p => url.pathname === p || (p !== '/' && url.pathname.startsWith(p + '/')));
-  if (isSpaRoute) {
+  if (isAdminSpaPath(url.pathname)) {
     serveStaticFile(res, path.join(__dirname, 'admin.html'));
     return;
   }

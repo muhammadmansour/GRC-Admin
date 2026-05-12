@@ -2,6 +2,9 @@
  * Policy Updates Pipeline (JavaScript port of WathbahGRC-AIEngine PolicyUpdatesPipeline / wathbah_grc.py).
  * F1 relevance → F2 summarize → F3 embedding RAG match → F4 impact analysis.
  * Uses Gemini REST API only (no ChromaDB — in-memory vectors per request).
+ *
+ * Server logs: lines prefixed `[PolicyUpdatePipeline]` with structured objects (timestamp + event + fields).
+ * Disable with env `POLICY_PIPELINE_LOGS=0` (also `false` / `no`).
  */
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
@@ -10,12 +13,25 @@ const DEFAULTS = {
   reasoningModel: 'gemini-2.5-pro',
   fastModel: 'gemini-2.5-flash',
   embeddingModel: 'gemini-embedding-001',
+  /** F1 needs room for bilingual JSON — outputs that hit MAX_TOKENS truncate mid-string and break strict JSON.parse. */
+  f1MaxOutputTokens: 16384,
   f1ExcerptLimit: 10000,
   f2ChunkSize: 24000,
   f2ChunkOverlap: 1000,
   f3SimilarityThreshold: 0.4,
   excerptLen: 500,
 };
+
+function policyPipelineLogsEnabled() {
+  const v = process.env.POLICY_PIPELINE_LOGS;
+  return !(v === '0' || v === 'false' || v === 'no');
+}
+
+/** Structured server logs — disable with POLICY_PIPELINE_LOGS=0. */
+function policyPipelineLog(fields) {
+  if (!policyPipelineLogsEnabled()) return;
+  console.log('[PolicyUpdatePipeline]', { ts: new Date().toISOString(), ...fields });
+}
 
 const F1_SYSTEM = `You are a GRC regulatory-relevance analyst. You work fluently in both Arabic (العربية) and English.
 The input may be in Arabic, English, or a mix of both — handle all seamlessly.
@@ -27,12 +43,12 @@ You will receive:
 
 Task: determine whether this regulation is relevant to the organisation.
 
-Respond with ONLY a JSON object:
+Respond with ONLY a JSON object (keep "reasoning" brief — ≤400 characters — so JSON is not truncated):
 {
   "is_relevant": true | false,
   "confidence": 0.0-1.0,
-  "reasoning": "2-3 sentence explanation (in the regulation's language)",
-  "relevant_aspects": ["list of specific aspects that match, empty if not relevant"]
+  "reasoning": "≤2 short sentences in the regulation's language",
+  "relevant_aspects": ["specific aspects that match, empty array if none"]
 }`;
 
 const F2_SYSTEM = `You are a GRC policy analyst. You work fluently in both Arabic (العربية) and English.
@@ -93,6 +109,7 @@ Respond with ONLY a JSON object:
 function parseJsonFromLlm(raw) {
   if (raw == null) return { raw_response: String(raw) };
   let text = String(raw).trim();
+  if (!text) return { raw_response: '' };
   if (text.startsWith('```')) {
     text = text.split('\n', 1)[1] || text.slice(3);
     if (text.endsWith('```')) text = text.slice(0, -3);
@@ -103,6 +120,226 @@ function parseJsonFromLlm(raw) {
   } catch {
     return { raw_response: String(raw).slice(0, 2000) };
   }
+}
+
+function normalizeQuotesForF1Salvage(s) {
+  return String(s || '')
+    .replace(/\uFEFF/g, '')
+    .replace(/[\u201C\u201D\u00AB\u00BB]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'");
+}
+
+function decodeReasoningEscapedFragment(fragment) {
+  return String(fragment || '')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
+/** Extract reasoning value: closed quoted string if present; else truncated string to end of buffer (MAX_TOKENS mid-Arabic, etc.). */
+function extractSalvagedReasoning(s) {
+  const closedMatch = s.match(/["']reasoning["']\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (closedMatch) return decodeReasoningEscapedFragment(closedMatch[1]).trim() || undefined;
+  const openRe = /["']reasoning["']\s*:\s*"/;
+  const mo = openRe.exec(s);
+  if (mo === null) return undefined;
+  const start = mo.index + mo[0].length;
+  let i = start;
+  let buf = '';
+  while (i < s.length) {
+    const c = s[i++];
+    if (c === '\\' && i < s.length) {
+      buf += c + s[i++];
+      continue;
+    }
+    if (c === '"') return decodeReasoningEscapedFragment(buf).trim() || undefined;
+    buf += c;
+  }
+  const partial = decodeReasoningEscapedFragment(buf).trim();
+  return partial || undefined;
+}
+
+/**
+ * When output hits max tokens, JSON can truncate after "is_relevant": true —
+ * salvage boolean + optional confidence / reasoning substring.
+ */
+function salvageF1PartialJson(text) {
+  const s = normalizeQuotesForF1Salvage(text);
+  /** Avoid \\b after boolean — RTL marks / commas can interfere with ASCII \\b semantics. */
+  const relM =
+    s.match(/["']is_relevant["']\s*:\s*(true|false)(?=\s*[,}\]\r\n]|$)/i)
+    || s.match(/\bis_relevant\s*:\s*(true|false)(?=\s*[,}\]\r\n]|$)/i);
+  if (!relM) return null;
+  const is_relevant = relM[1].toLowerCase() === 'true';
+  let confidence;
+  const cM = s.match(/["']confidence["']\s*:\s*([\d.]+)/);
+  if (cM) {
+    const n = parseFloat(cM[1], 10);
+    if (!Number.isNaN(n)) confidence = Math.min(1, Math.max(0, n));
+  }
+  let reasoning = extractSalvagedReasoning(s);
+  const aspects = [];
+  const aspectsMatch = s.match(/["']relevant_aspects["']\s*:\s*\[([\s\S]*?)\]/);
+  if (aspectsMatch) {
+    const inner = aspectsMatch[1].trim();
+    try {
+      const arr = JSON.parse(`[${inner}]`);
+      if (Array.isArray(arr)) aspects.push(...arr.filter((x) => typeof x === 'string'));
+    } catch (_) {
+      const chunk = aspectsMatch[1];
+      const quoted = chunk.match(/"((?:[^"\\]|\\.)*)"/g);
+      if (quoted) {
+        for (const q of quoted) {
+          try {
+            aspects.push(JSON.parse(q));
+          } catch (_) { /* ignore */ }
+        }
+      }
+    }
+  }
+  return {
+    is_relevant,
+    confidence: typeof confidence === 'number' ? confidence : 0.75,
+    reasoning:
+      reasoning && reasoning.trim()
+        ? reasoning.trim()
+        : '[Recovered from truncated JSON — reasoning field was incomplete; shorten inputs if you need verbatim model text.]',
+    relevant_aspects: aspects,
+    _recovered_truncated_json: true,
+  };
+}
+
+function stripLlmJsonFence(text) {
+  let s = String(text || '').trim();
+  if (!s) return '';
+  if (s.startsWith('```')) {
+    const cut = s.indexOf('\n');
+    s = (cut >= 0 ? s.slice(cut + 1) : s.slice(3)).replace(/\n?```\s*$/,'').trim();
+  }
+  return s;
+}
+
+function coerceTruthyBoolean(v) {
+  if (typeof v === 'boolean') return v;
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim().toLowerCase();
+  if (['true', 'yes', '1'].includes(s)) return true;
+  if (['false', 'no', '0'].includes(s)) return false;
+  return undefined;
+}
+
+function normalizeParsedF1Object(o) {
+  if (!o || typeof o !== 'object') return o;
+  const b = coerceTruthyBoolean(o.is_relevant);
+  if (typeof b === 'boolean') return { ...o, is_relevant: b };
+  return o;
+}
+
+function parseF1Response(raw) {
+  if (raw == null || String(raw).trim() === '') return { raw_response: String(raw) };
+  const bare = stripLlmJsonFence(raw);
+  try {
+    const o = normalizeParsedF1Object(JSON.parse(bare));
+    if (o && typeof o.is_relevant === 'boolean') return o;
+    const salvaged = salvageF1PartialJson(bare);
+    if (salvaged) return salvaged;
+    return { raw_response: bare.slice(0, 4000) };
+  } catch (_) {
+    const salvaged = salvageF1PartialJson(bare);
+    if (salvaged) return salvaged;
+    return { raw_response: bare.slice(0, 4000) };
+  }
+}
+
+/**
+ * Gemini REST often omits candidates on block, or omits parts on safety stop.
+ * 2.5+ may label some parts as thought-only; if the visible text is empty, fall back to any text part.
+ */
+function extractTextFromParts(parts) {
+  if (!Array.isArray(parts)) return '';
+  let nonThought = '';
+  let any = '';
+  for (const p of parts) {
+    if (!p || typeof p !== 'object' || typeof p.text !== 'string') continue;
+    any += p.text;
+    if (p.thought !== true) nonThought += p.text;
+  }
+  nonThought = String(nonThought || '').trim();
+  if (nonThought) return nonThought;
+  return String(any || '').trim();
+}
+
+/**
+ * Gemini sometimes omits usable `parts[].text` (JSON MIME quirks, tooling fields, etc.).
+ * Collect text from documented / observed alternate locations before declaring output empty.
+ */
+function extractGeminiAssistantText(candidate) {
+  if (!candidate || typeof candidate !== 'object') return '';
+  const content = candidate.content && typeof candidate.content === 'object' ? candidate.content : null;
+  /** Structured JSON object (REST occasionally surfaces separately from `.text`). */
+  if (content?.parsed != null && typeof content.parsed === 'object') {
+    try {
+      const j = JSON.stringify(content.parsed);
+      if (j && j.trim() !== '{}') return j;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  for (const k of ['text', 'outputText', 'output_text']) {
+    const v = content?.[k] ?? candidate?.[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  const partsTxt = extractTextFromParts(content?.parts);
+  if (partsTxt) return partsTxt;
+  /** Bounded deep scan under `content` for the longest `.text` string (SDK / proto variance). */
+  let best = '';
+  const seen = new Set();
+  function walk(node, depth) {
+    if (depth > 12 || node == null || typeof node !== 'object') return;
+    if (seen.has(node)) return;
+    seen.add(node);
+    if (typeof node.text === 'string' && node.text.length > best.length) best = node.text;
+    if (Array.isArray(node)) {
+      for (const x of node) walk(x, depth + 1);
+    } else {
+      for (const x of Object.values(node)) walk(x, depth + 1);
+    }
+  }
+  walk(content, 0);
+  return String(best || '').trim();
+}
+
+/** Gemini REST often omits candidates on block, or omits parts on safety stop. */
+function extractGeminiTextOrThrow(apiResponseBody, apiRawTextSnippet) {
+  const d = apiResponseBody;
+  const pf = d.promptFeedback || d.prompt_feedback;
+  const br = pf?.blockReason || pf?.block_reason;
+  if (br) {
+    throw new Error(
+      `Gemini blocked the prompt (blockReason=${br}). Reduce sensitive content length or adjust the Org/Regulation text; if it persists try another Gemini model.`,
+    );
+  }
+  const cands = d.candidates;
+  if (!Array.isArray(cands) || !cands.length) {
+    const tail = pf ? ` promptFeedback=${JSON.stringify(pf).slice(0, 600)}` : '';
+    throw new Error(`Gemini returned no candidates.${tail} api=${apiRawTextSnippet.slice(0, 400)}`);
+  }
+  const c0 = cands[0];
+  const fr = String(c0.finishReason || c0.finish_reason || '').toUpperCase();
+  const rootText = typeof d.text === 'string' ? d.text.trim() : '';
+  const textOut = extractGeminiAssistantText(c0) || rootText;
+  if (!textOut) {
+    const sr = c0.safetyRatings || c0.safety_ratings;
+    const srStr = sr ? ` safetyRatings=${JSON.stringify(sr).slice(0, 900)}` : '';
+    const peek = apiRawTextSnippet.length > 2000 ? apiRawTextSnippet.slice(0, 2000) + '…' : apiRawTextSnippet;
+    throw new Error(
+      `Gemini returned empty assistant text (finishReason=${fr || 'n/a'}).${srStr} ` +
+        'Often: JSON MIME quirks, unsupported thinkingConfig/thinkingBudget for this endpoint, quotas, or a model/SDK response shape mismatch. Retry with overrides.reasoningModel=gemini-2.5-flash. ' +
+        `Response_snippet=${JSON.stringify(peek).slice(0, 2200)}`,
+    );
+  }
+  return textOut;
 }
 
 function chunkText(text, size, overlap) {
@@ -130,32 +367,70 @@ function cosineSimilarity(a, b) {
   return d < 1e-12 ? 0 : dot / d;
 }
 
-async function geminiGenerateContent(apiKey, modelId, userText, systemInstruction, maxTokens, temperature) {
+/**
+ * @param {{ includeJsonMimeType?: boolean, thinkingBudget?: number | null }} [genExtras]
+ *   - thinkingBudget null/undefined: omit thinkingConfig (default for shared F2/F4 path).
+ *   - thinkingBudget number: Gemini 2.x — 0 disables internal thinking budget so JSON/text can populate `parts`.
+ */
+async function geminiGenerateContent(apiKey, modelId, userText, systemInstruction, maxTokens, temperature, genExtras = {}) {
+  const includeJsonMime = genExtras.includeJsonMimeType !== false;
+  let thinkingBudget = genExtras.thinkingBudget;
+  if (thinkingBudget === undefined) thinkingBudget = null;
+
   const url = `${GEMINI_BASE}/models/${modelId}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const buildGc = () => {
+    const gc = { temperature, maxOutputTokens: maxTokens };
+    if (includeJsonMime) gc.responseMimeType = 'application/json';
+    if (thinkingBudget !== null && typeof thinkingBudget === 'number')
+      gc.thinkingConfig = { thinkingBudget };
+    return gc;
+  };
+
   const buildBody = (withSystem) => ({
     ...(withSystem ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
     contents: [{ role: 'user', parts: [{ text: withSystem ? userText : `${systemInstruction}\n\n---\n\n${userText}` }] }],
-    generationConfig: {
-      temperature,
-      maxOutputTokens: maxTokens,
-      responseMimeType: 'application/json',
-    },
+    generationConfig: buildGc(),
   });
-  let res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(buildBody(true)),
-  });
-  let txt = await res.text();
-  if (!res.ok) {
-    res = await fetch(url, {
+
+  async function post(withSystem) {
+    const body = JSON.stringify(buildBody(withSystem));
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildBody(false)),
+      body,
     });
-    txt = await res.text();
+    const txt = await res.text();
+    return { res, txt };
+  }
+
+  /** Try embedded systemInstruction first (cleaner prompts); then inline system in user msg (older API quirks). */
+  let { res, txt } = await post(true);
+  if (!res.ok) {
+    if (genExtras.pipelineStage === 'f1') {
+      policyPipelineLog({
+        event: 'gemini_fallback_inline_system',
+        runId: genExtras._pupRunId ?? null,
+        pipelineStage: 'f1',
+        modelId,
+        firstHttpStatus: res.status,
+        firstBodyChars: txt.length,
+      });
+    }
+    ({ res, txt } = await post(false));
   }
   if (!res.ok) {
+    if (genExtras.pipelineStage === 'f1') {
+      policyPipelineLog({
+        event: 'gemini_generate_failed',
+        runId: genExtras._pupRunId ?? null,
+        modelId,
+        httpStatus: res.status,
+        bodyChars: txt.length,
+        includeJsonMime,
+        thinkingBudget,
+      });
+    }
     throw new Error(`Gemini generateContent ${res.status}: ${txt.slice(0, 600)}`);
   }
   let data;
@@ -164,9 +439,7 @@ async function geminiGenerateContent(apiKey, modelId, userText, systemInstructio
   } catch {
     throw new Error(`Invalid JSON from Gemini: ${txt.slice(0, 200)}`);
   }
-  const parts = data.candidates?.[0]?.content?.parts;
-  const textOut = parts?.map(p => p.text).join('') || '';
-  return textOut;
+  return extractGeminiTextOrThrow(data, txt);
 }
 
 async function geminiJson(apiKey, modelId, systemPrompt, userText, maxTokens, temperature) {
@@ -249,7 +522,101 @@ function matchPolicyPointsToStore(policyPoints, policyRows, threshold, excerptLe
 async function f1Relevance(apiKey, cfg, orgContext, regulationText) {
   const excerpt = regulationText.slice(0, cfg.f1ExcerptLimit);
   const user = `=== ORGANISATION CONTEXT ===\n${orgContext}\n\n=== REGULATION EXCERPT ===\n${excerpt}`;
-  return geminiJson(apiKey, cfg.reasoningModel, F1_SYSTEM, user, 1024, 0.1);
+  /** F1 needs headroom — low maxOutputTokens can truncate JSON mid-field (esp. bilingual / long excerpts). */
+  /** Same argument order as geminiJson/F2: user payload first, system instruction second. */
+  /** JSON MIME + thinking-heavy models intermittently yield empty `parts`; retry plain text then parse. */
+  const attempts = [
+    { includeJsonMimeType: true, thinkingBudget: 0 },
+    { includeJsonMimeType: true, thinkingBudget: null },
+    { includeJsonMimeType: false, thinkingBudget: 0 },
+    { includeJsonMimeType: false, thinkingBudget: null },
+  ];
+
+  const runId = cfg._pupRunId ?? null;
+  let lastErr;
+  for (let i = 0; i < attempts.length; i++) {
+    const genExtras = {
+      ...attempts[i],
+      pipelineStage: 'f1',
+      _pupRunId: runId,
+    };
+    policyPipelineLog({
+      event: 'f1_attempt_start',
+      runId,
+      attemptIndex: i,
+      modelId: cfg.reasoningModel,
+      f1MaxOutputTokens: cfg.f1MaxOutputTokens ?? DEFAULTS.f1MaxOutputTokens,
+      generation: {
+        jsonMime: genExtras.includeJsonMimeType !== false,
+        thinkingBudget: genExtras.thinkingBudget,
+      },
+    });
+    try {
+      const raw = await geminiGenerateContent(
+        apiKey,
+        cfg.reasoningModel,
+        user,
+        F1_SYSTEM,
+        cfg.f1MaxOutputTokens ?? DEFAULTS.f1MaxOutputTokens,
+        0.1,
+        genExtras,
+      );
+      policyPipelineLog({
+        event: 'f1_attempt_raw_bytes',
+        runId,
+        attemptIndex: i,
+        extractedChars: typeof raw === 'string' ? raw.length : 0,
+        extractedStartsJson: typeof raw === 'string' && /^\s*[\[{]/.test(raw),
+      });
+      const parsed = parseF1Response(raw);
+      if (isValidF1Envelope(parsed)) {
+        policyPipelineLog({
+          event: 'f1_ok',
+          runId,
+          attemptIndex: i,
+          is_relevant: parsed.is_relevant,
+          confidence: parsed.confidence,
+          recoveredTruncated: !!parsed._recovered_truncated_json,
+        });
+        return parsed;
+      }
+      /** Model returned text we could not coerce to F1 — retry with different MIME / thinking before giving up. */
+      policyPipelineLog({
+        event: 'f1_attempt_parse_invalid',
+        runId,
+        attemptIndex: i,
+        parsedKeys:
+          parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? Object.keys(parsed).slice(0, 24)
+            : [],
+        rawResponseChars: parsed?.raw_response != null ? String(parsed.raw_response).length : null,
+      });
+      const preview = typeof raw === 'string' ? raw.slice(0, 500) : '';
+      lastErr = new Error(`F1 parse did not yield a boolean is_relevant (truncated response or wrong shape). Preview: ${preview}`);
+    } catch (e) {
+      lastErr = e;
+      policyPipelineLog({
+        event: 'f1_attempt_error',
+        runId,
+        attemptIndex: i,
+        message: String(e?.message || e).slice(0, 450),
+      });
+      const msg = String(e?.message || e);
+      if (msg.includes('generateContent 400')) continue;
+      if (msg.includes('empty assistant text')) continue;
+      if (msg.includes('blocked the prompt')) throw e;
+      if (msg.includes('no candidates')) throw e;
+    }
+  }
+  policyPipelineLog({ event: 'f1_failed_all_attempts', runId, lastError: String(lastErr?.message || lastErr || '').slice(0, 500) });
+  if (lastErr) throw lastErr;
+  throw new Error(
+    'F1 failed: no Gemini attempt produced usable model text. Verify GEMINI_API_KEY, model id, and server logs.',
+  );
+}
+
+function isValidF1Envelope(f1) {
+  return f1 != null && typeof f1 === 'object' && typeof f1.is_relevant === 'boolean';
 }
 
 function cloneF2WithoutEmbeddings(f2) {
@@ -265,20 +632,52 @@ function cloneF2WithoutEmbeddings(f2) {
 
 async function f2Summarize(apiKey, cfg, regulationText) {
   const chunks = chunkText(regulationText, cfg.f2ChunkSize, cfg.f2ChunkOverlap);
+  policyPipelineLog({
+    event: 'f2_start',
+    runId: cfg._pupRunId ?? null,
+    chunks: chunks.length,
+    regulationChars: regulationText.length,
+    modelId: cfg.reasoningModel,
+  });
   const allPoints = [];
   for (let i = 0; i < chunks.length; i++) {
     const user = `=== REGULATION TEXT (part ${i + 1}/${chunks.length}) ===\n${chunks[i]}`;
     const result = await geminiJson(apiKey, cfg.reasoningModel, F2_SYSTEM, user, 8192, 0.15);
     const pts = result.policy_points;
+    const took = Array.isArray(pts) ? pts.length : 0;
+    policyPipelineLog({
+      event: 'f2_chunk',
+      runId: cfg._pupRunId ?? null,
+      chunkIndex: i + 1,
+      chunkOf: chunks.length,
+      policyPointsReturned: took,
+      usedRawFallback: typeof result?.raw_response === 'string' && result.raw_response.trim().length > 0,
+    });
     if (Array.isArray(pts)) allPoints.push(...pts);
   }
   for (let idx = 0; idx < allPoints.length; idx++) {
     allPoints[idx].id = `PP-${String(idx + 1).padStart(3, '0')}`;
   }
+  policyPipelineLog({
+    event: 'f2_done',
+    runId: cfg._pupRunId ?? null,
+    totalPolicyPoints: allPoints.length,
+  });
   return { policy_points: allPoints };
 }
 
 async function f4Impact(apiKey, cfg, ragMatchesWithPoints) {
+  let callCount = 0;
+  for (const item of ragMatchesWithPoints) {
+    callCount += item.matches?.length || 0;
+  }
+  policyPipelineLog({
+    event: 'f4_start',
+    runId: cfg._pupRunId ?? null,
+    ragPointsWithMatches: ragMatchesWithPoints.length,
+    totalImpactCalls: callCount,
+    modelId: cfg.fastModel,
+  });
   const results = [];
   for (const item of ragMatchesWithPoints) {
     const impacts = [];
@@ -300,6 +699,11 @@ async function f4Impact(apiKey, cfg, ragMatchesWithPoints) {
       impacts,
     });
   }
+  policyPipelineLog({
+    event: 'f4_done',
+    runId: cfg._pupRunId ?? null,
+    regulationPointGroups: results.length,
+  });
   return results;
 }
 
@@ -319,12 +723,17 @@ async function runPolicyUpdatePipeline(opts) {
     reasoningModel: opts.overrides?.reasoningModel || DEFAULTS.reasoningModel,
     fastModel: opts.overrides?.fastModel || DEFAULTS.fastModel,
     embeddingModel: opts.overrides?.embeddingModel || DEFAULTS.embeddingModel,
+    f1MaxOutputTokens: opts.overrides?.f1MaxOutputTokens ?? DEFAULTS.f1MaxOutputTokens,
     f1ExcerptLimit: opts.overrides?.f1ExcerptLimit ?? DEFAULTS.f1ExcerptLimit,
     f2ChunkSize: opts.overrides?.f2ChunkSize ?? DEFAULTS.f2ChunkSize,
     f2ChunkOverlap: opts.overrides?.f2ChunkOverlap ?? DEFAULTS.f2ChunkOverlap,
     f3SimilarityThreshold: opts.overrides?.f3SimilarityThreshold ?? DEFAULTS.f3SimilarityThreshold,
     excerptLen: opts.overrides?.excerptLen ?? DEFAULTS.excerptLen,
   };
+
+  const runId = `pup_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  /** @internal correlate logs for a single HTTP request */
+  cfg._pupRunId = runId;
 
   const orgContext = String(opts.orgContext || '');
   const regulationText = String(opts.regulationText || '');
@@ -333,6 +742,18 @@ async function runPolicyUpdatePipeline(opts) {
   if (!regulationText.trim()) {
     throw new Error('regulationText is required');
   }
+
+  policyPipelineLog({
+    event: 'pipeline_start',
+    runId,
+    orgContextChars: orgContext.length,
+    regulationChars: regulationText.length,
+    policiesInputCount: policies.length,
+    reasoningModel: cfg.reasoningModel,
+    fastModel: cfg.fastModel,
+    embeddingModel: cfg.embeddingModel,
+    hasOverrides: !!(opts.overrides && typeof opts.overrides === 'object'),
+  });
 
   // Embed all organisation policies once (same as wathbah_grc upload_policies → query)
   const policyRows = [];
@@ -346,9 +767,30 @@ async function runPolicyUpdatePipeline(opts) {
     policyRows.push({ id, title: title || id, docText, embedding });
   }
 
+  policyPipelineLog({
+    event: 'indexed_policies',
+    runId,
+    indexedCount: policyRows.length,
+    embeddingModel: cfg.embeddingModel,
+  });
+
   // F1
   const f1 = await f1Relevance(apiKey, cfg, orgContext, regulationText);
+  if (!isValidF1Envelope(f1)) {
+    const raw =
+      typeof f1?.raw_response === 'string' && f1.raw_response.trim() ? f1.raw_response.trim().slice(0, 900) : null;
+    throw new Error(
+      `F1 response was missing a boolean is_relevant (model did not return valid JSON). ${raw ? `Model text (truncated): ${raw}` : 'Often caused by Gemini returning no candidates, safety blocks, or empty output under JSON MIME mode — see server logs.'}`,
+    );
+  }
   if (!f1.is_relevant) {
+    policyPipelineLog({
+      event: 'pipeline_complete',
+      runId,
+      stage_reached: 'f1',
+      reason: 'not_relevant_to_org',
+      policy_count_indexed: policyRows.length,
+    });
     return {
       stage_reached: 'f1',
       f1_relevance: f1,
@@ -364,6 +806,14 @@ async function runPolicyUpdatePipeline(opts) {
   const f2 = cloneF2WithoutEmbeddings(f2Raw);
   const points = f2Raw.policy_points || [];
   if (!points.length) {
+    policyPipelineLog({
+      event: 'pipeline_complete',
+      runId,
+      stage_reached: 'f2',
+      reason: 'no_policy_points_extracted',
+      policy_count_indexed: policyRows.length,
+      policyPointsExtracted: 0,
+    });
     return {
       stage_reached: 'f2',
       f1_relevance: f1,
@@ -379,10 +829,32 @@ async function runPolicyUpdatePipeline(opts) {
     pt.embedding = await embedOne(apiKey, cfg.embeddingModel, pt.point);
   }
 
+  policyPipelineLog({
+    event: 'f3_embed_points_done',
+    runId,
+    regulationPointsEmbedded: points.length,
+    threshold: cfg.f3SimilarityThreshold,
+  });
+
   const f3 = matchPolicyPointsToStore(points, policyRows, cfg.f3SimilarityThreshold, cfg.excerptLen);
   const withMatches = f3.filter(r => r.matches && r.matches.length);
 
+  policyPipelineLog({
+    event: 'f3_match_summary',
+    runId,
+    regulationPoints: f3.length,
+    pointsWithMatches: withMatches.length,
+    threshold: cfg.f3SimilarityThreshold,
+  });
+
   if (!withMatches.length) {
+    policyPipelineLog({
+      event: 'pipeline_complete',
+      runId,
+      stage_reached: 'f3',
+      reason: 'no_similarity_matches',
+      policy_count_indexed: policyRows.length,
+    });
     return {
       stage_reached: 'f3',
       f1_relevance: f1,
@@ -406,6 +878,16 @@ async function runPolicyUpdatePipeline(opts) {
   }));
 
   const f4 = await f4Impact(apiKey, cfg, f4Input);
+
+  policyPipelineLog({
+    event: 'pipeline_complete',
+    runId,
+    stage_reached: 'f4',
+    reason: 'success',
+    policy_count_indexed: policyRows.length,
+    regulationPointsSummary: points.length,
+    ragPointsWithMatches: withMatches.length,
+  });
 
   return {
     stage_reached: 'f4',

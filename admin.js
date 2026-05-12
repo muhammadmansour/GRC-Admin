@@ -11489,6 +11489,11 @@ let dataStudioUploadWired = false;
 let policyUpdatePipelineWired = false;
 /** Cached list for Policy update pipeline org dropdown (from GET /api/org-contexts) */
 let pupOrgContextsCache = [];
+let policyUpdatePipelineLastRaw = null;
+let policyUpdatePipelineResultModalWired = false;
+/** Policy update pipeline wizard: 0 organisation, 1 regulation, 2 policies */
+let pupStepperIndex = 0;
+const PUP_PIPELINE_LAST_STEP = 2;
 let dataStudioLastFile = null;
 
 function loadDataStudioPage() {
@@ -11742,6 +11747,242 @@ function formatOrgProfileTextForPipeline(orgContext) {
   return p.join('\n');
 }
 
+/** Sample bundles: organisation + regulation + policies aligned per sector so F1 scope matches the excerpt. Values = `#pup-preset-select`. */
+const PUP_DATASETS = Object.freeze({
+  'python-demo': {
+    orgContext:
+      `Industry: Financial Technology (Fintech)\n` +
+      `Jurisdiction: Saudi Arabia, MENA region\n` +
+      `Activities: Digital payments, consumer lending, KYC/AML processing\n` +
+      `Compliance scope: SAMA regulations, NCA ECC, PDPL`,
+    regulation:
+      `Article 1 — Scope\n` +
+      `This regulation applies to all financial institutions processing personal data\n` +
+      `of residents. Institutions must implement data protection impact assessments\n` +
+      `for high-risk processing activities.\n\n` +
+      `Article 2 — Data Breach Notification\n` +
+      `In the event of a personal data breach, the institution shall notify the\n` +
+      `supervisory authority within 72 hours. Affected individuals must be notified\n` +
+      `without undue delay when the breach poses a high risk to their rights.\n\n` +
+      `Article 3 — Data Protection Officer\n` +
+      `Institutions processing personal data on a large scale shall appoint a\n` +
+      `Data Protection Officer who reports directly to senior management.\n\n` +
+      `Article 4 — Cross-border Transfers\n` +
+      `Personal data shall not be transferred outside the Kingdom unless adequate\n` +
+      `safeguards are in place as determined by the supervisory authority.\n\n` +
+      `Article 5 — Record of Processing (RoPA)\n` +
+      `Controllers shall maintain an up-to-date register of processing activities,\n` +
+      `including purposes, categories of data subjects, lawful bases, recipients,\n` +
+      `and approximate retention timelines, available to the supervisory authority on request.\n\n` +
+      `Article 6 — Third-party processors\n` +
+      `Where processing is carried out by a processor, the institution shall impose\n` +
+      `binding duties of confidentiality, sub-processor oversight, deletion or return\n` +
+      `at termination, and shall remain accountable for demonstrating compliance.`,
+    policies: [
+      {
+        id: 'POL-001',
+        title: 'Data Protection Policy',
+        content:
+          'The organisation shall protect all personal data in accordance with PDPL and sector guidance. Sensitive customer attributes shall be labelled in the catalogue; encryption at rest and in transit applies to Confidential and Restricted classifications. Access follows least-privilege provisioning with periodic recertification.',
+      },
+      {
+        id: 'POL-002',
+        title: 'Incident Response Policy',
+        content:
+          'Security incidents that may affect regulatory reporting shall be routed through the CIRP within SLAs aligned to breach articles. Dedicated bridges exist for liaison with supervisory authority filings; post-incident reviews feed concrete remediation trackers.',
+      },
+      {
+        id: 'POL-003',
+        title: 'Access Control Policy',
+        content:
+          'Logical access grants require manager attestation tied to RBAC bundles; privileged accounts mandate MFA plus PAM session recording where supported. Separation of duties is enforced for disbursement-adjacent or customer-data-heavy roles.',
+      },
+      {
+        id: 'POL-004',
+        title: 'Data Retention & Lawful Basis Register',
+        content:
+          'The organisation shall document retention rationales per portfolio and reconcile marketing/CRM artefacts against lawful bases recorded in RoPA dashboards. Routine purges honour regulatory minimums/maximums; legal holds supersede deletion until released.',
+      },
+    ],
+  },
+  energy: {
+    orgContext:
+      `Industry: Energy & Utilities — power generation and transmission\n` +
+      `Jurisdiction: Saudi Arabia\n` +
+      `Activities: Bulk electric operations, OT/ICS, metering, outage management; NCA ECC and sector incident norms\n` +
+      `Compliance scope: NCA ECC, OT security programme, competent-authority notifications for disruptions`,
+    regulation:
+      `Article 1 — Scope\n` +
+      `This regulation applies to operators of designated essential energy services and related critical digital infrastructure supporting continuity of electricity supply.\n\n` +
+      `Article 2 — Operational technology governance\n` +
+      `Operators shall inventory material OT assets, enforce logical separation between corporate IT networks and OT environments, and document remote-access paths to OT.\n\n` +
+      `Article 3 — Cyber incident reporting\n` +
+      `Operators shall classify cyber incidents according to national sector guidance and report material incidents affecting energy continuity to the competent authority within mandated time windows.\n\n` +
+      `Article 4 — Third-party connectivity\n` +
+      `Vendor and cloud connectivity into operational environments shall undergo security assessment and contractual controls prior to production use.\n\n` +
+      `Article 5 — Business continuity and restoration drills\n` +
+      `Essential operators shall exercise restoration of SCADA-visible controls and failover paths at intervals defined internally but not less ambitious than supervisory expectations, evidenced by artefacts.\n\n` +
+      `Article 6 — Physical security linkage\n` +
+      `Perimeter breaches or extended loss of CCTV or access control impacting OT sites shall be correlated with ICS monitoring and escalated jointly to physical-security and ICS SOCs.`,
+    policies: [
+      {
+        id: 'POL-E1',
+        title: 'OT / SCADA Security Policy',
+        content:
+          'The organisation SHALL maintain granular logical and physical access controls for EMS, DCS and field controllers. Contractor laptops SHALL NOT dual-home between corporate Wi-Fi and OT VLANs. Remote maintenance mandates MFA-bound jump bastions whose sessions are keystroke-logged thirty days.',
+      },
+      {
+        id: 'POL-E2',
+        title: 'Critical Infrastructure Incident Response',
+        content:
+          'Cyber events SHALL be labelled P1-P4 blending IEC 62443 style impact on delivery. ICS CERT bridges SHALL open within fifteen minutes when generation derates exceed configured MW deltas. Disclosure packets SHALL include affected EMS RTU lists redacted yet auditable internally.',
+      },
+      {
+        id: 'POL-E3',
+        title: 'IT/OT segmentation standard',
+        content:
+          'DMZs SHALL segment historian north-south traffic; unsolicited east-west traversal between EMS and ERP is denied by default-change windows with CAB tickets. ICS protocol allow-lists MUST be regenerated after vendor firmware bumps.',
+      },
+      {
+        id: 'POL-E4',
+        title: 'OT Change & Patch Governance',
+        content:
+          'Golden images for substation relays SHALL be hashed and promoted through staging racks only. Emergency patches exceeding forty-eight idle hours post vendor advisory SHALL undergo retroactive CAB with compensating outage windows.',
+      },
+    ],
+  },
+  healthcare: {
+    orgContext:
+      `Industry: Healthcare — acute and ambulatory providers on a unified EHR\n` +
+      `Jurisdiction: Saudi Arabia — PDPL, MOH and sector circulars\n` +
+      `Activities: Patient care, referrals, billing, clinical research cohorts processing identifiable health data\n` +
+      `Compliance scope: PDPL treatment/processing bases, confidentiality of identifiable patient records, breach notification pathways`,
+    regulation:
+      `Article 1 — Scope\n` +
+      `This regulation applies to licensed healthcare establishments that process identifiable patient health data within electronic clinical systems.\n\n` +
+      `Article 2 — Access accountability\n` +
+      `Providers shall ensure individual accountability for accesses to identifiable patient charts, retain audit logs of views and substantive edits for the period stipulated by competent health authorities, and review exceptions.\n\n` +
+      `Article 3 — Continuity of treatment disclosures\n` +
+      `Disclosures strictly necessary among authorised clinicians for continuity of care may proceed where documented in the medical record subject to organisational minimum-necessary limits.\n\n` +
+      `Article 4 — Breach preparedness\n` +
+      `Healthcare providers shall maintain procedures to detect unauthorised processing of identifiable patient information and escalate to the privacy office according to enacted timelines.\n\n` +
+      `Article 5 — Research and secondary uses\n` +
+      `Use of pseudonymised or identifiable datasets for research shall require documented ethical review where applicable, data minimisation, and technical controls preventing re-linkage beyond approved cohorts.\n\n` +
+      `Article 6 — Medical device and integration security\n` +
+      `Biomedical devices or middleware that synchronise measurements into the EHR shall be inventoried with firmware baselines and monitored interfaces to prevent unauthorised data injection or tampering.`,
+    policies: [
+      {
+        id: 'POL-H1',
+        title: 'Patient Privacy & Confidentiality Policy',
+        content:
+          'Workforce members SHALL access PHI only inside approved break-glass or routine roles evidenced by quarterly attestations; unattended clinical terminals lock within ninety seconds. Photography of screens in patient areas is prohibited except controlled tele-radiology rooms.',
+      },
+      {
+        id: 'POL-H2',
+        title: 'Electronic Health Record Access Policy',
+        content:
+          'RBAC templates SHALL segregate prescribing, transcription, auditing, coding, research extract, and payer-facing views. Custodians SHALL reconcile orphan accounts weekly; inactive licenses auto-suspend seven days.',
+      },
+      {
+        id: 'POL-H3',
+        title: 'Healthcare Breach Assessment Policy',
+        content:
+          'Potential compromise indicators SHALL converge in the Privacy SOC within two hours containing affected systems list, PHI types, approximate headcount impacted, containment actions, clock start for supervisory clock metrics.',
+      },
+      {
+        id: 'POL-H4',
+        title: 'Research Data & Consent Stewardship Policy',
+        content:
+          'Secondary research extracts SHALL originate from cohort builders with IRB artefacts attached; cryptographic tokens SHALL replace identifiers where longitudinal linkage is mandated; revocation SHALL propagate nightly to datalake subsets.',
+      },
+    ],
+  },
+  'dga-saudi': {
+    orgContext:
+      `Entity profile: Saudi public-sector digital government programme participant (composite illustrative)\n` +
+      `Goals: Elevate citizen/business portals, interoperable services, bilingual authoritative UX\n` +
+      `Hosting: National / qualified cloud posture for regulated workloads; NDMO-aligned labelling narratives\n` +
+      `Security: ECC-aligned baselines mapped to hardened builds; SOC telemetry routed to centralized logging fabrics\n` +
+      `⚠ Synthetic bundle for pipeline testing — not official Digital Government Authority (DGA) or gazetted statutory text.`,
+    regulation:
+      `[Synthetic bilingual excerpt — illustrative only — aligned to common Saudi digital-government themes]\n\n` +
+      `Article DG-1 — النطاق / Scope\n` +
+      `تنطبق هذه الأحكام على الجهات الحكومية التي تقدّم خدمات رقمية للمواطنين والقطاع الخاص وفق قائمة تصنيف الخدمات المعتمدة، بما يشمل منصّات مشتركة وحوسبة مؤهّلة وفق المتطلبات الوطنية.\n\n` +
+      `Article DG-2 — Protective markings & hosting eligibility\n` +
+      `Systems SHALL stamp NDMO-consistent classifications; workloads at elevated tiers SHALL reside only on approved sovereign or eligible cloud foundations with attestable continuous compliance artefacts.\n\n` +
+      `Article DG-3 — Identity federation & delegated consent\n` +
+      `Channels SHALL integrate staged authentication for risky profile mutations; repeatable data-sharing journeys SHALL propagate machine-readable consent tokens across bounded interoperability APIs.\n\n` +
+      `Article DG-4 — Interoperability & API lifecycle\n` +
+      `Cross-entity interfaces SHALL advertise semantic version policies, deprecation clocks, SLA dashboards, anomaly throttling matrices, and discoverable openness metadata compatible with central catalogues.\n\n` +
+      `Article DG-5 — ولوجية المحتوى / Accessibility & parity\n` +
+      `المسارات العامة ذات المعاملات يجب أن تحقق أهداف ولوجية ثنائية اللغة (العربية والإنجليزية) بما في ذلك الملاحة بلوحة المفاتيح والنص البديل لعناصر الواجهة.\n\n` +
+      `Article DG-6 — Incident choreography\n` +
+      `Material breaches touching authenticated citizen profiles SHALL mobilise ECC IR playbooks in parallel with programme continuity desks, preserving immutable event timelines.`,
+    policies: [
+      {
+        id: 'POL-DGA1',
+        title: 'Sovereign cloud & data classification onboarding',
+        content:
+          'Tenant onboarding SHALL ingest classification manifests; cryptography SHALL default to customer-managed-root keys above OFFICIAL; DR drills SHALL simulate provider brown-out failover every six months measured by synthetic traffic mirroring bilingual catalogues.',
+      },
+      {
+        id: 'POL-DGA2',
+        title: 'Citizen IAM & session choreography',
+        content:
+          'Risk-based step-up binds device posture plus behavioral velocity; orphaned OAuth integrations SHALL revoke automatically; multilingual error payloads SHALL carry correlation IDs without leaking PII to edge caches.',
+      },
+      {
+        id: 'POL-DGA3',
+        title: 'Interoperability API stewardship',
+        content:
+          'Breaking schema migrations SHALL traverse dual-run shadow validation; SLA breach burn-down SHALL page owning ministry product owners; punitive throttles escalate through transparent appeal desk before hard blocks.',
+      },
+      {
+        id: 'POL-DGA4',
+        title: 'Bilingual UX & accessibility release gate',
+        content:
+          'RTL-first components SHALL gate merges; axe-core plus manual Arabic typography checks SHALL attach to CMS publish hooks; downloadable PDF artefacts SHALL honour tagged-structure quality bars before CDN promotion.',
+      },
+    ],
+  },
+});
+
+/** After first hydrate, revisit same SPA session keeps user edits unless they change preset. */
+let pupPipelineDatasetHydrated = false;
+
+function applyPupBundledPreset(key) {
+  const ds = PUP_DATASETS[key];
+  if (!ds || !ds.policies) return;
+  const orgTa = document.getElementById('pup-org-context');
+  const regTa = document.getElementById('pup-regulation');
+  const polTa = document.getElementById('pup-policies-json');
+  const orgSel = document.getElementById('pup-org-select');
+  const polJson = JSON.stringify(ds.policies, null, 2);
+  if (orgTa) orgTa.value = ds.orgContext;
+  if (regTa) regTa.value = ds.regulation;
+  if (polTa) polTa.value = polJson;
+  if (orgSel && orgSel.value) orgSel.value = '';
+}
+
+function onPupPresetSelectChange() {
+  const presetSel = document.getElementById('pup-preset-select');
+  if (!presetSel) return;
+  const v = presetSel.value;
+  pupPipelineDatasetHydrated = true;
+  if (v === 'custom' || !PUP_DATASETS[v]) return;
+  applyPupBundledPreset(v);
+}
+
+function maybeHydrateInitialPupPipelineDataset() {
+  if (pupPipelineDatasetHydrated) return;
+  const presetSel = document.getElementById('pup-preset-select');
+  if (!presetSel) return;
+  const v = presetSel.value || 'python-demo';
+  pupPipelineDatasetHydrated = true;
+  if (v === 'custom' || !PUP_DATASETS[v]) return;
+  applyPupBundledPreset(v);
+}
+
 async function refreshPolicyUpdatePipelineOrgDropdown() {
   const sel = document.getElementById('pup-org-select');
   if (!sel) return;
@@ -11779,6 +12020,73 @@ function onPolicyUpdatePipelineOrgSelect() {
   if (ctx) ta.value = formatOrgProfileTextForPipeline(ctx);
 }
 
+function syncPolicyPipelineStepperDOM() {
+  const idx = pupStepperIndex;
+  const total = PUP_PIPELINE_LAST_STEP + 1;
+  document.querySelectorAll('.pup-step-panel').forEach((panel) => {
+    const i = Number.parseInt(panel.getAttribute('data-pup-step-index'), 10);
+    if (Number.isNaN(i)) return;
+    const on = i === idx;
+    if (on) {
+      panel.removeAttribute('hidden');
+      panel.hidden = false;
+    } else {
+      panel.setAttribute('hidden', '');
+      panel.hidden = true;
+    }
+  });
+
+  document.querySelectorAll('[data-pup-step-label]').forEach((label) => {
+    const i = Number.parseInt(label.getAttribute('data-pup-step-label'), 10);
+    if (Number.isNaN(i)) return;
+    label.classList.toggle('is-active', i === idx);
+    label.classList.toggle('is-done', i < idx);
+    if (i === idx) label.setAttribute('aria-current', 'step');
+    else label.removeAttribute('aria-current');
+  });
+
+  const fill = document.getElementById('pup-stepper-progress-fill');
+  if (fill) fill.style.width = `${((idx + 1) / total) * 100}%`;
+
+  const back = document.getElementById('pup-step-back');
+  const next = document.getElementById('pup-step-next');
+  const run = document.getElementById('pup-run-btn');
+  if (back) back.disabled = idx === 0;
+  if (next && run) {
+    const last = idx >= PUP_PIPELINE_LAST_STEP;
+    next.hidden = last;
+    next.setAttribute('aria-hidden', last ? 'true' : 'false');
+    run.hidden = !last;
+    run.setAttribute('aria-hidden', !last ? 'true' : 'false');
+  }
+}
+
+function resetPolicyPipelineStepper() {
+  pupStepperIndex = 0;
+  syncPolicyPipelineStepperDOM();
+}
+
+function pupStepperGo(delta) {
+  pupStepperIndex = Math.max(0, Math.min(PUP_PIPELINE_LAST_STEP, pupStepperIndex + delta));
+  syncPolicyPipelineStepperDOM();
+}
+
+function pupStepperBack() {
+  pupStepperGo(-1);
+}
+
+function pupStepperNext() {
+  if (pupStepperIndex === 1) {
+    const reg = document.getElementById('pup-regulation');
+    if (!reg || !(String(reg.value || '').trim())) {
+      toast('error', 'Regulation required', 'Add regulation text before continuing.');
+      if (reg) reg.focus();
+      return;
+    }
+  }
+  pupStepperGo(1);
+}
+
 function loadPolicyUpdatePipelinePage() {
   initPolicyUpdatePipeline();
   refreshPolicyUpdatePipelineOrgDropdown().catch(() => {});
@@ -11786,12 +12094,306 @@ function loadPolicyUpdatePipelinePage() {
 
 function initPolicyUpdatePipeline() {
   if (policyUpdatePipelineWired) return;
-  const btn = document.getElementById('pup-run-btn');
   const orgSel = document.getElementById('pup-org-select');
-  if (!btn || !orgSel) return;
+  const runBtn = document.getElementById('pup-run-btn');
+  const backBtn = document.getElementById('pup-step-back');
+  const nextBtn = document.getElementById('pup-step-next');
+  const presetSel = document.getElementById('pup-preset-select');
+  if (!orgSel || !runBtn || !backBtn || !nextBtn || !presetSel) return;
   policyUpdatePipelineWired = true;
-  btn.addEventListener('click', () => runPolicyUpdatePipeline());
+  runBtn.addEventListener('click', () => runPolicyUpdatePipeline());
   orgSel.addEventListener('change', () => onPolicyUpdatePipelineOrgSelect());
+  presetSel.addEventListener('change', () => onPupPresetSelectChange());
+  backBtn.addEventListener('click', () => pupStepperBack());
+  nextBtn.addEventListener('click', () => pupStepperNext());
+  resetPolicyPipelineStepper();
+  maybeHydrateInitialPupPipelineDataset();
+}
+
+const PUP_STAGE_LABELS = {
+  f1: 'F1 — Relevance',
+  f2: 'F2 — Extract policy points',
+  f3: 'F3 — Policy match',
+  f4: 'F4 — Impact',
+};
+
+function pupStageLabel(sr) {
+  const k = String(sr || '').toLowerCase();
+  return PUP_STAGE_LABELS[k] || (sr ? String(sr) : 'Pipeline');
+}
+
+function pupSkippedStagesNote(data) {
+  const f1 = data && data.f1_relevance;
+  if (f1 && typeof f1 === 'object' && typeof f1.is_relevant !== 'boolean') return null;
+  const s = String(data.stage_reached || '').toLowerCase();
+  if (s === 'f1') {
+    return 'Stages F2–F4 were not executed because this regulation was classified as not relevant to the organisation.';
+  }
+  if (s === 'f2') {
+    return 'Stages F3 and F4 were not run — no policy points could be extracted from the regulation text.';
+  }
+  if (s === 'f3') {
+    return 'Stage F4 was not run — no regulation points matched your indexed policies above the similarity threshold.';
+  }
+  return null;
+}
+
+function pupSeverityClass(sev) {
+  const s = String(sev || 'none').toLowerCase().replace(/\s+/g, '-');
+  if (['critical', 'high', 'medium', 'low', 'none'].includes(s)) return `pup-sev-${s}`;
+  return 'pup-sev-none';
+}
+
+function renderPolicyPipelineResultHtml(data) {
+  if (!data || typeof data !== 'object') {
+    return '<p class="pup-result-prose">' + esc(String(data)) + '</p>';
+  }
+
+  const parts = [];
+  parts.push('<div class="pup-result-top">');
+  parts.push('<span class="pup-result-badge-stage">' + esc(pupStageLabel(data.stage_reached)) + '</span>');
+  if (typeof data.policy_count_indexed === 'number') {
+    parts.push(
+      '<span class="pup-result-meta">Indexed policies · <strong>' +
+        esc(String(data.policy_count_indexed)) +
+        '</strong></span>'
+    );
+  }
+  parts.push('</div>');
+
+  const skip = pupSkippedStagesNote(data);
+  if (skip) parts.push('<p class="pup-result-note">' + esc(skip) + '</p>');
+
+  const f1 = data.f1_relevance;
+  if (f1 && typeof f1 === 'object') {
+    parts.push('<div class="pup-result-panel">');
+    parts.push('<h4>F1 · Relevance assessment</h4>');
+    if (typeof f1.is_relevant !== 'boolean') {
+      parts.push(
+        '<p class="pup-result-note">The model did not return valid F1 JSON (expected a boolean <code>is_relevant</code>). ' +
+          'This is <strong>not</strong> the same as “not relevant” — the API response was empty, blocked, or unparsable. Retry, shorten inputs, or check your Gemini key / model.</p>'
+      );
+      parts.push(
+        '<p class="pup-result-meta">The pipeline runs in order — <strong>F1 → F2 → F3 → F4</strong>. Later stages never start unless F1 returns valid JSON ' +
+          'with <code>is_relevant: true</code> (truncated Arabic/English responses often die mid-<code>"reasoning"</code> string).</p>'
+      );
+      if (f1.raw_response != null && String(f1.raw_response).trim()) {
+        parts.push('<p class="pup-result-meta">Raw model text (truncated)</p>');
+        parts.push('<pre class="pup-result-excerpt">' + esc(String(f1.raw_response).slice(0, 4000)) + '</pre>');
+      }
+    } else {
+      parts.push('<div class="pup-result-relevance-row">');
+      const rel = !!f1.is_relevant;
+      parts.push(
+        '<span class="pup-result-pill ' +
+          (rel ? 'pup-result-pill-yes' : 'pup-result-pill-no') +
+          '">' +
+          esc(rel ? 'Relevant to organisation' : 'Not relevant') +
+          '</span>'
+      );
+      if (typeof f1.confidence === 'number') {
+        const pct = Math.round(Math.min(1, Math.max(0, f1.confidence)) * 100);
+        parts.push(
+          '<span class="pup-result-confidence">Model confidence · <strong>' + esc(String(pct)) + '%</strong></span>'
+        );
+      }
+      parts.push('</div>');
+      if (f1.reasoning) {
+        parts.push('<p class="pup-result-prose">' + esc(f1.reasoning) + '</p>');
+      }
+      const aspects = Array.isArray(f1.relevant_aspects) ? f1.relevant_aspects.filter(Boolean) : [];
+      if (aspects.length) {
+        parts.push('<ul class="pup-result-list">');
+        for (const a of aspects) parts.push('<li>' + esc(a) + '</li>');
+        parts.push('</ul>');
+      }
+    }
+    parts.push('</div>');
+  }
+
+  const f2 = data.f2_summary;
+  if (f2 && typeof f2 === 'object') {
+    const pts = Array.isArray(f2.policy_points) ? f2.policy_points : [];
+    parts.push('<div class="pup-result-panel">');
+    parts.push('<h4>F2 · Regulation points extracted</h4>');
+    if (!pts.length) {
+      parts.push('<p class="pup-result-prose">No policy points returned.</p>');
+    } else {
+      for (const pt of pts) {
+        parts.push('<div class="pup-result-point-card">');
+        parts.push('<div class="pup-result-point-head">' + esc(pt.id || 'Point') + '</div>');
+        const metaBits = [];
+        if (pt.source_reference) metaBits.push('Reference: ' + pt.source_reference);
+        if (pt.category) metaBits.push(pt.category);
+        if (metaBits.length) {
+          parts.push('<div class="pup-result-point-meta">' + esc(metaBits.join(' · ')) + '</div>');
+        }
+        parts.push('<p class="pup-result-prose" style="margin:0">' + esc(pt.point || '') + '</p>');
+        parts.push('</div>');
+      }
+    }
+    parts.push('</div>');
+  }
+
+  const f3 = data.f3_matches;
+  if (Array.isArray(f3)) {
+    parts.push('<div class="pup-result-panel">');
+    parts.push('<h4>F3 · Embeddings vs policies</h4>');
+    if (!f3.length) {
+      parts.push('<p class="pup-result-prose">No points to match.</p>');
+    } else {
+      for (const row of f3) {
+        const matches = Array.isArray(row.matches) ? row.matches : [];
+        parts.push('<div class="pup-result-point-card">');
+        parts.push('<div class="pup-result-point-head">' + esc(row.point_id || 'Point') + '</div>');
+        parts.push('<p class="pup-result-prose" style="margin:0">' + esc(row.point_text || '') + '</p>');
+        if (!matches.length) {
+          parts.push('<p class="pup-result-meta" style="margin-top:10px">No policy matches above threshold.</p>');
+        } else {
+          for (const m of matches) {
+            parts.push('<div class="pup-result-match-box">');
+            parts.push('<div class="pup-result-match-policy">' + esc(m.policy_title || m.policy_id || 'Policy') + '</div>');
+            if (typeof m.similarity_score === 'number') {
+              parts.push(
+                '<div class="pup-result-sim">Similarity · <strong>' + esc(String(m.similarity_score)) + '</strong></div>'
+              );
+            }
+            if (m.content_excerpt) {
+              parts.push('<div class="pup-result-excerpt">' + esc(m.content_excerpt) + '</div>');
+            }
+            parts.push('</div>');
+          }
+        }
+        parts.push('</div>');
+      }
+    }
+    parts.push('</div>');
+  }
+
+  const f4 = data.f4_impacts;
+  if (Array.isArray(f4) && f4.length) {
+    parts.push('<div class="pup-result-panel">');
+    parts.push('<h4>F4 · Impact analysis</h4>');
+    for (const block of f4) {
+      parts.push('<div class="pup-result-point-card">');
+      parts.push('<div class="pup-result-point-head">' + esc(block.point_id || '') + '</div>');
+      parts.push(
+        '<p class="pup-result-prose" style="margin:0;margin-bottom:10px">' + esc(block.point_text || '') + '</p>'
+      );
+      const impacts = Array.isArray(block.impacts) ? block.impacts : [];
+      if (!impacts.length) parts.push('<p class="pup-result-meta">No impact rows.</p>');
+      for (const imp of impacts) {
+        const sev = pupSeverityClass(imp.severity);
+        parts.push('<div class="pup-result-impact-card ' + sev + '">');
+        parts.push('<div class="pup-result-impact-head">' + esc(imp.policy_title || imp.policy_id || 'Policy') + '</div>');
+        if (imp.impact_summary) {
+          parts.push('<p class="pup-result-prose" style="margin:10px 0 6px">' + esc(imp.impact_summary) + '</p>');
+        }
+        parts.push('<dl class="pup-result-dl">');
+        if (imp.severity) parts.push('<dt>Severity</dt><dd>' + esc(String(imp.severity)) + '</dd>');
+        if (imp.severity_reasoning) parts.push('<dt>Rationale</dt><dd>' + esc(imp.severity_reasoning) + '</dd>');
+        if (typeof imp.requires_amendment === 'boolean') {
+          parts.push('<dt>Requires amendment</dt><dd>' + esc(String(imp.requires_amendment)) + '</dd>');
+        }
+        if (imp.compliance_gap) parts.push('<dt>Compliance gap</dt><dd>' + esc(imp.compliance_gap) + '</dd>');
+        parts.push('</dl>');
+        const amds = Array.isArray(imp.amendments) ? imp.amendments : [];
+        if (amds.length) {
+          parts.push('<p style="margin:12px 0 6px;font-size:11px;font-weight:600;color:#111827">Suggested amendments</p>');
+          parts.push('<ol class="pup-result-amends">');
+          for (const a of amds) {
+            const head = [];
+            if (a.change_type) head.push('[' + a.change_type + ']');
+            if (a.policy_section) head.push(a.policy_section);
+            parts.push('<li><strong>' + esc(head.join(' ').trim()) + '</strong>');
+            if (a.required_change) {
+              parts.push('<div style="margin-top:4px">' + esc(a.required_change) + '</div>');
+            }
+            if (a.current_text_summary) {
+              parts.push('<div style="margin-top:4px;font-size:11px;color:#64748b"><em>Current summary:</em> ' + esc(a.current_text_summary) + '</div>');
+            }
+            parts.push('</li>');
+          }
+          parts.push('</ol>');
+        }
+        if (
+          typeof imp.raw_response === 'string' &&
+          imp.raw_response &&
+          !(imp.severity || imp.impact_summary)
+        ) {
+          parts.push('<pre style="margin-top:10px;font-size:11px;line-height:1.4;background:#fef2f2;padding:8px;border-radius:6px">' + esc(imp.raw_response) + '</pre>');
+        }
+        parts.push('</div>');
+      }
+      parts.push('</div>');
+    }
+    parts.push('</div>');
+  }
+
+  parts.push('<details class="pup-result-raw-details"><summary>Raw JSON</summary><pre>');
+  parts.push(esc(JSON.stringify(data, null, 2)));
+  parts.push('</pre></details>');
+  return parts.join('');
+}
+
+function closePolicyPipelineResultModal() {
+  const overlay = document.getElementById('pup-result-modal-overlay');
+  if (!overlay) return;
+  overlay.classList.remove('active');
+  overlay.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+}
+
+function openPolicyPipelineResultModal(data) {
+  const overlay = document.getElementById('pup-result-modal-overlay');
+  const bodyEl = document.getElementById('pup-result-modal-body');
+  const titleEl = document.getElementById('pup-result-modal-title');
+  if (!overlay || !bodyEl) return;
+  policyUpdatePipelineLastRaw = data;
+  if (titleEl) {
+    titleEl.textContent =
+      data && typeof data === 'object' && data.stage_reached != null
+        ? 'Pipeline result · ' + pupStageLabel(data.stage_reached)
+        : 'Pipeline result';
+  }
+  bodyEl.innerHTML = renderPolicyPipelineResultHtml(data);
+  bodyEl.scrollTop = 0;
+  overlay.classList.add('active');
+  overlay.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+
+function initPolicyPipelineResultModalListeners() {
+  if (policyUpdatePipelineResultModalWired) return;
+  const overlay = document.getElementById('pup-result-modal-overlay');
+  const closeBtn = document.getElementById('pup-result-modal-close');
+  const closeBtnFooter = document.getElementById('pup-result-modal-close-btn');
+  const copyBtn = document.getElementById('pup-result-modal-copy-json');
+  if (!overlay || !document.body) return;
+  policyUpdatePipelineResultModalWired = true;
+  const close = () => closePolicyPipelineResultModal();
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  if (closeBtnFooter) closeBtnFooter.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && overlay.classList.contains('active')) close();
+  });
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      if (!policyUpdatePipelineLastRaw) {
+        toast('error', 'Nothing to copy', 'Run the pipeline first.');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(policyUpdatePipelineLastRaw, null, 2));
+        toast('success', 'Copied', 'Full pipeline JSON copied to clipboard.');
+      } catch (err) {
+        toast('error', 'Copy failed', err.message || String(err));
+      }
+    });
+  }
 }
 
 async function runPolicyUpdatePipeline() {
@@ -11801,6 +12403,8 @@ async function runPolicyUpdatePipeline() {
   const outEl = document.getElementById('pup-result');
   const statusEl = document.getElementById('pup-status');
   const btn = document.getElementById('pup-run-btn');
+  const stepBack = document.getElementById('pup-step-back');
+  const stepNext = document.getElementById('pup-step-next');
   if (!regEl || !btn) return;
 
   const regulationText = (regEl.value || '').trim();
@@ -11822,6 +12426,8 @@ async function runPolicyUpdatePipeline() {
   }
 
   btn.disabled = true;
+  if (stepBack) stepBack.disabled = true;
+  if (stepNext) stepNext.disabled = true;
   if (statusEl) statusEl.textContent = 'Running F1–F4…';
   if (outEl) {
     outEl.style.display = 'none';
@@ -11840,13 +12446,16 @@ async function runPolicyUpdatePipeline() {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || r.statusText || 'Request failed');
+    const payload = j.data != null ? j.data : j;
     if (outEl) {
-      outEl.style.display = 'block';
-      outEl.textContent = JSON.stringify(j.data != null ? j.data : j, null, 2);
+      outEl.style.display = 'none';
+      outEl.textContent = '';
     }
-    toast('success', 'Pipeline finished', `Stage: ${(j.data && j.data.stage_reached) || 'done'}`);
+    openPolicyPipelineResultModal(payload);
+    toast('success', 'Pipeline finished', `Stage: ${payload.stage_reached || 'done'}`);
   } catch (e) {
     console.error('[Policy update pipeline]', e);
+    closePolicyPipelineResultModal();
     if (outEl) {
       outEl.style.display = 'block';
       outEl.textContent = e.message || String(e);
@@ -11854,6 +12463,8 @@ async function runPolicyUpdatePipeline() {
     toast('error', 'Pipeline failed', e.message || '');
   } finally {
     btn.disabled = false;
+    if (stepNext) stepNext.disabled = false;
+    syncPolicyPipelineStepperDOM();
     if (statusEl) statusEl.textContent = '';
   }
 }
@@ -11864,6 +12475,7 @@ console.log('[admin.js] Script loaded, readyState:', document.readyState);
 
 function initApp() {
   initDataStudioUpload();
+  initPolicyPipelineResultModalListeners();
   initPolicyUpdatePipeline();
   const { page, subId } = parseRoute();
   console.log(`[admin.js] Initializing → route: /${page}${subId ? '/' + subId : ''}`);

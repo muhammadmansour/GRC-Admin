@@ -597,33 +597,94 @@
               <h1 class="page-title">Policy update pipeline</h1>
               <p class="page-subtitle">F1 relevance → F2 extract policy points → F3 embedding match → F4 impact (Gemini). Uses <code>GEMINI_API_KEY</code> on the server.</p>
             </div>
-            <div class="admin-card">
-              <div class="ds-import-row">
-                <label class="ds-label" for="pup-org-select">Organization profile</label>
-                <select id="pup-org-select" class="ds-select">
-                  <option value="">Loading contexts…</option>
-                </select>
-                <p class="ds-import-note" style="margin-top:8px">Choose a saved profile from <strong>Organization Contexts</strong>. The field below is filled automatically; you can edit the text before running.</p>
+            <div class="admin-card pup-stepper-card">
+              <nav class="pup-stepper-top" aria-label="Pipeline wizard steps">
+                <ol class="pup-stepper-labels" role="list">
+                  <li class="pup-step-label is-active" data-pup-step-label="0">
+                    <span class="pup-step-label-num">1</span>
+                    <span class="pup-step-label-text">Organisation</span>
+                  </li>
+                  <li class="pup-step-label" data-pup-step-label="1">
+                    <span class="pup-step-label-num">2</span>
+                    <span class="pup-step-label-text">Regulation</span>
+                  </li>
+                  <li class="pup-step-label" data-pup-step-label="2">
+                    <span class="pup-step-label-num">3</span>
+                    <span class="pup-step-label-text">Policies</span>
+                  </li>
+                </ol>
+                <div class="pup-stepper-progress-rail" aria-hidden="true">
+                  <div class="pup-stepper-progress-fill" id="pup-stepper-progress-fill"></div>
+                </div>
+              </nav>
+
+              <div class="pup-stepper-panels">
+                <div class="pup-step-panel" id="pup-step-panel-0" data-pup-step-index="0" role="tabpanel" aria-labelledby="pup-heading-0">
+                  <div class="pup-step-intro">
+                    <h2 class="pup-step-heading" id="pup-heading-0">Organisation context</h2>
+                    <p class="ds-import-note pup-step-intro-note">Sent to <strong>F1 relevance</strong> with the regulation excerpt. Use a sample dataset bundle so organisation, regulation, and policies stay in scope together, or pick <strong>Custom</strong> and edit freely.</p>
+                  </div>
+                  <div class="ds-import-row pup-preset-bundle-row">
+                    <label class="ds-label" for="pup-preset-select">Sample dataset (bundled inputs)</label>
+                    <select id="pup-preset-select" class="ds-select">
+                      <option value="python-demo" selected>Fintech + financial-institution PDPL demo (matches Python example.py)</option>
+                      <option value="energy">Energy sector + OT/critical-infra regulation (internally aligned)</option>
+                      <option value="healthcare">Healthcare + clinical / EHR regulation (internally aligned)</option>
+                      <option value="dga-saudi">Saudi digital government — DGA‑style illustrative bundle (AR/EN synthetic)</option>
+                      <option value="custom">Custom — do not overwrite my fields</option>
+                    </select>
+                    <p class="ds-import-note pup-preset-bundle-hint">Loads all three wizard steps consistently. Selecting a preset clears <strong>Organization profile</strong> so nothing overwrites org context silently. To re-apply the same bundle after edits, switch to <strong>Custom</strong>, then choose the sample again.</p>
+                  </div>
+                  <div class="ds-import-row">
+                    <label class="ds-label" for="pup-org-select">Organization profile</label>
+                    <select id="pup-org-select" class="ds-select">
+                      <option value="">Loading contexts…</option>
+                    </select>
+                    <p class="ds-import-note" style="margin-top:8px">Selecting a profile <strong>replaces</strong> the context textarea (Organization Contexts). Use <strong>— Select organization context —</strong> with a sample dataset, or combine profile + dataset by choosing profile after loading a bundle only if you accept the mismatch.</p>
+                  </div>
+                  <div class="ds-import-row" style="margin-top:12px">
+                    <label class="ds-label" for="pup-org-context">Organisation context (sent to pipeline)</label>
+                    <textarea id="pup-org-context" class="admin-form-textarea" rows="8" placeholder="Industry, jurisdiction, activities, compliance scope…"></textarea>
+                  </div>
+                </div>
+
+                <div class="pup-step-panel" id="pup-step-panel-1" data-pup-step-index="1" hidden role="tabpanel" aria-labelledby="pup-heading-1">
+                  <div class="pup-step-intro">
+                    <h2 class="pup-step-heading" id="pup-heading-1">Regulation text <span class="ds-req">*</span></h2>
+                    <p class="ds-import-note pup-step-intro-note">Filled by the sample dataset from step 1 (or paste your own). Required before <strong>Next</strong> / <strong>Run</strong>.</p>
+                  </div>
+                  <div class="ds-import-row">
+                    <label class="ds-label" for="pup-regulation">Regulation excerpt or document</label>
+                    <textarea id="pup-regulation" class="admin-form-textarea pup-step-tall-textarea" rows="14" placeholder="Full or partial regulation text to analyse…"></textarea>
+                  </div>
+                </div>
+
+                <div class="pup-step-panel" id="pup-step-panel-2" data-pup-step-index="2" hidden role="tabpanel" aria-labelledby="pup-heading-2">
+                  <div class="pup-step-intro">
+                    <h2 class="pup-step-heading" id="pup-heading-2">Policies (JSON)</h2>
+                    <p class="ds-import-note pup-step-intro-note">Indexed for F3/F4. Loaded with the bundle from step 1. Clear to <code>[]</code> if you only want F1/F2.</p>
+                  </div>
+                  <div class="ds-import-row">
+                    <label class="ds-label" for="pup-policies-json">Policies JSON array</label>
+                    <p class="ds-import-note" style="margin-bottom:8px">Each item needs <code>id</code> and <code>content</code>; optional <code>title</code>. Example: <code>[{&quot;id&quot;:&quot;p1&quot;,&quot;title&quot;:&quot;Access&quot;,&quot;content&quot;:&quot;…&quot;}]</code></p>
+                    <textarea id="pup-policies-json" class="admin-form-textarea admin-form-textarea-mono pup-step-tall-textarea" rows="14" placeholder='[{"id":"pol-1","title":"Example policy","content":"Policy body text…"}]'></textarea>
+                  </div>
+                </div>
               </div>
-              <div class="ds-import-row" style="margin-top:12px">
-                <label class="ds-label" for="pup-org-context">Organisation context (sent to pipeline)</label>
-                <textarea id="pup-org-context" class="admin-form-textarea" rows="5" placeholder="Select a profile above, or type industry, jurisdiction, scope…"></textarea>
-              </div>
-              <div class="ds-import-row" style="margin-top:12px">
-                <label class="ds-label" for="pup-regulation">Regulation text <span class="ds-req">*</span></label>
-                <textarea id="pup-regulation" class="admin-form-textarea" rows="10" placeholder="Full or partial regulation text to analyse…"></textarea>
-              </div>
-              <div class="ds-import-row" style="margin-top:12px">
-                <label class="ds-label" for="pup-policies-json">Policies (JSON array)</label>
-                <p class="ds-import-note" style="margin-bottom:8px">Each item needs <code>id</code> and <code>content</code>; optional <code>title</code>. Example: <code>[{&quot;id&quot;:&quot;p1&quot;,&quot;title&quot;:&quot;Access&quot;,&quot;content&quot;:&quot;…&quot;}]</code></p>
-                <textarea id="pup-policies-json" class="admin-form-textarea" rows="8" placeholder='[{"id":"pol-1","title":"Example policy","content":"Policy body text…"}]'></textarea>
-              </div>
-              <div style="margin-top:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-                <button type="button" class="btn-admin-primary" id="pup-run-btn">
-                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7H11M8 4L11 7L8 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  Run pipeline
-                </button>
-                <span id="pup-status" class="ds-status" aria-live="polite"></span>
+
+              <div class="pup-stepper-actions">
+                <button type="button" class="btn-admin-ghost" id="pup-step-back">Back</button>
+                <div class="pup-stepper-actions-right">
+                  <span id="pup-status" class="ds-status" aria-live="polite"></span>
+                  <button type="button" class="btn-admin-primary" id="pup-step-next">
+                    Next
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M6 3L11 7L6 11M11 7H3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                  <button type="button" class="btn-admin-primary" id="pup-run-btn" hidden>
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 7H11M8 4L11 7L8 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    Run pipeline
+                  </button>
+                </div>
               </div>
               <pre id="pup-result" class="ds-import-log" style="display:none;margin-top:16px;max-height:480px;overflow:auto"></pre>
             </div>
@@ -1350,6 +1411,23 @@
             Saving...
           </span>
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Policy update pipeline — result modal -->
+  <div class="admin-modal-overlay" id="pup-result-modal-overlay" aria-hidden="true">
+    <div class="admin-modal admin-modal-lg pup-result-modal-shell" role="dialog" aria-modal="true" aria-labelledby="pup-result-modal-title">
+      <div class="admin-modal-header">
+        <h3 class="admin-modal-title" id="pup-result-modal-title">Pipeline result</h3>
+        <button type="button" class="admin-modal-close" id="pup-result-modal-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="admin-modal-body pup-result-modal-body" id="pup-result-modal-body"></div>
+      <div class="admin-modal-footer">
+        <button type="button" class="btn-admin-ghost" id="pup-result-modal-copy-json">Copy JSON</button>
+        <button type="button" class="btn-admin-primary" id="pup-result-modal-close-btn">Close</button>
       </div>
     </div>
   </div>
