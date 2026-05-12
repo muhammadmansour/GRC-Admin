@@ -3,7 +3,7 @@ if (!document.cookie.split(';').some(c => c.trim().startsWith('wathba_token=')))
   window.location.replace('/login.html');
 }
 
-const API_URL = 'https://muraji-stage.wathbahs.com/api/libraries';
+const API_URL = 'https://muraji-api.wathbah.dev/api/libraries';
 const ANALYZE_API_URL = '/api/analyze';
 
 // DOM Elements
@@ -1133,7 +1133,7 @@ async function confirmAnalysis() {
     // Send updates to each library
     const results = await Promise.all(
       Object.entries(updatesByLibrary).map(async ([libraryId, updates]) => {
-        const apiUrl = `https://muraji-stage.wathbahs.com/api/libraries/${libraryId}/controls`;
+        const apiUrl = `https://muraji-api.wathbah.dev/api/libraries/${libraryId}/controls`;
         const body = { updates };
         
         console.log('Sending to API:', apiUrl, body);
