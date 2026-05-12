@@ -37,7 +37,7 @@ loadEnv();
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // GRC Platform configuration
-const GRC_API_URL = (process.env.GRC_API_URL || 'https://stage-hrsd.wathbahs.com').replace(/\/+$/, '');
+const GRC_API_URL = (process.env.GRC_API_URL || 'https://grc.wathbah.dev').replace(/\/+$/, '');
 
 // ==========================================
 // Authentication (via GRC IAM)
