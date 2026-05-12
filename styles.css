@@ -2212,6 +2212,11 @@ textarea::placeholder {
   background: rgba(220, 38, 38, 0.1);
 }
 
+.toast.warning .toast-icon {
+  color: var(--color-warning);
+  background: rgba(217, 119, 6, 0.12);
+}
+
 .toast.info .toast-icon {
   color: var(--color-primary);
   background: var(--color-primary-light);

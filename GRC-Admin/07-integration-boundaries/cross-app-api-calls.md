@@ -7,7 +7,7 @@
 
 | Aspect | Detail |
 |---|---|
-| **Base URL** | `https://grc.wathbah.dev` (from `GRC_API_URL` env var) |
+| **Base URL** | `https://stage-hrsd.wathbahs.com` (from `GRC_API_URL` env var) |
 | **Direction** | Admin → GRC (this project calls GRC; GRC never calls back) |
 | **Auth** | Bearer token from logged-in user's GRC session |
 | **Protocol** | REST / JSON |

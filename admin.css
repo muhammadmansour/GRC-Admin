@@ -6992,6 +6992,20 @@
   margin-bottom: 12px;
   max-width: 560px;
 }
+.ds-import-row-inline {
+  margin-bottom: 8px;
+}
+.ds-check-label {
+  font-size: 12px;
+  color: #475569;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.ds-check-label input {
+  margin: 0;
+}
 .ds-label {
   display: block;
   font-size: 12px;
@@ -7000,6 +7014,11 @@
   margin-bottom: 6px;
 }
 .ds-req { color: #dc2626; }
+.ds-label-note {
+  font-weight: 400;
+  color: #64748b;
+  font-size: 11px;
+}
 .ds-select {
   width: 100%;
   padding: 8px 10px;
