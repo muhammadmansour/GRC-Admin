@@ -169,6 +169,13 @@ function isAdminSpaPath(pathname) {
   return ADMIN_SPA_ROUTE_PREFIXES.some((prefix) => p === prefix || p.startsWith(`${prefix}/`));
 }
 
+/** Match `/api/grc/...` list proxies when deployed behind path-based gateways (path is `/prefix/api/grc/...`). */
+function grcProxyTailMatch(routePath, exactTail) {
+  const p = String(routePath || '/').replace(/\/{2,}/g, '/');
+  const t = String(exactTail || '');
+  return p === t || p.endsWith(t);
+}
+
 function getTokenFromRequest(req) {
   // Check cookie
   const cookies = (req.headers.cookie || '').split(';').map(c => c.trim());
@@ -1298,7 +1305,9 @@ const mimeTypes = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon'
+  '.ico': 'image/x-icon',
+  '.yaml': 'text/yaml; charset=utf-8',
+  '.yml': 'text/yaml; charset=utf-8',
 };
 
 // Safe JSON response helper — handles Unicode (Arabic, etc.) without ByteString errors
@@ -2374,6 +2383,291 @@ function dsParseWorkbookToNormalizedRows(fileBuffer) {
   return { sheetName: sn[0], rows };
 }
 
+/** Policy rows for Data Studio: map spreadsheets → GRC Policy bodies (PolicyWriteSerializer ~ AppliedControl writable fields; category forced to policy upstream). */
+const DS_POLICY_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function dsPolicyTruncateRef(s, maxLen) {
+  maxLen = maxLen || 100;
+  if (s == null || s === '') return '';
+  const t = String(s).trim();
+  return t.length <= maxLen ? t : t.slice(0, maxLen);
+}
+
+function dsPolicyOptionalBoundedInt(raw, keys, lo, hi) {
+  let s = dsFirstString(raw, keys);
+  if (s === '' || s == null) {
+    for (const k of keys) {
+      if (raw[k] != null && typeof raw[k] === 'number' && Number.isFinite(raw[k])) {
+        const n = Math.trunc(raw[k]);
+        if (n >= lo && n <= hi) return n;
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+  const n = parseInt(String(s).trim(), 10);
+  if (!Number.isFinite(n) || n < lo || n > hi) return undefined;
+  return n;
+}
+
+function dsPolicyOptionalDate(raw, keys) {
+  const s = dsFirstString(raw, keys);
+  if (!s) return undefined;
+  const m = String(s).trim().match(/^(\d{4}-\d{2}-\d{2})\b/);
+  return m ? m[1] : undefined;
+}
+
+function dsPolicyNormalizeStatus(raw) {
+  const s = dsFirstString(raw, ['status', 'Status', 'الحالة']);
+  if (!s) return undefined;
+  const norm = String(s).trim().toLowerCase().replace(/\s+/g, '_');
+  const map = new Map([
+    ['to_do', 'to_do'],
+    ['todo', 'to_do'],
+    ['in_progress', 'in_progress'],
+    ['inprogress', 'in_progress'],
+    ['on_hold', 'on_hold'],
+    ['onhold', 'on_hold'],
+    ['active', 'active'],
+    ['deprecated', 'deprecated'],
+    ['--', '--'],
+    ['undefined', '--'],
+    ['undef', '--'],
+  ]);
+  if (norm === '−−' || norm === '-') return '--';
+  if (map.has(norm)) return map.get(norm);
+  const allowed = new Set(['to_do', 'in_progress', 'on_hold', 'active', 'deprecated', '--']);
+  if (allowed.has(norm)) return norm;
+  return undefined;
+}
+
+function dsPolicyNormalizeCsf(raw) {
+  const s = dsFirstString(raw, ['csf_function', 'CSF function', 'CSF Function', 'csf']);
+  if (!s) return undefined;
+  const t = String(s).trim().toLowerCase();
+  const allowed = ['govern', 'identify', 'protect', 'detect', 'respond', 'recover'];
+  return allowed.includes(t) ? t : undefined;
+}
+
+function dsPolicyNormalizeEffort(raw) {
+  const s = dsFirstString(raw, ['effort', 'Effort']);
+  if (!s) return undefined;
+  const u = String(s).trim().toUpperCase();
+  return ['XS', 'S', 'M', 'L', 'XL'].includes(u) ? u : undefined;
+}
+
+function dsPolicyOptionalUuid(raw, keys) {
+  const v = dsFirstString(raw, keys);
+  if (!v || !DS_POLICY_UUID_RE.test(v.trim())) return undefined;
+  return v.trim();
+}
+
+function dsPolicyNormalizePublished(raw) {
+  const s = dsFirstString(raw, ['is_published', 'Is published', 'published', 'Published']);
+  if (s === '' || s == null) return undefined;
+  const t = String(s).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'نعم'].includes(t)) return true;
+  if (['false', '0', 'no', 'n', 'لا'].includes(t)) return false;
+  return undefined;
+}
+
+/** Parsed workbook row — name required before import; folder UUID from POST body. */
+function dsNormalizePolicySheetRow(raw) {
+  const name = dsFirstString(raw, ['name', 'Name', 'title', 'Title', 'Policy name', 'policy_name', 'اسم السياسة']);
+  let description =
+    dsFirstString(raw, ['description', 'Description', 'summary', 'Summary', 'ملخص']) || '';
+  if (!description.trim() && raw && typeof raw === 'object') {
+    description = dsBuildDescriptionFromRow(raw);
+  }
+  const ref_id = dsPolicyTruncateRef(
+    dsFirstString(raw, ['ref_id', 'Ref ID', 'reference', 'Reference', 'كود', 'رمز']),
+    100
+  );
+  const observation = dsFirstString(raw, ['observation', 'Observation']);
+  const link = dsFirstString(raw, ['link', 'Link', 'url', 'URL']);
+
+  return {
+    name,
+    description: description.trim(),
+    ref_id,
+    observation: observation || undefined,
+    link: link || undefined,
+    status: dsPolicyNormalizeStatus(raw),
+    csf_function: dsPolicyNormalizeCsf(raw),
+    priority: dsPolicyOptionalBoundedInt(raw, ['priority', 'Priority'], 1, 4),
+    control_impact: dsPolicyOptionalBoundedInt(raw, ['control_impact', 'Control impact', 'impact'], 1, 5),
+    progress_field: dsPolicyOptionalBoundedInt(raw, ['progress_field', 'Progress', 'progress'], 0, 100),
+    effort: dsPolicyNormalizeEffort(raw),
+    reference_control: dsPolicyOptionalUuid(raw, ['reference_control', 'reference control', 'Reference control']),
+    start_date: dsPolicyOptionalDate(raw, ['start_date', 'Start date']),
+    eta: dsPolicyOptionalDate(raw, ['eta', 'Eta', 'ETA']),
+    expiry_date: dsPolicyOptionalDate(raw, ['expiry_date', 'Expiry date', 'expiry']),
+    is_published: dsPolicyNormalizePublished(raw),
+  };
+}
+
+/** Minimal POST body for each row — aligns with GRCPolicy create (omit undefined). */
+function dsBuildPolicyPostPayload(row, folderUuid) {
+  const body = { name: row.name, folder: folderUuid };
+  if (row.description) body.description = row.description;
+  if (row.ref_id) body.ref_id = row.ref_id;
+  if (row.observation) body.observation = row.observation;
+  if (row.link) body.link = row.link;
+  if (row.status) body.status = row.status;
+  if (row.csf_function) body.csf_function = row.csf_function;
+  if (row.priority != null) body.priority = row.priority;
+  if (row.reference_control) body.reference_control = row.reference_control;
+  if (row.effort) body.effort = row.effort;
+  if (row.control_impact != null) body.control_impact = row.control_impact;
+  if (row.start_date) body.start_date = row.start_date;
+  if (row.eta) body.eta = row.eta;
+  if (row.expiry_date) body.expiry_date = row.expiry_date;
+  if (row.progress_field != null) body.progress_field = row.progress_field;
+  if (row.is_published === true || row.is_published === false) body.is_published = row.is_published;
+  return body;
+}
+
+function dsParseWorkbookToPolicyRows(fileBuffer) {
+  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const sn = wb.SheetNames || [];
+  if (!sn.length) return { error: 'Workbook has no sheets.' };
+  const sheet = wb.Sheets[sn[0]];
+  const objects = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+  const rows = [];
+  let excelRowNum = 1;
+  let skippedEmptyName = 0;
+  for (const o of objects) {
+    excelRowNum++;
+    const n = dsNormalizePolicySheetRow(o);
+    if (!n.name) {
+      skippedEmptyName++;
+      continue;
+    }
+    rows.push({ ...n, excelRow: excelRowNum });
+  }
+  return { sheetName: sn[0], rows, skippedEmptyName };
+}
+
+/** Risk scenario rows → POST /api/risk-scenarios/ (row name required; risk_assessment from column or import default). */
+function dsNormalizeRiskScenarioSheetRow(raw) {
+  const name = dsFirstString(raw, [
+    'name',
+    'Name',
+    'title',
+    'Title',
+    'scenario',
+    'Scenario',
+    'risk_scenario',
+    'Risk scenario',
+  ]);
+  const description = dsFirstString(raw, ['description', 'Description', 'summary', 'Summary']) || '';
+  const ref_id = dsPolicyTruncateRef(
+    dsFirstString(raw, ['ref_id', 'Ref ID', 'reference', 'Reference', 'كود', 'رمز']),
+    100
+  );
+  const observation = dsFirstString(raw, ['observation', 'Observation']);
+  const raFromCol = dsFirstString(raw, [
+    'risk_assessment',
+    'Risk assessment',
+    'assessment',
+    'assessment_uuid',
+    'risk_assessment_id',
+  ]);
+  let risk_assessment;
+  if (raFromCol && DS_POLICY_UUID_RE.test(String(raFromCol).trim())) {
+    risk_assessment = String(raFromCol).trim();
+  }
+  return {
+    name,
+    description: description.trim(),
+    ref_id: ref_id || undefined,
+    observation: observation || undefined,
+    risk_assessment,
+  };
+}
+
+function dsBuildRiskScenarioPostPayload(row) {
+  const body = { name: row.name, risk_assessment: row.risk_assessment };
+  if (row.description) body.description = row.description;
+  if (row.ref_id) body.ref_id = row.ref_id;
+  if (row.observation) body.observation = row.observation;
+  return body;
+}
+
+function dsParseWorkbookToRiskScenarioRows(fileBuffer) {
+  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const sn = wb.SheetNames || [];
+  if (!sn.length) return { error: 'Workbook has no sheets.' };
+  const sheet = wb.Sheets[sn[0]];
+  const objects = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+  const rows = [];
+  let excelRowNum = 1;
+  let skippedEmptyName = 0;
+  for (const o of objects) {
+    excelRowNum++;
+    const n = dsNormalizeRiskScenarioSheetRow(o);
+    if (!n.name) {
+      skippedEmptyName++;
+      continue;
+    }
+    rows.push({ ...n, excelRow: excelRowNum });
+  }
+  return { sheetName: sn[0], rows, skippedEmptyName };
+}
+
+/** Basename suitable for HTTP Content-Disposition filename= (ASCII, rejects path tricks). */
+function dsDispositionFilenameAscii(name, fallback = 'risk-matrix-library.yaml') {
+  let base = fallback;
+  try {
+    base = path.basename(String(name || '').trim()) || fallback;
+  } catch (_) { /* keep fallback */ }
+  if (!base || base === '.' || base === '..') base = fallback;
+  let out = base.replace(/[^\w.\-()+@]/g, '_');
+  if (!out.endsWith('.yaml') && !out.endsWith('.yml')) {
+    const stem = out.replace(/\.+$/, '') || 'library';
+    out = `${stem.slice(0, 180)}.yaml`;
+  }
+  return out.slice(0, 200);
+}
+
+/** Light validation before forwarding YAML to POST /api/stored-libraries/upload/ (risk-matrix library envelope). */
+function dsValidateRiskMatrixStoredLibraryYaml(yamlStr) {
+  let doc;
+  try {
+    doc = yaml.load(yamlStr);
+  } catch (e) {
+    return { error: `YAML parse error: ${e.message}` };
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { error: 'YAML root must be a mapping (object).' };
+  }
+  if (!String(doc.urn ?? '').trim()) return { error: 'Library YAML requires urn.' };
+  if (!String(doc.name ?? '').trim()) return { error: 'Library YAML requires name.' };
+  if (doc.version === undefined || doc.version === null) {
+    return { error: 'Library YAML requires version (integer).' };
+  }
+  if (!String(doc.ref_id ?? '').trim()) {
+    return { error: 'Library YAML requires ref_id (stored library creation).' };
+  }
+  if (!doc.objects || typeof doc.objects !== 'object' || Array.isArray(doc.objects)) {
+    return { error: 'Library YAML requires objects mapping.' };
+  }
+  const o = doc.objects;
+  if (o.risk_matrices != null && o.risk_matrix != null) {
+    return { error: 'Define only one of objects.risk_matrices or objects.risk_matrix.' };
+  }
+  const list = o.risk_matrices;
+  const legacy = o.risk_matrix;
+  if (list != null) {
+    if (!Array.isArray(list)) return { error: 'objects.risk_matrices must be a YAML list.' };
+    if (!list.length) return { error: 'objects.risk_matrices must not be empty.' };
+  } else if (legacy == null) {
+    return { error: 'Provide objects.risk_matrices or objects.risk_matrix.' };
+  }
+  return { doc };
+}
+
 // ==========================================
 // Gemini Analysis API
 // ==========================================
@@ -3335,9 +3629,13 @@ const server = http.createServer(async (req, res) => {
 
   // Extract local token for GRC-authenticated fetch calls
   const reqToken = getTokenFromRequest(req);
+  /** Trailing slashes on /api/data-studio/** would skip strict matches; use `grcProxyTailMatch(routePath, …)` so path-prefixed gateways still match. */
+  const pathnameNorm =
+    typeof url.pathname === 'string' ? url.pathname.replace(/\/+$/, '') || '/' : '/';
+  const routePath = pathnameNorm.replace(/\/{2,}/g, '/');
 
   // ---- Data Studio: Excel preview (applied controls import path) ----
-  if (url.pathname === '/api/data-studio/preview-excel' && req.method === 'POST') {
+  if (grcProxyTailMatch(routePath, '/api/data-studio/preview-excel') && req.method === 'POST') {
     try {
       const body = await parseBody(req);
       const { fileName, data } = body;
@@ -3402,7 +3700,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (url.pathname === '/api/data-studio/create-audit' && req.method === 'POST') {
+  if (grcProxyTailMatch(routePath, '/api/data-studio/create-audit') && req.method === 'POST') {
     try {
       const body = await parseBody(req);
       const framework =
@@ -3508,7 +3806,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (url.pathname === '/api/data-studio/diagnose-grc-audits' && req.method === 'GET') {
+  if (grcProxyTailMatch(routePath, '/api/data-studio/diagnose-grc-audits') && req.method === 'GET') {
     try {
       // 1) every compliance assessment + a small sample of its requirement-assessment ref_ids
       const cas = await dsFetchAllComplianceAssessments(GRC_API_URL, reqToken, res);
@@ -3603,7 +3901,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (url.pathname === '/api/data-studio/import-applied-controls' && req.method === 'POST') {
+  if (grcProxyTailMatch(routePath, '/api/data-studio/import-applied-controls') && req.method === 'POST') {
     try {
       const body = await parseBody(req);
       const { fileName, data, folder, complianceAssessment } = body;
@@ -4146,6 +4444,248 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Data Studio → GRC POST /api/policies/ per workbook row (PolicyWriteSerializer; category forced upstream). */
+  if (grcProxyTailMatch(routePath, '/api/data-studio/import-policies') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const { fileName, data, folder } = body;
+      if (!folder || typeof folder !== 'string') {
+        sendJSON(res, 400, { error: 'folder (UUID) is required.' });
+        return;
+      }
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      const lower = String(fileName || '').toLowerCase();
+      if (!lower.endsWith('.xlsx') && !lower.endsWith('.xls') && !lower.endsWith('.csv')) {
+        sendJSON(res, 400, { error: 'Only Excel (.xlsx, .xls) or CSV files are supported.' });
+        return;
+      }
+      let fileBuffer;
+      try {
+        fileBuffer = Buffer.from(data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 payload.' });
+        return;
+      }
+      const parsed = dsParseWorkbookToPolicyRows(fileBuffer);
+      if (parsed.error) {
+        sendJSON(res, 400, { error: parsed.error });
+        return;
+      }
+      const { rows, sheetName, skippedEmptyName } = parsed;
+      const folderTrim = folder.trim();
+      const created = [];
+      const errors = [];
+
+      let rowIx = 0;
+      for (const row of rows) {
+        rowIx++;
+        const grcBody = dsBuildPolicyPostPayload(row, folderTrim);
+        const rowCtx = { row: row.excelRow, index: rowIx, name: row.name };
+
+        try {
+          const grcRes = await grcFetch(`${GRC_API_URL}/api/policies/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(grcBody),
+          }, reqToken);
+          if (!grcRes.ok) {
+            const errIn = await consumeGrcErrorBody(res, reqToken, grcRes);
+            if (errIn.aborted) return;
+            const eMsg = errIn.errText.slice(0, 800);
+            errors.push({ ...rowCtx, error: eMsg });
+            continue;
+          }
+          const createdObj = await grcRes.json();
+          const id = createdObj.id || createdObj.uuid;
+          created.push({ ...rowCtx, id, ref_id: row.ref_id || null });
+          console.log(
+            `[DataStudio] Policy row ${rowCtx.row} POST /api/policies/ → ${id ? String(id).slice(0, 8) + '…' : '(no id)'}`
+          );
+        } catch (e) {
+          errors.push({ ...rowCtx, error: e.message });
+        }
+      }
+
+      sendJSON(res, 200, {
+        success: true,
+        sheetName,
+        folder: folderTrim,
+        totalParsedRows: rows.length,
+        skippedEmptyName: skippedEmptyName || 0,
+        createdCount: created.length,
+        failedCount: errors.length,
+        created,
+        errors,
+        grcPoliciesApi: `${GRC_API_URL}/api/policies/`,
+      });
+    } catch (err) {
+      console.error('[DataStudio] import-policies:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Import failed.' });
+    }
+    return;
+  }
+
+  /** Data Studio → GRC POST /api/risk-scenarios/ per workbook row. */
+  if (grcProxyTailMatch(routePath, '/api/data-studio/import-risk-scenarios') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const { fileName, data, risk_assessment } = body;
+      const raDefault =
+        typeof risk_assessment === 'string' ? risk_assessment.trim() : '';
+
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      const lower = String(fileName || '').toLowerCase();
+      if (!lower.endsWith('.xlsx') && !lower.endsWith('.xls') && !lower.endsWith('.csv')) {
+        sendJSON(res, 400, { error: 'Only Excel (.xlsx, .xls) or CSV files are supported.' });
+        return;
+      }
+
+      let fileBuffer;
+      try {
+        fileBuffer = Buffer.from(data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 payload.' });
+        return;
+      }
+      const parsed = dsParseWorkbookToRiskScenarioRows(fileBuffer);
+      if (parsed.error) {
+        sendJSON(res, 400, { error: parsed.error });
+        return;
+      }
+      const { rows, sheetName, skippedEmptyName } = parsed;
+      const created = [];
+      const errors = [];
+
+      let rowIx = 0;
+      for (const row of rows) {
+        rowIx++;
+        const assessmentUuid =
+          typeof row.risk_assessment === 'string' ? row.risk_assessment.trim() || raDefault : raDefault;
+
+        const rowCtx = { row: row.excelRow, index: rowIx, name: row.name };
+        if (!assessmentUuid) {
+          errors.push({
+            ...rowCtx,
+            error:
+              'No risk_assessment UUID. Set Step 3 “Risk assessment UUID”, add a risk_assessment column, or omit per-row overrides only after a default exists.',
+          });
+          continue;
+        }
+        const merged = { ...row, risk_assessment: assessmentUuid };
+        const grcBody = dsBuildRiskScenarioPostPayload(merged);
+
+        try {
+          const grcRes = await grcFetch(
+            `${GRC_API_URL}/api/risk-scenarios/`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(grcBody),
+            },
+            reqToken
+          );
+          if (!grcRes.ok) {
+            const errIn = await consumeGrcErrorBody(res, reqToken, grcRes);
+            if (errIn.aborted) return;
+            const eMsg = errIn.errText.slice(0, 800);
+            errors.push({ ...rowCtx, error: eMsg });
+            continue;
+          }
+          const createdObj = await grcRes.json();
+          const id = createdObj.id || createdObj.uuid;
+          created.push({ ...rowCtx, id, ref_id: row.ref_id || null });
+          console.log(
+            `[DataStudio] Risk scenario row ${rowCtx.row} POST /api/risk-scenarios/ → ${id ? String(id).slice(0, 8) + '…' : '(no id)'}`
+          );
+        } catch (e) {
+          errors.push({ ...rowCtx, error: e.message });
+        }
+      }
+
+      sendJSON(res, 200, {
+        success: errors.length === 0,
+        sheetName,
+        risk_assessment_default: raDefault || null,
+        totalParsedRows: rows.length,
+        skippedEmptyName: skippedEmptyName || 0,
+        createdCount: created.length,
+        failedCount: errors.length,
+        created,
+        errors,
+        grcRiskScenariosApi: `${GRC_API_URL}/api/risk-scenarios/`,
+      });
+    } catch (err) {
+      console.error('[DataStudio] import-risk-scenarios:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Import failed.' });
+    }
+    return;
+  }
+
+  /**
+   * Data Studio · Risk-matrix stored library YAML → raw body + Content-Disposition (same as Policy Approve→GRC stored-libraries/upload).
+   */
+  if (grcProxyTailMatch(routePath, '/api/data-studio/upload-risk-matrix-library-yaml') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const yamlText = typeof body.yaml === 'string' ? body.yaml : '';
+      const fileHint = typeof body.fileName === 'string' ? body.fileName.trim() : '';
+      if (!yamlText.trim()) {
+        sendJSON(res, 400, { error: 'yaml (UTF-8 string) is required.' });
+        return;
+      }
+      const v = dsValidateRiskMatrixStoredLibraryYaml(yamlText);
+      if (v.error) {
+        sendJSON(res, 400, { error: v.error });
+        return;
+      }
+      const fileBuffer = Buffer.from(yamlText, 'utf8');
+      const dispositionFn = dsDispositionFilenameAscii(
+        fileHint || `${String(v.doc.ref_id).trim().replace(/\s+/g, '_')}.yaml`,
+      );
+
+      const grcRes = await grcFetch(
+        `${GRC_API_URL}/api/stored-libraries/upload/`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Disposition': `attachment; filename=${dispositionFn}`,
+            'Content-Length': String(fileBuffer.length),
+          },
+          body: fileBuffer,
+        },
+        reqToken
+      );
+      if (!grcRes.ok) {
+        const errIn = await consumeGrcErrorBody(res, reqToken, grcRes);
+        if (errIn.aborted) return;
+        const eMsg = errIn.errText.slice(0, 900);
+        sendJSON(res, grcRes.status >= 400 && grcRes.status < 600 ? grcRes.status : 502, {
+          success: false,
+          error: eMsg,
+          grcStoredLibrariesUpload: `${GRC_API_URL}/api/stored-libraries/upload/`,
+        });
+        return;
+      }
+      const createdObj = await grcRes.json().catch(() => ({}));
+      console.log(`[DataStudio] stored-libraries/upload (risk matrix YAML) → ok`);
+      sendJSON(res, 200, {
+        success: true,
+        result: createdObj,
+        grcStoredLibrariesUpload: `${GRC_API_URL}/api/stored-libraries/upload/`,
+      });
+    } catch (err) {
+      console.error('[DataStudio] upload-risk-matrix-library-yaml:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Upload failed.' });
+    }
+    return;
+  }
+
   // ---- AI Tools: Policy update pipeline (F1–F4, Gemini) ----
   if (url.pathname === '/api/ai-tools/policy-update-pipeline' && req.method === 'POST') {
     try {
@@ -4440,17 +4980,60 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ---- GRC Platform Proxy: List policies (applied controls) ----
+  // ---- GRC Platform Proxy: Policies (native /api/policies/ — not applied-controls list) ----
   if (url.pathname === '/api/grc/policies' && req.method === 'GET') {
     try {
       const qs = url.search || '';
-      const grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/${qs ? qs + '&page_size=500' : '?page_size=500'}`, {}, reqToken);
+      const join = qs ? `${qs}&page_size=500` : '?page_size=500';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/policies/${join}`, {}, reqToken);
       if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
       const data = await grcRes.json();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, results: data.results || data }));
     } catch (error) {
-      console.error('[GRC] Policies error:', error.message);
+      console.error('[GRC] Policies list error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/grc/policies' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/policies/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create policy error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcPolicyIdMatch = url.pathname.match(/^\/api\/grc\/policies\/([^/]+)\/?$/);
+  if (grcPolicyIdMatch && req.method === 'PATCH') {
+    try {
+      const polId = grcPolicyIdMatch[1];
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/policies/${encodeURIComponent(polId)}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] PATCH policy error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }
@@ -4512,16 +5095,251 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ---- GRC Platform Proxy: Get risk scenarios ----
-  if (url.pathname === '/api/grc/risk-scenarios' && req.method === 'GET') {
+  // ---- GRC Platform Proxy: Risk scenarios (list + create; query passthrough) ----
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-scenarios') && req.method === 'GET') {
     try {
-      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-scenarios/`, {}, reqToken);
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : 'page_size=500';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-scenarios/?${q}`, {}, reqToken);
       if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
       const data = await grcRes.json();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, results: data.results || data }));
     } catch (error) {
       console.error('[GRC] Risk scenarios error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-scenarios') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-scenarios/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create risk scenario error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ---- GRC: Perimeters (folder scope for risk assessments) ----
+  if (grcProxyTailMatch(routePath, '/api/grc/perimeters') && req.method === 'GET') {
+    try {
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : 'page_size=200';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/perimeters/?${q}`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, results: data.results || data }));
+    } catch (error) {
+      console.error('[GRC] Perimeters list error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (grcProxyTailMatch(routePath, '/api/grc/perimeters') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/perimeters/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create perimeter error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ---- GRC: Risk matrices (required on RiskAssessment) ----
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-matrices') && req.method === 'GET') {
+    try {
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : 'page_size=200';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-matrices/?${q}`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, results: data.results || data }));
+    } catch (error) {
+      console.error('[GRC] Risk matrices error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-matrices') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-matrices/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create risk matrix error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ---- GRC: Risk assessments (CRUD + duplicate, sync, action-plan) ----
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-assessments') && req.method === 'GET') {
+    try {
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : 'page_size=200';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-assessments/?${q}`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, results: data.results || data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessments list error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-assessments') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-assessments/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create risk assessment error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcRaOneMatch = routePath.match(/\/api\/grc\/risk-assessments\/([^/]+)$/);
+  if (grcRaOneMatch && (req.method === 'GET' || req.method === 'PATCH' || req.method === 'DELETE')) {
+    try {
+      const raId = grcRaOneMatch[1];
+      const grcRes = await grcFetch(
+        `${GRC_API_URL}/api/risk-assessments/${encodeURIComponent(raId)}/`,
+        req.method === 'GET'
+          ? { method: 'GET' }
+          : {
+              method: req.method,
+              headers: { 'Content-Type': 'application/json' },
+              body: req.method === 'PATCH' ? JSON.stringify(await parseBody(req)) : undefined,
+            },
+        reqToken
+      );
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      if (req.method === 'DELETE') {
+        if (grcRes.status === 204 || grcRes.status === 200) {
+          res.writeHead(grcRes.status === 204 ? 204 : grcRes.status);
+          res.end();
+          return;
+        }
+        const txt = await grcRes.text();
+        res.writeHead(grcRes.status, { 'Content-Type': 'application/json' });
+        res.end(txt || '{}');
+        return;
+      }
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessment single error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcRaDupMatch = routePath.match(/\/api\/grc\/risk-assessments\/([^/]+)\/duplicate$/);
+  if (grcRaDupMatch && req.method === 'POST') {
+    try {
+      const raId = grcRaDupMatch[1];
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(
+        `${GRC_API_URL}/api/risk-assessments/${encodeURIComponent(raId)}/duplicate/`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+        reqToken
+      );
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessment duplicate error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcRaSyncMatch = routePath.match(/\/api\/grc\/risk-assessments\/([^/]+)\/sync_from_ebios_rm$/);
+  if (grcRaSyncMatch && req.method === 'POST') {
+    try {
+      const raId = grcRaSyncMatch[1];
+      let bodyStr = '{}';
+      try {
+        const body = await parseBody(req);
+        bodyStr = JSON.stringify(body && typeof body === 'object' ? body : {});
+      } catch (_) {
+        bodyStr = '{}';
+      }
+      const grcRes = await grcFetch(
+        `${GRC_API_URL}/api/risk-assessments/${encodeURIComponent(raId)}/sync_from_ebios_rm/`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: bodyStr },
+        reqToken
+      );
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessment sync EBIOS RM error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcRaActionPlanMatch = routePath.match(/\/api\/grc\/risk-assessments\/([^/]+)\/action-plan$/);
+  if (grcRaActionPlanMatch && req.method === 'GET') {
+    try {
+      const raId = grcRaActionPlanMatch[1];
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : '';
+      const grcUrl = `${GRC_API_URL}/api/risk-assessments/${encodeURIComponent(raId)}/action-plan/${q ? `?${q}` : ''}`;
+      const grcRes = await grcFetch(grcUrl, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, result: data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessment action-plan error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }
@@ -7328,6 +8146,22 @@ const server = http.createServer(async (req, res) => {
   // ---- Client-side routes (serve admin.html for SPA pages) ----
   if (isAdminSpaPath(url.pathname)) {
     serveStaticFile(res, path.join(__dirname, 'admin.html'));
+    return;
+  }
+
+  // ---- Unmatched API (avoid ambiguous static ENOENT → "File not found") ----
+  if (pathnameNorm.startsWith('/api/')) {
+    sendJSON(res, 404, {
+      error: 'API route not found',
+      method: req.method,
+      path: pathnameNorm,
+      hint:
+        pathnameNorm.includes('policy') && pathnameNorm.includes('import')
+          ? `Expected POST ${pathnameNorm.replace(/\/+/g, '/').replace(/\/$/, '')} — restart the server after updating (Data Studio policy import ships with this app).`
+          : pathnameNorm.includes('grc') && pathnameNorm.includes('perimeters')
+            ? 'If requests go through a sub-path gateway, redeploy server.js with updated /api/grc/* routing; list routes match path suffix /api/grc/perimeters.'
+            : undefined,
+    });
     return;
   }
 

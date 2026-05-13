@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "generate:policy-import-template": "node scripts/generate-data-studio-policy-template.js",
+    "generate:risk-scenario-import-template": "node scripts/generate-data-studio-risk-scenario-template.js"
   },
   "keywords": [
     "framework",

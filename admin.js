@@ -1389,7 +1389,7 @@ let grcRiskScenariosCache = null;
 
 async function fetchGrcRiskScenarios() {
   try {
-    const res = await fetch('/api/grc/risk-scenarios');
+    const res = await fetch('/api/grc/risk-scenarios/');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     grcRiskScenariosCache = (data.results || []).map(r => ({
@@ -11489,6 +11489,11 @@ document.getElementById('al-ca-search').addEventListener('input', (e) => {
 const DATA_STUDIO_CA_STORAGE_KEY = 'ds_data_studio_compliance_assessment_uuid';
 
 let dataStudioUploadWired = false;
+/** Policies pane (Data Studio): Excel → POST /api/policies/ */
+let dataStudioPolicyUploadWired = false;
+let dataStudioPolicyLastFile = null;
+/** Hub cards switching applied / policies / risk-scenarios panes */
+let dataStudioHubWired = false;
 let policyUpdatePipelineWired = false;
 /** Cached list for Policy update pipeline org dropdown (from GET /api/org-contexts) */
 let pupOrgContextsCache = [];
@@ -11516,32 +11521,580 @@ function persistDataStudioAuditUuid(uuid) {
   } catch (_) { /* ignore */ }
 }
 
+const DATA_STUDIO_VALID_PANES = new Set(['applied', 'policies', 'risk-scenarios']);
+
+function dataStudioPaneFromHash() {
+  const h = (typeof location !== 'undefined' ? location.hash || '' : '')
+    .replace(/^#/, '')
+    .trim()
+    .toLowerCase();
+  if (h === 'policies') return 'policies';
+  if (h === 'risk-scenarios') return 'risk-scenarios';
+  return 'applied';
+}
+
+/** Switch Data Studio area; updates URL (/data-studio or /data-studio#…) when syncUrl is true. */
+function setDataStudioPane(slug, opts) {
+  opts = opts || {};
+  const syncUrl = opts.syncUrl !== false;
+  const pane = DATA_STUDIO_VALID_PANES.has(slug) ? slug : 'applied';
+
+  document.querySelectorAll('#page-data-studio .ds-hub-card').forEach(btn => {
+    const id = btn.getAttribute('data-ds-pane');
+    const active = id === pane;
+    btn.classList.toggle('is-active', active);
+    if (active) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
+  });
+
+  document.querySelectorAll('#page-data-studio .ds-pane').forEach(el => {
+    const id = el.getAttribute('data-ds-pane');
+    const active = id === pane;
+    el.classList.toggle('ds-pane-active', active);
+    el.setAttribute('aria-hidden', active ? 'false' : 'true');
+  });
+
+  if (syncUrl && currentPage === 'data-studio' && window.location.pathname === '/data-studio') {
+    const desired = pane === 'applied' ? '/data-studio' : `/data-studio#${pane}`;
+    const current = `${window.location.pathname}${window.location.hash || ''}`;
+    if (current !== desired) {
+      history.replaceState({ page: 'data-studio', subId: null }, '', desired);
+    }
+  }
+
+  if (pane === 'risk-scenarios') {
+    ensureRiskStudioLoaded();
+  }
+}
+window.setDataStudioPane = setDataStudioPane;
+
+function syncDataStudioPaneFromHash() {
+  setDataStudioPane(dataStudioPaneFromHash(), { syncUrl: false });
+}
+
+const RISK_STUDIO_ASSESSMENT_KEY = 'ds_risk_studio_last_assessment_uuid';
+let riskStudioPanelWired = false;
+let riskStudioStepperWired = false;
+/** Data Studio risk wizard: 0 matrix, 1 folder/perimeter seed, 2 assessment POST, 3 scenarios */
+let drsStepperIndex = 0;
+const DRS_RISK_STUDIO_LAST_STEP = 3;
+let dataStudioRiskScenarioLastFile = null;
+let dataStudioRiskScenarioUploadWired = false;
+let drsWizardBusy = false;
+
+function setRiskStudioWizardBusy(on) {
+  drsWizardBusy = !!on;
+  syncDataRiskStudioStepperDOM();
+}
+
+function syncDataRiskStudioStepperDOM() {
+  const root = document.getElementById('ds-pane-risk-scenarios');
+  if (!root) return;
+  const idx = drsStepperIndex;
+  const total = DRS_RISK_STUDIO_LAST_STEP + 1;
+  root.querySelectorAll('.drs-step-panel').forEach(panel => {
+    const i = Number.parseInt(panel.getAttribute('data-drs-step-index'), 10);
+    if (Number.isNaN(i)) return;
+    const on = i === idx;
+    if (on) {
+      panel.removeAttribute('hidden');
+      panel.hidden = false;
+    } else {
+      panel.setAttribute('hidden', '');
+      panel.hidden = true;
+    }
+  });
+
+  root.querySelectorAll('[data-drs-step-label]').forEach(label => {
+    const i = Number.parseInt(label.getAttribute('data-drs-step-label'), 10);
+    if (Number.isNaN(i)) return;
+    label.classList.toggle('is-active', i === idx);
+    label.classList.toggle('is-done', i < idx);
+    if (i === idx) label.setAttribute('aria-current', 'step');
+    else label.removeAttribute('aria-current');
+  });
+
+  const fill = document.getElementById('drs-stepper-progress-fill');
+  if (fill) fill.style.width = `${((idx + 1) / total) * 100}%`;
+
+  const back = document.getElementById('drs-step-back');
+  const next = document.getElementById('drs-step-next');
+  const statusEl = document.getElementById('drs-step-status');
+  if (back) back.disabled = idx === 0 || drsWizardBusy;
+  if (next) {
+    const last = idx >= DRS_RISK_STUDIO_LAST_STEP;
+    next.hidden = last;
+    next.setAttribute('aria-hidden', last ? 'true' : 'false');
+    if (!last) {
+      next.disabled = drsWizardBusy;
+      next.textContent = idx === 2 ? 'Create assessment & continue' : 'Next step';
+    }
+  }
+  if (statusEl) statusEl.textContent = `Step ${idx + 1} of ${total}`;
+}
+
+function drsRiskStepperGo(delta) {
+  drsStepperIndex = Math.max(0, Math.min(DRS_RISK_STUDIO_LAST_STEP, drsStepperIndex + delta));
+  syncDataRiskStudioStepperDOM();
+}
+
+function drsRiskStepperBack() {
+  if (drsWizardBusy) return;
+  drsRiskStepperGo(-1);
+}
+
+function drsRiskStepperNext() {
+  if (drsStepperIndex >= DRS_RISK_STUDIO_LAST_STEP || drsWizardBusy) return;
+  if (drsStepperIndex === 0) {
+    const risk_matrix = document.getElementById('dsr-matrix-select')?.value?.trim();
+    if (!risk_matrix) {
+      toast('error', 'Risk matrix', 'Reload the matrix list and choose one — or create a matrix — before continuing.');
+      return;
+    }
+    drsRiskStepperGo(1);
+    return;
+  }
+  if (drsStepperIndex === 1) {
+    const folder = document.getElementById('dsr-folder-select')?.value?.trim();
+    if (!folder) {
+      toast('error', 'Folder', 'Reload folders if needed and choose one before continuing.');
+      return;
+    }
+    void (async () => {
+      setRiskStudioWizardBusy(true);
+      try {
+        await loadRiskStudioPerimetersForFolder();
+        drsRiskStepperGo(1);
+      } finally {
+        setRiskStudioWizardBusy(false);
+      }
+    })();
+    return;
+  }
+  if (drsStepperIndex === 2) {
+    void (async () => {
+      setRiskStudioWizardBusy(true);
+      try {
+        const ok = await runRiskStudioCreateAssessment();
+        if (ok) drsRiskStepperGo(1);
+      } finally {
+        setRiskStudioWizardBusy(false);
+      }
+    })();
+    return;
+  }
+}
+
+function initDataRiskStudioStepper() {
+  if (riskStudioStepperWired) return;
+  const back = document.getElementById('drs-step-back');
+  const next = document.getElementById('drs-step-next');
+  if (!back || !next) return;
+  riskStudioStepperWired = true;
+  back.addEventListener('click', () => drsRiskStepperBack());
+  next.addEventListener('click', () => drsRiskStepperNext());
+  drsStepperIndex = 0;
+  syncDataRiskStudioStepperDOM();
+}
+
+function initRiskStudioPanel() {
+  if (riskStudioPanelWired) return;
+  const root = document.getElementById('ds-pane-risk-scenarios');
+  if (!root) return;
+  riskStudioPanelWired = true;
+  initDataRiskStudioStepper();
+  document.getElementById('dsr-btn-reload-matrices-only')?.addEventListener('click', () => loadRiskStudioMatrices().catch(() => {}));
+  document.getElementById('dsr-btn-reload-risk-folders')?.addEventListener('click', () =>
+    refreshDataStudioFolderSelects().catch(() => {}),
+  );
+  document.getElementById('dsr-btn-create-matrix')?.addEventListener('click', () => runRiskStudioUploadRiskMatrixLibraryYaml());
+  document.getElementById('dsm-file-risk-yaml')?.addEventListener('change', syncRiskStudioRiskYamlLabel);
+  document.getElementById('dsm-file-risk-yaml-browse')?.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    document.getElementById('dsm-file-risk-yaml')?.click();
+  });
+  document.getElementById('dsm-file-risk-yaml')?.closest('.ds-upload-field')?.querySelector('.ds-upload-bar')?.addEventListener('click', e => {
+    if ((e.target).closest('.ds-upload-browse')) return;
+    e.preventDefault();
+    document.getElementById('dsm-file-risk-yaml')?.click();
+  });
+  document.getElementById('dsr-folder-select')?.addEventListener('change', () => loadRiskStudioPerimetersForFolder().catch(() => {}));
+  document.getElementById('dsr-btn-create-perimeter')?.addEventListener('click', () => runRiskStudioCreatePerimeter());
+  document.getElementById('dsr-btn-create-scenario')?.addEventListener('click', () => runRiskStudioCreateScenario());
+  document.getElementById('dsr-btn-action-plan')?.addEventListener('click', () => runRiskStudioActionPlan());
+}
+
+function restoreRiskStudioAssessmentField() {
+  const el = document.getElementById('dsr-assessment-uuid');
+  if (!el || el.value.trim()) return;
+  try {
+    const s = localStorage.getItem(RISK_STUDIO_ASSESSMENT_KEY);
+    if (s) el.value = s;
+  } catch (_) { /* ignore */ }
+}
+
+function persistRiskStudioAssessment(uuid) {
+  const v = String(uuid || '').trim();
+  if (!v) return;
+  try {
+    localStorage.setItem(RISK_STUDIO_ASSESSMENT_KEY, v);
+  } catch (_) { /* ignore */ }
+}
+
+async function loadRiskStudioPrereqs() {
+  initRiskStudioPanel();
+  await loadRiskStudioMatrices();
+  await refreshDataStudioFolderSelects();
+  await loadRiskStudioPerimetersForFolder();
+  restoreRiskStudioAssessmentField();
+}
+
+function syncRiskStudioRiskYamlLabel() {
+  const fileInput = document.getElementById('dsm-file-risk-yaml');
+  const label = document.getElementById('dsm-matrix-yaml-label');
+  const f = fileInput?.files?.[0];
+  if (!label) return;
+  if (f) {
+    label.textContent = f.name;
+    label.classList.remove('is-empty');
+  } else {
+    label.textContent = 'No file selected';
+    label.classList.add('is-empty');
+  }
+}
+
+/** POST /api/stored-libraries/upload/ via JSON body relay (multipart built on server) — same flow as Libraries YAML modal. */
+async function runRiskStudioUploadRiskMatrixLibraryYaml() {
+  const fileInput = document.getElementById('dsm-file-risk-yaml');
+  const file = fileInput?.files?.[0];
+  const logEl = document.getElementById('dsr-log');
+  const btn = document.getElementById('dsr-btn-create-matrix');
+
+  if (!file) {
+    toast('error', 'Risk matrix library', 'Choose a .yaml risk-matrix stored library file (see template).');
+    return;
+  }
+  const lower = String(file.name || '').toLowerCase();
+  if (!lower.endsWith('.yaml') && !lower.endsWith('.yml')) {
+    toast('error', 'Risk matrix library', 'Use a .yaml or .yml file.');
+    return;
+  }
+
+  let yaml;
+  try {
+    yaml = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      reader.onerror = () => reject(new Error('Could not read file.'));
+      reader.readAsText(file, 'UTF-8');
+    });
+  } catch (e) {
+    toast('error', 'Risk matrix library', e.message || 'Read failed.');
+    return;
+  }
+  if (!String(yaml || '').trim()) {
+    toast('error', 'Risk matrix library', 'File is empty.');
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/data-studio/upload-risk-matrix-library-yaml', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ fileName: file.name, yaml }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.success === false) throw new Error(j.error || j.detail || r.statusText || 'Upload failed');
+
+    const res = j.result || {};
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(res, null, 2);
+    }
+    toast(
+      'success',
+      'Library uploaded',
+      'Stored library uploaded and loaded — use Reload risk matrices, then choose a matrix.',
+    );
+    if (fileInput) fileInput.value = '';
+    syncRiskStudioRiskYamlLabel();
+    await loadRiskStudioMatrices();
+  } catch (e) {
+    toast('error', 'Risk matrix library', e.message || '');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function loadRiskStudioPerimetersForFolder() {
+  const folderSel = document.getElementById('dsr-folder-select');
+  const perSel = document.getElementById('dsr-perimeter-select');
+  if (!folderSel || !perSel) return;
+  const folder = folderSel.value;
+  perSel.innerHTML = '<option value="">Loading…</option>';
+  try {
+    let q = 'page_size=200';
+    if (folder) q += `&folder=${encodeURIComponent(folder)}`;
+    const r = await fetch(`/api/grc/perimeters/?${q}`, { credentials: 'same-origin' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Perimeters request failed');
+    const list = Array.isArray(j.results) ? j.results : [];
+    perSel.innerHTML = '<option value="">— Choose perimeter —</option>' +
+      list.map(p => {
+        const id = p.id || p.uuid;
+        const label = p.name || p.ref_id || id;
+        return `<option value="${esc(id)}">${esc(label)}</option>`;
+      }).join('');
+    if (list.length === 1) {
+      const onlyId = list[0].id || list[0].uuid;
+      if (onlyId) perSel.value = onlyId;
+    }
+  } catch (e) {
+    perSel.innerHTML = `<option value="">${esc(e.message)}</option>`;
+  }
+}
+
+async function loadRiskStudioMatrices() {
+  const sel = document.getElementById('dsr-matrix-select');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const r = await fetch('/api/grc/risk-matrices/?page_size=200', { credentials: 'same-origin' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Risk matrices request failed');
+    const list = Array.isArray(j.results) ? j.results : [];
+    const enabled = list.filter(m => m.is_enabled !== false);
+    const use = enabled.length ? enabled : list;
+    sel.innerHTML = '<option value="">— Choose risk matrix —</option>' +
+      use.map(m => {
+        const id = m.id || m.uuid;
+        const label = m.name || m.ref_id || id;
+        return `<option value="${esc(id)}">${esc(label)}${m.is_enabled === false ? ' (disabled)' : ''}</option>`;
+      }).join('');
+    if (prev && use.some(m => String(m.id || m.uuid) === String(prev))) {
+      sel.value = prev;
+    } else if (!prev && use.length === 1) {
+      const onlyId = use[0].id || use[0].uuid;
+      if (onlyId) sel.value = onlyId;
+    }
+  } catch (e) {
+    sel.innerHTML = `<option value="">${esc(e.message)}</option>`;
+  }
+}
+
+async function runRiskStudioCreatePerimeter() {
+  const name = document.getElementById('dsr-perimeter-name')?.value?.trim();
+  const folder = document.getElementById('dsr-folder-select')?.value;
+  const logEl = document.getElementById('dsr-log');
+  if (!name || !folder) {
+    toast('error', 'Perimeter', 'Enter a name and choose a folder.');
+    return;
+  }
+  if (name.includes('/')) {
+    toast('error', 'Perimeter', 'Name must not contain /.');
+    return;
+  }
+  try {
+    const r = await fetch('/api/grc/perimeters/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ name, folder }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.success === false) throw new Error(j.error || j.detail || r.statusText || 'Create failed');
+    const res = j.result || j;
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(res, null, 2);
+    }
+    toast('success', 'Perimeter created', res.name || '');
+    await loadRiskStudioPerimetersForFolder();
+    const id = res.id || res.uuid;
+    const perSel = document.getElementById('dsr-perimeter-select');
+    if (perSel && id) perSel.value = id;
+    document.getElementById('dsr-perimeter-name').value = '';
+  } catch (e) {
+    toast('error', 'Perimeter', e.message || '');
+  }
+}
+
+async function runRiskStudioCreateAssessment() {
+  const name = document.getElementById('dsr-ra-name')?.value?.trim();
+  const perimeter = document.getElementById('dsr-perimeter-select')?.value;
+  const risk_matrix = document.getElementById('dsr-matrix-select')?.value;
+  const description = document.getElementById('dsr-ra-description')?.value?.trim();
+  const ref_id = document.getElementById('dsr-ra-ref-id')?.value?.trim();
+  const logEl = document.getElementById('dsr-log');
+  if (!String(perimeter || '').trim()) {
+    toast(
+      'error',
+      'Risk assessment',
+      'Choose a perimeter. If the list is empty, go back to step 2 (Folder & perimeter), pick or create a perimeter, then use Next to refresh the list.',
+    );
+    return false;
+  }
+  if (!String(risk_matrix || '').trim()) {
+    toast(
+      'error',
+      'Risk assessment',
+      'Risk matrix missing — return to step 1 (Risk matrix), reload the list, and select one.',
+    );
+    return false;
+  }
+  if (!name) {
+    toast('error', 'Risk assessment', 'Enter an assessment name.');
+    return false;
+  }
+  const body = { name, perimeter, risk_matrix };
+  if (description) body.description = description;
+  if (ref_id) body.ref_id = ref_id;
+  try {
+    const r = await fetch('/api/grc/risk-assessments/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.success === false) throw new Error(j.error || j.detail || r.statusText || 'Create failed');
+    const res = j.result || j;
+    const id = res.id || res.uuid;
+    persistRiskStudioAssessment(id);
+    const assessEl = document.getElementById('dsr-assessment-uuid');
+    if (assessEl && id) assessEl.value = id;
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(res, null, 2);
+    }
+    toast('success', 'Risk assessment created', id ? String(id).slice(0, 13) + '…' : '');
+    return true;
+  } catch (e) {
+    toast('error', 'Risk assessment', e.message || '');
+    return false;
+  }
+}
+
+async function runRiskStudioCreateScenario() {
+  const risk_assessment = document.getElementById('dsr-assessment-uuid')?.value?.trim();
+  const name = document.getElementById('dsr-scenario-name')?.value?.trim();
+  const logEl = document.getElementById('dsr-log');
+  if (!risk_assessment || !name) {
+    toast('error', 'Scenario', 'Assessment UUID and scenario name are required.');
+    return;
+  }
+  try {
+    const r = await fetch('/api/grc/risk-scenarios/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ risk_assessment, name }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.success === false) throw new Error(j.error || j.detail || r.statusText || 'Create failed');
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(j.result || j, null, 2);
+    }
+    toast('success', 'Scenario created', name);
+    document.getElementById('dsr-scenario-name').value = '';
+  } catch (e) {
+    toast('error', 'Scenario', e.message || '');
+  }
+}
+
+async function runRiskStudioActionPlan() {
+  const id = document.getElementById('dsr-assessment-uuid')?.value?.trim();
+  const logEl = document.getElementById('dsr-log');
+  if (!id) {
+    toast('error', 'Action plan', 'Enter a risk assessment UUID first.');
+    return;
+  }
+  try {
+    const r = await fetch(`/api/grc/risk-assessments/${encodeURIComponent(id)}/action-plan/`, { credentials: 'same-origin' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText || 'Request failed');
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(j.result || j, null, 2);
+    }
+    toast('success', 'Action plan', 'Loaded from GRC.');
+  } catch (e) {
+    toast('error', 'Action plan', e.message || '');
+  }
+}
+
+function ensureRiskStudioLoaded() {
+  loadRiskStudioPrereqs().catch(() => {});
+}
+
+function initDataStudioHub() {
+  if (dataStudioHubWired) return;
+  const grid = document.querySelector('#page-data-studio .ds-hub-grid');
+  if (!grid) return;
+  dataStudioHubWired = true;
+  grid.querySelectorAll('.ds-hub-card').forEach(btn => {
+    btn.addEventListener('click', () => {
+      setDataStudioPane(btn.getAttribute('data-ds-pane') || 'applied');
+    });
+  });
+  window.addEventListener('hashchange', () => {
+    if (currentPage === 'data-studio') syncDataStudioPaneFromHash();
+  });
+}
+
 function loadDataStudioPage() {
   restoreDataStudioSavedAudit();
   loadDataStudioGrcOptions().catch(() => {});
+  syncDataStudioPaneFromHash();
 }
 
-async function loadDataStudioGrcOptions() {
-  const folderSel = document.getElementById('ds-folder-select');
-  if (!folderSel) return;
-  const prevFolder = folderSel.value;
-  folderSel.innerHTML = '<option value="">Loading…</option>';
+async function refreshDataStudioFolderSelects() {
+  const selects = [];
+  const s1 = document.getElementById('ds-folder-select');
+  const s2 = document.getElementById('dsp-folder-select');
+  const s3 = document.getElementById('dsr-folder-select');
+  if (s1) selects.push(s1);
+  if (s2) selects.push(s2);
+  if (s3) selects.push(s3);
+  if (!selects.length) return;
+
+  const prevVals = selects.map(sel => ({ sel, prev: sel.value }));
+  selects.forEach(sel => {
+    sel.innerHTML = '<option value="">Loading…</option>';
+  });
+
   try {
     const fr = await fetch('/api/grc/folders?page_size=500');
     const fj = await fr.json();
     if (!fr.ok) throw new Error(fj.error || 'Folders request failed');
     let folders = fj.folders;
     if (!Array.isArray(folders)) folders = Array.isArray(folders?.results) ? folders.results : [];
-    folderSel.innerHTML = '<option value="">— Choose folder —</option>' +
+    const opts =
+      '<option value="">— Choose folder —</option>' +
       folders.map(f => {
         const id = f.id || f.uuid;
         const label = f.name || f.name_en || f.title || id;
         return `<option value="${esc(id)}">${esc(label)}</option>`;
       }).join('');
-    if (prevFolder) folderSel.value = prevFolder;
+    prevVals.forEach(({ sel, prev }) => {
+      sel.innerHTML = opts;
+      if (prev) sel.value = prev;
+    });
   } catch (e) {
-    folderSel.innerHTML = `<option value="">${esc(e.message)}</option>`;
+    const errOpts = `<option value="">${esc(e.message)}</option>`;
+    prevVals.forEach(({ sel }) => {
+      sel.innerHTML = errOpts;
+    });
   }
+}
+
+async function loadDataStudioGrcOptions() {
+  await refreshDataStudioFolderSelects();
   loadDataStudioFrameworkOptions().catch(() => {});
 }
 
@@ -11894,6 +12447,376 @@ function initDataStudioUpload() {
   const caInput = document.getElementById('ds-compliance-assessment');
   if (caInput) {
     caInput.addEventListener('change', () => persistDataStudioAuditUuid(caInput.value));
+  }
+}
+
+function initDataStudioPolicyUpload() {
+  if (dataStudioPolicyUploadWired) return;
+  const drop = document.getElementById('dsp-dropzone');
+  const input = document.getElementById('dsp-file-input');
+  if (!drop || !input) return;
+  dataStudioPolicyUploadWired = true;
+
+  const openPicker = () => input.click();
+
+  drop.addEventListener('click', e => {
+    if (e.target.closest('a,button')) return;
+    openPicker();
+  });
+  drop.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openPicker();
+    }
+  });
+
+  ['dragenter', 'dragover'].forEach(ev => {
+    drop.addEventListener(ev, e => {
+      e.preventDefault();
+      e.stopPropagation();
+      drop.classList.add('ds-dropzone-active');
+    });
+  });
+  drop.addEventListener('dragleave', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!drop.contains(e.relatedTarget)) drop.classList.remove('ds-dropzone-active');
+  });
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    drop.classList.remove('ds-dropzone-active');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleDataStudioPolicyFile(f);
+  });
+
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    if (f) handleDataStudioPolicyFile(f);
+    input.value = '';
+  });
+
+  const importBtn = document.getElementById('dsp-btn-import-grc');
+  if (importBtn) importBtn.addEventListener('click', () => runDataStudioPolicyImport());
+}
+
+async function handleDataStudioPolicyFile(file) {
+  const statusEl = document.getElementById('dsp-status');
+  const preview = document.getElementById('dsp-preview');
+  const theadRow = document.getElementById('dsp-preview-thead');
+  const tbody = document.querySelector('#dsp-preview-table tbody');
+  const metaEl = document.getElementById('dsp-preview-meta');
+  if (!statusEl || !preview || !theadRow || !tbody || !metaEl) return;
+
+  const nameLower = (file.name || '').toLowerCase();
+  if (!/\.(xlsx|xls|csv)$/.test(nameLower)) {
+    toast('error', 'Invalid file', 'Choose an Excel (.xlsx, .xls) or .csv file.');
+    return;
+  }
+  statusEl.textContent = 'Reading file…';
+  preview.style.display = 'none';
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('Could not read file.'));
+      r.readAsDataURL(file);
+    });
+    const data = typeof dataUrl === 'string' && dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+
+    const r = await fetch('/api/data-studio/preview-excel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: file.name, data }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(j.error || r.statusText || 'Upload failed');
+    }
+    if (!j.success) throw new Error(j.error || 'Preview failed');
+
+    metaEl.innerHTML = `
+      <strong>${esc(j.fileName || file.name)}</strong>
+      · Sheet: <code>${esc(j.activeSheet || '')}</code>
+      · <span class="ds-meta-rows">${Number(j.totalRows) || 0} data rows</span>
+      ${(j.sheetNames && j.sheetNames.length > 1) ? ` · ${j.sheetNames.length} sheets (preview uses the first)` : ''}
+    `;
+
+    const headers = j.previewHeaders || [];
+    theadRow.innerHTML = headers.map(h => `<th>${esc(String(h))}</th>`).join('');
+    const rows = j.preview || [];
+    tbody.innerHTML = rows.map(row => {
+      const cells = headers.map(h => {
+        const v = row[h];
+        const s = v != null && v !== '' ? String(v) : '';
+        return `<td>${esc(s)}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    preview.style.display = 'block';
+    dataStudioPolicyLastFile = { name: file.name, data };
+    const importPanel = document.getElementById('dsp-import-panel');
+    const importBtn = document.getElementById('dsp-btn-import-grc');
+    if (importPanel) importPanel.style.display = 'block';
+    if (importBtn) importBtn.disabled = false;
+    const logEl = document.getElementById('dsp-import-log');
+    if (logEl) {
+      logEl.style.display = 'none';
+      logEl.textContent = '';
+    }
+    refreshDataStudioFolderSelects().catch(() => {});
+
+    statusEl.textContent = rows.length
+      ? `Showing ${rows.length} preview row${rows.length === 1 ? '' : 's'}${(j.totalRows > rows.length) ? ` of ${j.totalRows}` : ''}. Choose folder and import — each row POSTs to GRC /api/policies/.`
+      : 'No data rows after the header row.';
+    toast('success', 'File loaded', 'Policy import preview is ready.');
+  } catch (err) {
+    console.error('[Data Studio policies]', err);
+    statusEl.textContent = '';
+    toast('error', 'Could not read spreadsheet', err.message || 'Unknown error');
+  }
+}
+
+async function runDataStudioPolicyImport() {
+  const folder = document.getElementById('dsp-folder-select')?.value;
+  const logEl = document.getElementById('dsp-import-log');
+  const btn = document.getElementById('dsp-btn-import-grc');
+  if (!dataStudioPolicyLastFile || !folder) {
+    toast('error', 'Missing inputs', 'Choose a GRC folder and load a spreadsheet first.');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (logEl) {
+    logEl.style.display = 'block';
+    logEl.textContent = 'POST /api/policies/ per row…';
+  }
+  try {
+    const r = await fetch('/api/data-studio/import-policies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        fileName: dataStudioPolicyLastFile.name,
+        data: dataStudioPolicyLastFile.data,
+        folder,
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(j.error || r.statusText || 'Import failed');
+    }
+    if (logEl) {
+      logEl.textContent = JSON.stringify(
+        {
+          createdCount: j.createdCount,
+          failedCount: j.failedCount,
+          sheetName: j.sheetName,
+          errors: j.errors,
+          created: j.created,
+        },
+        null,
+        2
+      );
+    }
+    if (!j.failedCount) {
+      toast('success', 'Policies imported', `${j.createdCount} policy(ies) created in GRC.`);
+    } else if (j.createdCount) {
+      toast('warning', 'Import partially failed', `${j.createdCount} created, ${j.failedCount} failed — see log.`);
+    } else {
+      toast('error', 'Import failed', `${j.failedCount} row(s) failed — see log.`);
+    }
+  } catch (e) {
+    console.error('[Data Studio policy import]', e);
+    if (logEl) logEl.textContent = e.message || String(e);
+    toast('error', 'Import failed', e.message || '');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function initDataStudioRiskScenarioUpload() {
+  if (dataStudioRiskScenarioUploadWired) return;
+  const drop = document.getElementById('dsrs-dropzone');
+  const input = document.getElementById('dsrs-file-input');
+  if (!drop || !input) return;
+  dataStudioRiskScenarioUploadWired = true;
+
+  const openPicker = () => input.click();
+
+  drop.addEventListener('click', e => {
+    if (e.target.closest('a,button')) return;
+    openPicker();
+  });
+  drop.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openPicker();
+    }
+  });
+
+  ['dragenter', 'dragover'].forEach(ev => {
+    drop.addEventListener(ev, e => {
+      e.preventDefault();
+      e.stopPropagation();
+      drop.classList.add('ds-dropzone-active');
+    });
+  });
+  drop.addEventListener('dragleave', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!drop.contains(e.relatedTarget)) drop.classList.remove('ds-dropzone-active');
+  });
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    drop.classList.remove('ds-dropzone-active');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleDataStudioRiskScenarioFile(f);
+  });
+
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    if (f) handleDataStudioRiskScenarioFile(f);
+    input.value = '';
+  });
+
+  document.getElementById('dsrs-btn-import-grc')?.addEventListener('click', () => runDataStudioRiskScenarioImport());
+}
+
+async function handleDataStudioRiskScenarioFile(file) {
+  const statusEl = document.getElementById('dsrs-status');
+  const preview = document.getElementById('dsrs-preview');
+  const theadRow = document.getElementById('dsrs-preview-thead');
+  const tbody = document.querySelector('#dsrs-preview-table tbody');
+  const metaEl = document.getElementById('dsrs-preview-meta');
+  if (!statusEl || !preview || !theadRow || !tbody || !metaEl) return;
+
+  const nameLower = (file.name || '').toLowerCase();
+  if (!/\.(xlsx|xls|csv)$/.test(nameLower)) {
+    toast('error', 'Invalid file', 'Choose an Excel (.xlsx, .xls) or .csv file.');
+    return;
+  }
+  statusEl.textContent = 'Reading file…';
+  preview.style.display = 'none';
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('Could not read file.'));
+      r.readAsDataURL(file);
+    });
+    const data = typeof dataUrl === 'string' && dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+
+    const r = await fetch('/api/data-studio/preview-excel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: file.name, data }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(j.error || r.statusText || 'Upload failed');
+    }
+    if (!j.success) throw new Error(j.error || 'Preview failed');
+
+    metaEl.innerHTML = `
+      <strong>${esc(j.fileName || file.name)}</strong>
+      · Sheet: <code>${esc(j.activeSheet || '')}</code>
+      · <span class="ds-meta-rows">${Number(j.totalRows) || 0} data rows</span>
+      ${(j.sheetNames && j.sheetNames.length > 1) ? ` · ${j.sheetNames.length} sheets (preview uses the first)` : ''}
+    `;
+
+    const headers = j.previewHeaders || [];
+    theadRow.innerHTML = headers.map(h => `<th>${esc(String(h))}</th>`).join('');
+    const rows = j.preview || [];
+    tbody.innerHTML = rows.map(row => {
+      const cells = headers.map(h => {
+        const v = row[h];
+        const s = v != null && v !== '' ? String(v) : '';
+        return `<td>${esc(s)}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    preview.style.display = 'block';
+    dataStudioRiskScenarioLastFile = { name: file.name, data };
+    const importPanel = document.getElementById('dsrs-import-panel');
+    const importBtn = document.getElementById('dsrs-btn-import-grc');
+    if (importPanel) importPanel.style.display = 'block';
+    if (importBtn) importBtn.disabled = false;
+    const logEl = document.getElementById('dsrs-import-log');
+    if (logEl) {
+      logEl.style.display = 'none';
+      logEl.textContent = '';
+    }
+
+    statusEl.textContent = rows.length
+      ? `Showing ${rows.length} preview row${rows.length === 1 ? '' : 's'}. Each row needs a name column; set risk assessment UUID in the field above or add a risk_assessment column.`
+      : 'No data rows after the header row.';
+    toast('success', 'File loaded', 'Risk scenario spreadsheet preview ready.');
+  } catch (err) {
+    console.error('[Data Studio risk scenarios Excel]', err);
+    statusEl.textContent = '';
+    toast('error', 'Could not read spreadsheet', err.message || 'Unknown error');
+  }
+}
+
+async function runDataStudioRiskScenarioImport() {
+  const risk_assessment = document.getElementById('dsr-assessment-uuid')?.value?.trim() || '';
+  const logEl = document.getElementById('dsrs-import-log');
+  const btn = document.getElementById('dsrs-btn-import-grc');
+  if (!dataStudioRiskScenarioLastFile) {
+    toast('error', 'No file', 'Load a spreadsheet first.');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (logEl) {
+    logEl.style.display = 'block';
+    logEl.textContent = risk_assessment
+      ? 'POST /api/risk-scenarios/ per row…'
+      : 'POST /api/risk-scenarios/ per row (using risk_assessment column or default)…';
+  }
+  try {
+    const r = await fetch('/api/data-studio/import-risk-scenarios', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        fileName: dataStudioRiskScenarioLastFile.name,
+        data: dataStudioRiskScenarioLastFile.data,
+        risk_assessment,
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(j.error || r.statusText || 'Import failed');
+    }
+    if (logEl) {
+      logEl.textContent = JSON.stringify(
+        {
+          createdCount: j.createdCount,
+          failedCount: j.failedCount,
+          sheetName: j.sheetName,
+          errors: j.errors,
+          created: j.created,
+        },
+        null,
+        2
+      );
+    }
+    if (!j.failedCount) {
+      toast('success', 'Scenarios imported', `${j.createdCount} scenario(s) created in GRC.`);
+    } else if (j.createdCount) {
+      toast('warning', 'Import partially failed', `${j.createdCount} created, ${j.failedCount} failed — see log.`);
+    } else {
+      toast('error', 'Import failed', `${j.failedCount} row(s) failed — see log.`);
+    }
+  } catch (e) {
+    console.error('[Data Studio risk scenario import]', e);
+    if (logEl) logEl.textContent = e.message || String(e);
+    toast('error', 'Import failed', e.message || '');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -12725,7 +13648,10 @@ async function runPolicyUpdatePipeline() {
 console.log('[admin.js] Script loaded, readyState:', document.readyState);
 
 function initApp() {
+  initDataStudioHub();
   initDataStudioUpload();
+  initDataStudioPolicyUpload();
+  initDataStudioRiskScenarioUpload();
   initPolicyPipelineResultModalListeners();
   initPolicyUpdatePipeline();
   const { page, subId } = parseRoute();
