@@ -71,6 +71,14 @@
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 13V4C2 3.4 2.4 3 3 3H13C13.6 3 14 3.4 14 4V13M5 7H11M5 10H9M8 3V1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Org Contexts
           </button>
+          <button class="sidebar-item" data-page="data-studio">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H7L9 4H13C13.6 4 14 4.4 14 5V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 7H14M3 10H14M6 7V14M10 7V14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            Data Studio
+          </button>
+          <button class="sidebar-item" data-page="policy-update-pipeline">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 3H13M3 8H13M3 13H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 11L13 13M11 13L13 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            Policy update pipeline
+          </button>
         </div>
 
         <button class="sidebar-section-toggle" data-section="workbench">
@@ -525,6 +533,172 @@
               <input type="text" placeholder="Search by name, sector..." id="org-search">
             </div>
             <div id="org-contexts-list"><!-- Populated by JS --></div>
+          </div>
+        </section>
+
+        <!-- =================== DATA STUDIO =================== -->
+        <section class="admin-page" id="page-data-studio">
+          <div class="page-container">
+            <div class="page-header">
+              <h1 class="page-title">Data Studio</h1>
+              <p class="page-subtitle">Import applied controls and structured data from Excel workbooks</p>
+            </div>
+
+            <div class="admin-card">
+              <div class="admin-card-header">
+                <div class="admin-card-header-left">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H7L9 4H13C13.6 4 14 4.4 14 5V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <h2>Upload spreadsheet</h2>
+                </div>
+              </div>
+              <p class="ds-intro">Drop an Excel file here or click to browse. The first sheet is parsed; column headers come from row 1.</p>
+              <input type="file" id="ds-file-input" class="ds-file-input" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv">
+              <div id="ds-dropzone" class="ds-dropzone" role="button" tabindex="0">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none"><path d="M12 15V3M12 3L8 7M12 3L16 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 14V18C4 19.1 4.9 20 6 20H18C19.1 20 20 19.1 20 18V14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <p><strong>Excel or CSV</strong> — .xlsx, .xls, or .csv</p>
+                <p class="ds-dropzone-hint">Used for importing applied controls (and future structured imports).</p>
+              </div>
+              <p id="ds-status" class="ds-status" aria-live="polite"></p>
+              <div id="ds-preview" class="ds-preview" style="display:none">
+                <div id="ds-preview-meta" class="ds-preview-meta"></div>
+                <div class="ds-preview-scroll">
+                  <table class="ds-preview-table" id="ds-preview-table">
+                    <thead><tr id="ds-preview-thead"></tr></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+              <div id="ds-import-panel" class="ds-import-panel" style="display:none">
+                <h3 class="ds-import-title">Import to GRC</h3>
+                <div class="ds-import-row">
+                  <label class="ds-label" for="ds-folder-select">Folder (domain) <span class="ds-req">*</span></label>
+                  <select id="ds-folder-select" class="ds-select">
+                    <option value="">Select after loading…</option>
+                  </select>
+                </div>
+                <div class="ds-import-row">
+                  <label class="ds-label" for="ds-compliance-assessment">Audit UUID (for linking requirement assessments)</label>
+                  <input type="text" id="ds-compliance-assessment" class="ds-select" placeholder="optional if auto-pick is on — paste MHRSD audit UUID to force a specific assessment" autocomplete="off">
+                </div>
+                <div class="ds-import-row" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                  <label class="ds-label" for="ds-framework-select" style="margin:0">Framework (used by Auto-create + Create audit):</label>
+                  <select id="ds-framework-select" class="ds-select" style="flex:1;min-width:240px">
+                    <option value="">— Choose framework —</option>
+                  </select>
+                  <input type="text" id="ds-audit-name" class="ds-select" placeholder="Audit name (default: '<framework> – Controls Catalog')" style="flex:1;min-width:240px" autocomplete="off">
+                  <button type="button" class="btn-admin-ghost" id="ds-btn-create-audit" title="POST /api/compliance-assessments/ — RAs are auto-generated by GRC on insert">Create audit</button>
+                </div>
+                <div class="ds-import-row" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                  <label class="ds-label" for="ds-perimeter-uuid" style="margin:0">Perimeter UUID (optional — auto-discovered for the chosen folder if blank):</label>
+                  <input type="text" id="ds-perimeter-uuid" class="ds-select" placeholder="optional — paste a perimeter UUID to override; needed only if your GRC has no perimeter in the chosen folder" style="flex:1;min-width:280px" autocomplete="off">
+                </div>
+                <div class="ds-import-actions" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px">
+                  <button type="button" class="btn-admin-primary" id="ds-btn-import-grc" disabled>Import all rows to GRC</button>
+                </div>
+                <pre id="ds-import-log" class="ds-import-log" style="display:none"></pre>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- =================== POLICY UPDATE PIPELINE =================== -->
+        <section class="admin-page" id="page-policy-update-pipeline">
+          <div class="page-container">
+            <div class="page-header">
+              <h1 class="page-title">Policy update pipeline</h1>
+              <p class="page-subtitle">F1 relevance → F2 extract policy points → F3 embedding match → F4 impact (Gemini). Uses <code>GEMINI_API_KEY</code> on the server.</p>
+            </div>
+            <div class="admin-card pup-stepper-card">
+              <nav class="pup-stepper-top" aria-label="Pipeline wizard steps">
+                <ol class="pup-stepper-labels" role="list">
+                  <li class="pup-step-label is-active" data-pup-step-label="0">
+                    <span class="pup-step-label-num">1</span>
+                    <span class="pup-step-label-text">Organisation</span>
+                  </li>
+                  <li class="pup-step-label" data-pup-step-label="1">
+                    <span class="pup-step-label-num">2</span>
+                    <span class="pup-step-label-text">Regulation</span>
+                  </li>
+                  <li class="pup-step-label" data-pup-step-label="2">
+                    <span class="pup-step-label-num">3</span>
+                    <span class="pup-step-label-text">Policies</span>
+                  </li>
+                </ol>
+                <div class="pup-stepper-progress-rail" aria-hidden="true">
+                  <div class="pup-stepper-progress-fill" id="pup-stepper-progress-fill"></div>
+                </div>
+              </nav>
+
+              <div class="pup-stepper-panels">
+                <div class="pup-step-panel" id="pup-step-panel-0" data-pup-step-index="0" role="tabpanel" aria-labelledby="pup-heading-0">
+                  <div class="pup-step-intro">
+                    <h2 class="pup-step-heading" id="pup-heading-0">Organisation context</h2>
+                    <p class="ds-import-note pup-step-intro-note">Sent to <strong>F1 relevance</strong> with the regulation excerpt. Use a sample dataset bundle so organisation, regulation, and policies stay in scope together, or pick <strong>Custom</strong> and edit freely.</p>
+                  </div>
+                  <div class="ds-import-row pup-preset-bundle-row">
+                    <label class="ds-label" for="pup-preset-select">Sample dataset (bundled inputs)</label>
+                    <select id="pup-preset-select" class="ds-select">
+                      <option value="python-demo" selected>Fintech + financial-institution PDPL demo (matches Python example.py)</option>
+                      <option value="energy">Energy sector + OT/critical-infra regulation (internally aligned)</option>
+                      <option value="healthcare">Healthcare + clinical / EHR regulation (internally aligned)</option>
+                      <option value="dga-saudi">Saudi digital government — DGA‑style illustrative bundle (AR/EN synthetic)</option>
+                      <option value="custom">Custom — do not overwrite my fields</option>
+                    </select>
+                    <p class="ds-import-note pup-preset-bundle-hint">Loads all three wizard steps consistently. Selecting a preset clears <strong>Organization profile</strong> so nothing overwrites org context silently. To re-apply the same bundle after edits, switch to <strong>Custom</strong>, then choose the sample again.</p>
+                  </div>
+                  <div class="ds-import-row">
+                    <label class="ds-label" for="pup-org-select">Organization profile</label>
+                    <select id="pup-org-select" class="ds-select">
+                      <option value="">Loading contexts…</option>
+                    </select>
+                    <p class="ds-import-note" style="margin-top:8px">Selecting a profile <strong>replaces</strong> the context textarea (Organization Contexts). Use <strong>— Select organization context —</strong> with a sample dataset, or combine profile + dataset by choosing profile after loading a bundle only if you accept the mismatch.</p>
+                  </div>
+                  <div class="ds-import-row" style="margin-top:12px">
+                    <label class="ds-label" for="pup-org-context">Organisation context (sent to pipeline)</label>
+                    <textarea id="pup-org-context" class="admin-form-textarea" rows="8" placeholder="Industry, jurisdiction, activities, compliance scope…"></textarea>
+                  </div>
+                </div>
+
+                <div class="pup-step-panel" id="pup-step-panel-1" data-pup-step-index="1" hidden role="tabpanel" aria-labelledby="pup-heading-1">
+                  <div class="pup-step-intro">
+                    <h2 class="pup-step-heading" id="pup-heading-1">Regulation text <span class="ds-req">*</span></h2>
+                    <p class="ds-import-note pup-step-intro-note">Filled by the sample dataset from step 1 (or paste your own). Required before <strong>Next</strong> / <strong>Run</strong>.</p>
+                  </div>
+                  <div class="ds-import-row">
+                    <label class="ds-label" for="pup-regulation">Regulation excerpt or document</label>
+                    <textarea id="pup-regulation" class="admin-form-textarea pup-step-tall-textarea" rows="14" placeholder="Full or partial regulation text to analyse…"></textarea>
+                  </div>
+                </div>
+
+                <div class="pup-step-panel" id="pup-step-panel-2" data-pup-step-index="2" hidden role="tabpanel" aria-labelledby="pup-heading-2">
+                  <div class="pup-step-intro">
+                    <h2 class="pup-step-heading" id="pup-heading-2">Policies (JSON)</h2>
+                    <p class="ds-import-note pup-step-intro-note">Indexed for F3/F4. Loaded with the bundle from step 1. Clear to <code>[]</code> if you only want F1/F2.</p>
+                  </div>
+                  <div class="ds-import-row">
+                    <label class="ds-label" for="pup-policies-json">Policies JSON array</label>
+                    <p class="ds-import-note" style="margin-bottom:8px">Each item needs <code>id</code> and <code>content</code>; optional <code>title</code>. Example: <code>[{&quot;id&quot;:&quot;p1&quot;,&quot;title&quot;:&quot;Access&quot;,&quot;content&quot;:&quot;…&quot;}]</code></p>
+                    <textarea id="pup-policies-json" class="admin-form-textarea admin-form-textarea-mono pup-step-tall-textarea" rows="14" placeholder='[{"id":"pol-1","title":"Example policy","content":"Policy body text…"}]'></textarea>
+                  </div>
+                </div>
+              </div>
+
+              <div class="pup-stepper-actions">
+                <button type="button" class="btn-admin-ghost" id="pup-step-back">Back</button>
+                <div class="pup-stepper-actions-right">
+                  <span id="pup-status" class="ds-status" aria-live="polite"></span>
+                  <button type="button" class="btn-admin-primary" id="pup-step-next">
+                    Next
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M6 3L11 7L6 11M11 7H3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                  <button type="button" class="btn-admin-primary" id="pup-run-btn" hidden>
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 7H11M8 4L11 7L8 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    Run pipeline
+                  </button>
+                </div>
+              </div>
+              <pre id="pup-result" class="ds-import-log" style="display:none;margin-top:16px;max-height:480px;overflow:auto"></pre>
+            </div>
           </div>
         </section>
 
@@ -1248,6 +1422,23 @@
             Saving...
           </span>
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Policy update pipeline — result modal -->
+  <div class="admin-modal-overlay" id="pup-result-modal-overlay" aria-hidden="true">
+    <div class="admin-modal admin-modal-lg pup-result-modal-shell" role="dialog" aria-modal="true" aria-labelledby="pup-result-modal-title">
+      <div class="admin-modal-header">
+        <h3 class="admin-modal-title" id="pup-result-modal-title">Pipeline result</h3>
+        <button type="button" class="admin-modal-close" id="pup-result-modal-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="admin-modal-body pup-result-modal-body" id="pup-result-modal-body"></div>
+      <div class="admin-modal-footer">
+        <button type="button" class="btn-admin-ghost" id="pup-result-modal-copy-json">Copy JSON</button>
+        <button type="button" class="btn-admin-primary" id="pup-result-modal-close-btn">Close</button>
       </div>
     </div>
   </div>

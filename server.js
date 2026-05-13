@@ -5,8 +5,10 @@ const crypto = require('crypto');
 const { GoogleGenAI } = require('@google/genai');
 const Database = require('better-sqlite3');
 const yaml = require('js-yaml');
+const XLSX = require('xlsx');
+const { runPolicyUpdatePipeline } = require('./policyUpdatePipeline');
 
-const PORT = 5555; // Wathbah server port
+const PORT = Number(process.env.PORT) || 3333; // stage-version default
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent';
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 const GEMINI_UPLOAD_URL = 'https://generativelanguage.googleapis.com/upload/v1beta';
@@ -34,7 +36,7 @@ loadEnv();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// GRC Platform configuration (stage-version → WathbahGRC staging: https://grc-stage.wathbahs.com/)
+// GRC Platform configuration (stage-version → https://grc-stage.wathbahs.com/)
 const GRC_API_URL = String(process.env.GRC_API_URL || 'https://grc-stage.wathbahs.com')
   .trim()
   .replace(/\/+$/, '');
@@ -103,6 +105,26 @@ async function finalizeGrcUpstreamError(httpRes, reqToken, grcRes) {
   throw new Error(`GRC API ${grcRes.status}: ${errText}`);
 }
 
+/**
+ * Read failed GRC response body exactly once (do not call .text()/.json() on grcRes after this).
+ * On invalid-token 401: clears session and sends JSON to client — returns { aborted: true }.
+ * For any other error: returns { aborted: false, status, errText } (no throw).
+ */
+async function consumeGrcErrorBody(httpRes, reqToken, grcRes) {
+  const errText = await grcRes.text();
+  if (reqToken && isGrcInvalidTokenBody(grcRes.status, errText)) {
+    authSessions.delete(reqToken);
+    httpRes.writeHead(401, { 'Content-Type': 'application/json' });
+    httpRes.end(JSON.stringify({
+      success: false,
+      grcSessionExpired: true,
+      error: errText.trim(),
+    }));
+    return { aborted: true, status: grcRes.status, errText: '' };
+  }
+  return { aborted: false, status: grcRes.status, errText };
+}
+
 // Public paths that don't need auth
 const PUBLIC_PATHS = new Set([
   '/login.html', '/login.css', '/login.js',
@@ -116,6 +138,37 @@ function isPublicPath(pathname) {
   // Policy collections API is public for now
   if (pathname.startsWith('/api/policy-collections')) return true;
   return false;
+}
+
+/**
+ * Admin SPA client routes — must match admin.js (navigateTo / history paths).
+ * Serves admin.html so refresh/deep-links work after auth passes.
+ */
+const ADMIN_SPA_ROUTE_PREFIXES = [
+  '/dashboard',
+  '/audit-sessions',
+  '/audit-studio',
+  '/controls-studio',
+  '/merge-optimizer',
+  '/policy-ingestion',
+  '/policy-update-pipeline',
+  '/org-contexts',
+  '/data-studio',
+  '/prompts',
+  '/file-collections',
+  '/workbench',
+  '/audit-log',
+];
+
+function isAdminSpaPath(pathname) {
+  let p = pathname == null ? '' : String(pathname);
+  try {
+    p = decodeURIComponent(p.replace(/\+/g, ' '));
+  } catch (_) { /* malformed encoding */ }
+  if (!p.startsWith('/')) p = `/${p}`;
+  while (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+  if (p === '/' || p === '') return true;
+  return ADMIN_SPA_ROUTE_PREFIXES.some((prefix) => p === prefix || p.startsWith(`${prefix}/`));
 }
 
 function getTokenFromRequest(req) {
@@ -1289,6 +1342,1040 @@ function parseBody(req) {
   });
 }
 
+// ─── Data Studio: Excel row → GRC applied control fields ─────────────
+
+function dsFirstString(obj, keys) {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const k of keys) {
+    if (obj[k] != null && String(obj[k]).trim() !== '') return String(obj[k]).trim();
+  }
+  return '';
+}
+
+function dsBuildDescriptionFromRow(o) {
+  const lines = [];
+  const persp = [dsFirstString(o, ['كود المنظور']), dsFirstString(o, ['اسم المنظور'])].filter(Boolean).join(' — ');
+  if (persp) lines.push(`المنظور: ${persp}`);
+  const axis = [dsFirstString(o, ['كود المحور']), dsFirstString(o, ['اسم المحور'])].filter(Boolean).join(' — ');
+  if (axis) lines.push(`المحور: ${axis}`);
+  const std = [dsFirstString(o, ['كود المعيار']), dsFirstString(o, ['اسم المعيار'])].filter(Boolean).join(' — ');
+  if (std) lines.push(`المعيار: ${std}`);
+  const reqText = dsFirstString(o, ['نص المتطلب بحسب وثيقة هيئة الحكومة الرقمية', 'description', 'Requirement text']);
+  if (reqText) lines.push(reqText);
+  return lines.join('\n\n').trim();
+}
+
+function dsNormalizeImportRow(raw) {
+  const refRaw = dsFirstString(raw, ['كود المتطلب', 'ref_id', 'Ref ID', 'requirement_ref']);
+  const ref_id = refRaw ? dsNormalizeRefId(refRaw) : '';
+  const name = dsFirstString(raw, ['اسم الكنترول', 'name', 'Name', 'control_name']);
+  let description = dsFirstString(raw, ['description', 'Description', 'full_description']);
+  if (!description) description = dsBuildDescriptionFromRow(raw);
+  return { ref_id, name, description };
+}
+
+/** Normalize requirement ref_id for comparison (trim + Unicode NFKC). */
+function dsNormalizeRefId(s) {
+  if (s == null || s === '') return '';
+  return String(s).trim().normalize('NFKC');
+}
+
+/** Hyphen / dot comparable form for cross-checking Excel vs GRC refs. */
+function dsComparableRefId(s) {
+  if (s == null || s === '') return '';
+  let t = String(s).trim().normalize('NFKC').replace(/\u2212/g, '-');
+  t = t.replace(/\s+/g, '').replace(/-/g, '.');
+  return t;
+}
+
+/** Aliases so e.g. 4-8 and 4.8 can match when the framework uses one form in SQL and another in Excel. */
+function dsRefIdAliasKeys(ref) {
+  const base = dsNormalizeRefId(ref);
+  if (!base) return [];
+  const out = new Set([base, base.toLowerCase()]);
+  out.add(base.replace(/−/g, '-'));
+  out.add(base.replace(/\s+/g, ''));
+  const dotsToHyphens = base.replace(/\./g, '-');
+  const hypsToDots = base.replace(/-/g, '.');
+  if (dotsToHyphens !== base) out.add(dotsToHyphens);
+  if (hypsToDots !== base) out.add(hypsToDots);
+  return [...out].filter(Boolean);
+}
+
+/**
+ * Qyias / MHRSD: sheet rows may use 4+ numeric segments (e.g. 5.1.1.1) while the assessable
+ * framework node is 3 levels (5.1.1). Hyphen forms (5-1-1-1) are normalized to the same walk.
+ */
+function dsNumericDottedParentPrefixes(ref) {
+  const k = dsNormalizeRefId(ref);
+  if (!k) return [];
+  const unified = k.replace(/\u2212/g, '-').replace(/-/g, '.');
+  const parts = unified.split('.').filter(Boolean);
+  if (parts.length < 2) return [];
+  if (!parts.every(p => /^\d+$/.test(p))) return [];
+  const out = [];
+  for (let len = parts.length - 1; len >= 1; len--) {
+    const prefix = parts.slice(0, len).join('.');
+    if (prefix) out.push(prefix);
+  }
+  return out;
+}
+
+function dsRollUpUnknownRefsEnabled(ctx) {
+  return !ctx || ctx.rollUpUnknownRefs !== false;
+}
+
+/**
+ * First non-empty RA list for a single normalized ref key (aliases + dot/hyphen comparable scan).
+ * @param {string} candidateNormalized
+ * @param {Map<string, object[]>} refToRas
+ * @returns {object[]|null}
+ */
+function dsLookupRaListForNormalizedRef(candidateNormalized, refToRas) {
+  if (!candidateNormalized || !refToRas || refToRas.size === 0) return null;
+  for (const alias of dsRefIdAliasKeys(candidateNormalized)) {
+    const list = refToRas.get(alias);
+    if (list && list.length) return list;
+  }
+  const comp = dsComparableRefId(candidateNormalized);
+  if (!comp) return null;
+  for (const key of refToRas.keys()) {
+    if (dsComparableRefId(key) !== comp) continue;
+    const list = refToRas.get(key) || [];
+    if (list.length) return list;
+  }
+  return null;
+}
+
+function dsAddRaToRefMap(refToRas, refKey, ra) {
+  const raId = ra.id || ra.uuid;
+  for (const alias of dsRefIdAliasKeys(refKey)) {
+    if (!refToRas.has(alias)) refToRas.set(alias, []);
+    const list = refToRas.get(alias);
+    if (!list.some(r => (r.id || r.uuid) === raId)) list.push(ra);
+  }
+}
+
+/**
+ * Pick requirement assessment id(s) for a row ref from dsBuildRefIdToRasMap output.
+ * Matches export/link logic when GET ?requirement__ref_id= is incomplete on some GRC builds.
+ */
+function dsRaIdsFromSheetRef(rowRef, refToRas, linkErrors, ctx) {
+  if (!rowRef || !refToRas || refToRas.size === 0) return [];
+  const k = dsNormalizeRefId(rowRef);
+  if (!k) return [];
+  const rollUp = dsRollUpUnknownRefsEnabled(ctx);
+  const candidates = rollUp ? [k, ...dsNumericDottedParentPrefixes(k)] : [k];
+  const seenCand = new Set();
+  for (const cand of candidates) {
+    if (!cand || seenCand.has(cand)) continue;
+    seenCand.add(cand);
+    const list = dsLookupRaListForNormalizedRef(cand, refToRas);
+    if (!list || !list.length) continue;
+    const ids = [...new Set(list.map(ra => String(ra.id || ra.uuid || '').trim()).filter(Boolean))].sort();
+    if (!ids.length) continue;
+    if (cand !== k && linkErrors) {
+      linkErrors.push({
+        ...ctx,
+        step: 'ref_roll_up',
+        warning: `Sheet ref "${k}" linked to requirement assessment for parent "${cand}" (Qyias 3-level roll-up).`,
+      });
+    }
+    if (ids.length > 1 && linkErrors) {
+      linkErrors.push({
+        ...ctx,
+        error: `Multiple requirement assessments (${ids.length}) for ref "${cand}" in this audit — linking first (${ids[0]}).`,
+      });
+    }
+    return [ids[0]];
+  }
+  return [];
+}
+
+function dsFirstRaForSheetRef(rowRef, refToRas, ctx) {
+  if (!rowRef || !refToRas || refToRas.size === 0) return null;
+  const k = dsNormalizeRefId(rowRef);
+  if (!k) return null;
+  const rollUp = dsRollUpUnknownRefsEnabled(ctx);
+  const candidates = rollUp ? [k, ...dsNumericDottedParentPrefixes(k)] : [k];
+  const seenCand = new Set();
+  for (const cand of candidates) {
+    if (!cand || seenCand.has(cand)) continue;
+    seenCand.add(cand);
+    const list = dsLookupRaListForNormalizedRef(cand, refToRas);
+    if (list && list.length) return list[0];
+  }
+  return null;
+}
+
+/** Framework requirement node UUID for a workbook ref (from an existing RA row in the audit). */
+function dsRequirementUuidFromSheetRef(rowRef, refToRas, ctx) {
+  const ra = dsFirstRaForSheetRef(rowRef, refToRas, ctx);
+  return ra ? dsRequirementUuidFromRa(ra) : '';
+}
+
+/** Count rows whose كود المتطلب hits the audit map by alias key or comparable (dot/hyphen) form. */
+function dsCountSheetRowsMatchingAuditRefs(rows, refToRas) {
+  if (!refToRas || refToRas.size === 0) return 0;
+  let n = 0;
+  for (const row of rows) {
+    const k = dsNormalizeRefId(row.ref_id);
+    if (!k) continue;
+    const candidates = [k, ...dsNumericDottedParentPrefixes(k)];
+    const seenCand = new Set();
+    let hit = false;
+    for (const cand of candidates) {
+      if (!cand || seenCand.has(cand)) continue;
+      seenCand.add(cand);
+      const list = dsLookupRaListForNormalizedRef(cand, refToRas);
+      if (list && list.length) {
+        hit = true;
+        break;
+      }
+    }
+    if (hit) n++;
+  }
+  return n;
+}
+
+function dsRequirementUuidFromRa(ra) {
+  const req = ra && ra.requirement;
+  if (!req) return '';
+  if (typeof req === 'string') return req.trim();
+  if (typeof req === 'object') return String(req.id || req.uuid || '').trim();
+  return '';
+}
+
+function dsEmbeddedRequirementRefId(ra) {
+  const req = ra && ra.requirement;
+  if (req && typeof req === 'object') {
+    return dsNormalizeRefId(req.ref_id || req.refId || '');
+  }
+  return '';
+}
+
+/** Ref used to match Excel rows — API list/detail may expose it on the RA instead of nested `requirement`. */
+function dsRefIdFromRequirementAssessment(ra) {
+  if (!ra || typeof ra !== 'object') return '';
+  const top = dsNormalizeRefId(
+    ra.requirement_ref_id ?? ra.requirement_ref ?? ra.requirementRefId ?? ''
+  );
+  if (top) return top;
+  const emb = dsEmbeddedRequirementRefId(ra);
+  if (emb) return emb;
+  return dsNormalizeRefId(ra.ref_id || ra.refId || '');
+}
+
+async function dsFetchAllRequirementAssessmentsForCA(caId, grcUrl, reqToken, res) {
+  let allRAs = [];
+  let raUrl = `${grcUrl}/api/requirement-assessments/?compliance_assessment=${encodeURIComponent(caId)}&page_size=500`;
+  while (raUrl) {
+    const raRes = await grcFetch(raUrl, {}, reqToken);
+    if (!raRes.ok) {
+      if (res && (await finalizeGrcUpstreamError(res, reqToken, raRes))) return null;
+      const t = await raRes.text();
+      throw new Error(`Failed to list requirement assessments: ${raRes.status} ${t.slice(0, 300)}`);
+    }
+    const raData = await raRes.json();
+    allRAs = allRAs.concat(Array.isArray(raData.results) ? raData.results : []);
+    raUrl = raData.next || null;
+  }
+  return allRAs;
+}
+
+/** Paginated list of compliance assessments (audits). Returns null if GRC auth failed and response was finalized. */
+async function dsFetchAllComplianceAssessments(grcUrl, reqToken, res) {
+  let all = [];
+  let nextUrl = `${grcUrl}/api/compliance-assessments/?page_size=500`;
+  while (nextUrl) {
+    const r = await grcFetch(nextUrl, {}, reqToken);
+    if (!r.ok) {
+      if (res && (await finalizeGrcUpstreamError(res, reqToken, r))) return null;
+      const t = await r.text();
+      throw new Error(`Failed to list compliance assessments: ${r.status} ${t.slice(0, 240)}`);
+    }
+    const d = await r.json();
+    all = all.concat(Array.isArray(d.results) ? d.results : []);
+    nextUrl = d.next || null;
+  }
+  return all;
+}
+
+/**
+ * Pick the compliance assessment whose requirement assessments best match row ref_ids (كود المتطلب).
+ * Full overlap short-circuits the scan. Returns null if GRC auth aborts mid-flight.
+ */
+async function dsPickComplianceAssessmentForRows(rows, grcUrl, reqToken, res) {
+  const rowsWithRef = rows.filter(r => dsNormalizeRefId(r.ref_id));
+  if (!rowsWithRef.length) {
+    return {
+      caId: null,
+      caName: null,
+      allRAs: [],
+      built: null,
+      score: 0,
+      rowsWithRef: 0,
+    };
+  }
+  const cas = await dsFetchAllComplianceAssessments(grcUrl, reqToken, res);
+  if (cas === null) return null;
+
+  let best = { caId: null, caName: null, score: -1, allRAs: [], built: null };
+  const target = rowsWithRef.length;
+
+  for (const ca of cas) {
+    const caId = ca.id || ca.uuid;
+    if (!caId) continue;
+    const allRAs = await dsFetchAllRequirementAssessmentsForCA(caId, grcUrl, reqToken, res);
+    if (allRAs === null) return null;
+    if (!allRAs.length) continue;
+    const built = await dsBuildRefIdToRAsMap(allRAs, grcUrl, reqToken, res);
+    if (built === null) return null;
+    const score = dsCountSheetRowsMatchingAuditRefs(rows, built.refToRas);
+    if (score > best.score) {
+      best = {
+        caId,
+        caName: ca.name || ca.basename || String(caId),
+        score,
+        allRAs,
+        built,
+      };
+    }
+    if (score === target) {
+      console.log(`[DataStudio] Auto-picked compliance assessment "${best.caName}" (${best.caId}) — full overlap ${score}/${target}`);
+      break;
+    }
+  }
+
+  return { ...best, rowsWithRef: target };
+}
+
+/** Paginated list of frameworks. Returns null if GRC auth aborts mid-flight. */
+async function dsFetchAllFrameworks(grcUrl, reqToken, res) {
+  let all = [];
+  let nextUrl = `${grcUrl}/api/frameworks/?page_size=200`;
+  while (nextUrl) {
+    const r = await grcFetch(nextUrl, {}, reqToken);
+    if (!r.ok) {
+      if (res && (await finalizeGrcUpstreamError(res, reqToken, r))) return null;
+      const t = await r.text();
+      throw new Error(`Failed to list frameworks: ${r.status} ${t.slice(0, 240)}`);
+    }
+    const d = await r.json();
+    all = all.concat(Array.isArray(d.results) ? d.results : []);
+    nextUrl = d.next || null;
+  }
+  return all;
+}
+
+/** Distinct normalized ref_ids of every assessable requirement node in a framework. */
+async function dsFetchFrameworkRequirementRefIds(frameworkId, grcUrl, reqToken, res) {
+  const refs = new Set();
+  let nextUrl = `${grcUrl}/api/requirement-nodes/?framework=${encodeURIComponent(frameworkId)}&page_size=500`;
+  while (nextUrl) {
+    const r = await grcFetch(nextUrl, {}, reqToken);
+    if (!r.ok) {
+      if (res && (await finalizeGrcUpstreamError(res, reqToken, r))) return null;
+      const t = await r.text();
+      throw new Error(`Failed to list requirement-nodes for framework ${frameworkId}: ${r.status} ${t.slice(0, 240)}`);
+    }
+    const d = await r.json();
+    for (const node of Array.isArray(d.results) ? d.results : []) {
+      const ref = dsNormalizeRefId(node.ref_id || node.refId || '');
+      if (ref) refs.add(ref);
+    }
+    nextUrl = d.next || null;
+  }
+  return refs;
+}
+
+/** Count sheet rows whose ref_id (alias / comparable form) appears in the framework's requirement node ref_id set. */
+function dsCountSheetRowsMatchingFrameworkRefs(rows, frameworkRefSet) {
+  if (!frameworkRefSet || frameworkRefSet.size === 0) return 0;
+  const compSet = new Set();
+  for (const k of frameworkRefSet) {
+    const c = dsComparableRefId(k);
+    if (c) compSet.add(c);
+  }
+  let n = 0;
+  for (const row of rows) {
+    const k = dsNormalizeRefId(row.ref_id);
+    if (!k) continue;
+    const candidates = [k, ...dsNumericDottedParentPrefixes(k)];
+    const seenCand = new Set();
+    let hit = false;
+    for (const cand of candidates) {
+      if (!cand || seenCand.has(cand)) continue;
+      seenCand.add(cand);
+      if (dsRefIdAliasKeys(cand).some(alias => frameworkRefSet.has(alias))) {
+        hit = true;
+        break;
+      }
+      const rc = dsComparableRefId(cand);
+      if (rc && compSet.has(rc)) {
+        hit = true;
+        break;
+      }
+    }
+    if (hit) n++;
+  }
+  return n;
+}
+
+/**
+ * Pick the GRC framework whose requirement nodes best match the sheet's ref_ids.
+ * Used as a fallback when no compliance assessment exists yet — we then auto-create
+ * a CA from the best framework so STEP 2 has somewhere to PATCH.
+ * Returns null only if GRC auth aborted mid-flight.
+ */
+async function dsPickFrameworkForRows(rows, grcUrl, reqToken, res) {
+  const rowsWithRef = rows.filter(r => dsNormalizeRefId(r.ref_id));
+  if (!rowsWithRef.length) {
+    return { framework: null, score: 0, rowsWithRef: 0 };
+  }
+  const fws = await dsFetchAllFrameworks(grcUrl, reqToken, res);
+  if (fws === null) return null;
+
+  let best = { framework: null, score: -1 };
+  const target = rowsWithRef.length;
+  for (const fw of fws) {
+    const fwId = fw.id || fw.uuid;
+    if (!fwId) continue;
+    const refs = await dsFetchFrameworkRequirementRefIds(fwId, grcUrl, reqToken, res);
+    if (refs === null) return null;
+    if (!refs.size) continue;
+    const score = dsCountSheetRowsMatchingFrameworkRefs(rows, refs);
+    if (score > best.score) {
+      best = { framework: fw, score };
+    }
+    if (score === target) {
+      console.log(
+        `[DataStudio] Framework auto-pick: full overlap ${score}/${target} on "${fw.name || fw.ref_id || fwId}" — short-circuit.`
+      );
+      break;
+    }
+  }
+  return { ...best, rowsWithRef: target };
+}
+
+/**
+ * Look up a perimeter UUID for a CA POST. CISO Assistant requires perimeter on
+ * /api/compliance-assessments/. Strategy:
+ *   1) If folder given, try /api/perimeters/?folder=<folder>
+ *   2) Fallback to /api/perimeters/?folder__id=<folder>
+ *   3) Fallback to first perimeter on the instance
+ * Returns '' if none could be found, or null if GRC auth aborted mid-flight.
+ */
+async function dsFindPerimeterForFolder(folderId, grcUrl, reqToken, res) {
+  const tryUrls = [];
+  if (folderId) {
+    tryUrls.push(`${grcUrl}/api/perimeters/?folder=${encodeURIComponent(folderId)}&page_size=20`);
+    tryUrls.push(`${grcUrl}/api/perimeters/?folder__id=${encodeURIComponent(folderId)}&page_size=20`);
+  }
+  tryUrls.push(`${grcUrl}/api/perimeters/?page_size=20`);
+
+  for (const u of tryUrls) {
+    const r = await grcFetch(u, {}, reqToken);
+    if (!r.ok) {
+      if (res && (await finalizeGrcUpstreamError(res, reqToken, r))) return null;
+      continue;
+    }
+    const d = await r.json();
+    const list = Array.isArray(d.results) ? d.results : [];
+    if (list.length) {
+      const id = String(list[0].id || list[0].uuid || '').trim();
+      if (id) return id;
+    }
+  }
+  return '';
+}
+
+/**
+ * Create a compliance assessment from a framework via GRC API. Tries several body shapes
+ * to absorb schema differences between CISO Assistant versions: perimeter is required in
+ * recent versions (per the curl in the conversation), version + status are also typical.
+ * Returns the created CA object or null on failure (after pushing an error string into linkErrors).
+ */
+async function dsCreateComplianceAssessmentForFramework({
+  framework,
+  folder,
+  perimeter,
+  name,
+  description,
+  version,
+  status,
+  grcUrl,
+  reqToken,
+  res,
+  linkErrors,
+}) {
+  const fwId = framework.id || framework.uuid;
+  if (!fwId) return null;
+  const fwName = framework.name || framework.ref_id || fwId;
+  const auditName = name || `${fwName} – Controls Catalog`;
+  const auditDesc =
+    description ||
+    'Auto-created by Data Studio import — host audit so requirement-assessments can be PATCHed with imported applied controls.';
+  const auditVersion = version || '1.0';
+  const auditStatus = status || 'in_progress';
+
+  let perimeterId = perimeter && typeof perimeter === 'string' ? perimeter.trim() : '';
+  if (!perimeterId) {
+    const found = await dsFindPerimeterForFolder(folder || '', grcUrl, reqToken, res);
+    if (found === null) return null; // auth aborted
+    perimeterId = found;
+    if (perimeterId) {
+      console.log(`[DataStudio] Auto-discovered perimeter ${perimeterId} for new audit.`);
+    } else {
+      console.warn('[DataStudio] No perimeter found in GRC — POST will likely fail. Provide body.perimeter or create a perimeter in GRC.');
+    }
+  }
+
+  // Body variants from richest to leanest. The first that GRC accepts wins.
+  // Mirror of the curl you supplied: { name, framework, perimeter, version, status }.
+  const tryBodies = [];
+  if (perimeterId) {
+    tryBodies.push({
+      name: auditName,
+      framework: fwId,
+      perimeter: perimeterId,
+      version: auditVersion,
+      status: auditStatus,
+      description: auditDesc,
+      ...(folder ? { folder } : {}),
+    });
+    tryBodies.push({
+      name: auditName,
+      framework: fwId,
+      perimeter: perimeterId,
+      version: auditVersion,
+      status: auditStatus,
+      description: auditDesc,
+    });
+    tryBodies.push({
+      name: auditName,
+      framework: fwId,
+      perimeter: perimeterId,
+      description: auditDesc,
+    });
+  }
+  // Last-resort attempts without perimeter (older CISO Assistant where it was optional).
+  tryBodies.push({
+    name: auditName,
+    framework: fwId,
+    version: auditVersion,
+    status: auditStatus,
+    description: auditDesc,
+    ...(folder ? { folder } : {}),
+  });
+  tryBodies.push({ name: auditName, framework: fwId, description: auditDesc });
+
+  let lastErr = '';
+  let lastStatus = 0;
+  for (let i = 0; i < tryBodies.length; i++) {
+    const grcRes = await grcFetch(`${grcUrl}/api/compliance-assessments/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tryBodies[i]),
+    }, reqToken);
+    if (grcRes.ok) {
+      const newCA = await grcRes.json();
+      console.log(
+        `[DataStudio] Auto-created compliance assessment "${auditName}" → ${newCA.id || newCA.uuid} (framework ${fwName} / ${fwId}; perimeter ${perimeterId || '(none)'}; attempt ${i + 1}/${tryBodies.length})`
+      );
+      return newCA;
+    }
+    if (res && (await finalizeGrcUpstreamError(res, reqToken, grcRes))) return null;
+    lastErr = await grcRes.text();
+    lastStatus = grcRes.status;
+    if (grcRes.status !== 400 || i + 1 >= tryBodies.length) {
+      const msg = `Failed to auto-create compliance assessment for framework ${fwName} (${fwId}): ${grcRes.status} ${lastErr.slice(0, 400)}`;
+      console.warn(`[DataStudio] ${msg}`);
+      if (linkErrors) linkErrors.push({ step: 'auto_create_compliance_assessment', error: msg });
+      return null;
+    }
+    console.warn(
+      `[DataStudio] Auto-create CA attempt ${i + 1}/${tryBodies.length} failed with ${grcRes.status}, retrying with reduced body. GRC said: ${lastErr.slice(0, 200)}`
+    );
+  }
+  if (linkErrors) {
+    linkErrors.push({ step: 'auto_create_compliance_assessment', error: `exhausted body variants (last status ${lastStatus}): ${lastErr.slice(0, 300)}` });
+  }
+  return null;
+}
+
+/**
+ * Build map: normalized requirement ref_id → [RA objects from list endpoint].
+ * Fetches requirement-nodes when list view omits ref_id (common).
+ */
+async function dsBuildRefIdToRAsMap(allRAs, grcUrl, reqToken, res) {
+  const fetchedRefByUuid = new Map();
+  const uuidsNeedingFetch = new Set();
+
+  for (const ra of allRAs) {
+    const haveRef = dsRefIdFromRequirementAssessment(ra);
+    const uuid = dsRequirementUuidFromRa(ra);
+    if (!haveRef && uuid) uuidsNeedingFetch.add(uuid);
+  }
+
+  for (const uuid of uuidsNeedingFetch) {
+    let ref = '';
+    const tryUrls = [
+      `${grcUrl}/api/requirement-nodes/${encodeURIComponent(uuid)}/`,
+      `${grcUrl}/api/requirement-nodes/${encodeURIComponent(uuid)}`,
+      `${grcUrl}/api/requirements/${encodeURIComponent(uuid)}/`,
+      `${grcUrl}/api/requirements/${encodeURIComponent(uuid)}`,
+    ];
+    for (const u of tryUrls) {
+      const r = await grcFetch(u, {}, reqToken);
+      if (!r.ok) {
+        if (res && (await finalizeGrcUpstreamError(res, reqToken, r))) return null;
+        continue;
+      }
+      const node = await r.json();
+      ref = dsNormalizeRefId(node.ref_id || node.refId || '');
+      break;
+    }
+    if (!ref) {
+      console.warn(`[DataStudio] No ref_id resolved for requirement UUID ${uuid}`);
+    }
+    fetchedRefByUuid.set(uuid, ref);
+  }
+
+  const refToRas = new Map();
+  const canonical = new Set();
+  for (const ra of allRAs) {
+    const uuid = dsRequirementUuidFromRa(ra);
+    let refKey = dsRefIdFromRequirementAssessment(ra);
+    if (!refKey && uuid) refKey = fetchedRefByUuid.get(uuid) || '';
+    if (!refKey) continue;
+    canonical.add(refKey);
+    dsAddRaToRefMap(refToRas, refKey, ra);
+  }
+  const auditRefIdSample = [...canonical].sort().slice(0, 40);
+  return {
+    refToRas,
+    auditRefIdsDistinct: canonical.size,
+    auditRefIdSample,
+  };
+}
+
+/** Ensure AppliedControl.requirement_assessments includes all raIds (GRC UI reads this M2M). */
+async function dsEnsureAppliedControlHasRequirementAssessments(controlId, raIds, grcUrl, reqToken, res, linkErrors, ctx) {
+  if (!controlId || !raIds || !raIds.length) return { ok: true };
+  const want = [...new Set(raIds.map(id => String(id)))];
+  const url = `${grcUrl}/api/applied-controls/${encodeURIComponent(controlId)}/`;
+  const acGet = await grcFetch(url, {}, reqToken);
+  if (!acGet.ok) {
+    const errIn = await consumeGrcErrorBody(res, reqToken, acGet);
+    if (errIn.aborted) return { ok: false, aborted: true };
+    linkErrors.push({
+      ...ctx,
+      step: 'ac_get_before_patch_requirement_assessments',
+      error: (errIn.errText || '').slice(0, 400),
+    });
+    return { ok: false, aborted: false };
+  }
+  const d = await acGet.json();
+  const existing = [];
+  const raw =
+    d.requirement_assessments ??
+    d.requirement_assessment_set ??
+    d.linked_requirement_assessments ??
+    d.assessed_requirements;
+  if (Array.isArray(raw)) {
+    for (const x of raw) {
+      const id = typeof x === 'object' && x && x !== null ? String(x.id || x.uuid || '') : String(x);
+      if (id) existing.push(id);
+    }
+  }
+  const need = want.filter(id => !existing.includes(id));
+  if (!need.length) return { ok: true };
+  const merged = [...new Set([...existing, ...want])];
+  const tryBodies = [
+    () => ({ requirement_assessments: merged }),
+    () => ({ requirement_assessments: merged.map(id => ({ id })) }),
+  ];
+  let lastPe = '';
+  for (let bi = 0; bi < tryBodies.length; bi++) {
+    const acPatch = await grcFetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tryBodies[bi]()),
+    }, reqToken);
+    if (acPatch.ok) {
+      console.log(
+        `[DataStudio] PATCH applied-controls/${String(controlId).slice(0, 8)}… requirement_assessments → ${merged.length} id(s)`
+      );
+      return { ok: true };
+    }
+    if (res && (await finalizeGrcUpstreamError(res, reqToken, acPatch))) return { ok: false, aborted: true };
+    lastPe = await acPatch.text();
+    if (acPatch.status === 400 && bi + 1 < tryBodies.length) continue;
+    linkErrors.push({ ...ctx, step: 'ac_patch_requirement_assessments', error: lastPe.slice(0, 500) });
+    return { ok: false, aborted: false };
+  }
+  linkErrors.push({ ...ctx, step: 'ac_patch_requirement_assessments', error: lastPe.slice(0, 500) });
+  return { ok: false, aborted: false };
+}
+
+/** Extract new requirement-assessment UUID from GRC 201 Location header when body omits id. */
+function dsRaIdFromGrcRequirementAssessmentLocation(postRes) {
+  try {
+    const loc = postRes.headers.get('Location') || postRes.headers.get('location') || '';
+    const m = loc.match(/requirement-assessments\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?/i);
+    if (m) return m[1];
+    const tail = loc.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i);
+    if (tail) return tail[1];
+  } catch (_) { /* ignore */ }
+  return '';
+}
+
+/**
+ * Row-by-row step after POST /api/applied-controls/: (1) POST /api/requirement-assessments/ to attach requirement + control;
+ * (2) if that fails, PATCH existing RA(s) (merge applied_controls) + PATCH applied control.
+ * @returns {Promise<{ aborted?: boolean, linked: boolean, mode?: string, raId?: string }>}
+ */
+async function dsRowLinkAppliedControlToRequirement({
+  controlId,
+  complianceAssessmentId,
+  rowRef,
+  refToRasMap,
+  grcUrl,
+  reqToken,
+  res,
+  linkErrors,
+  ctx,
+  raControlsCache,
+  preferPostFirst,
+  raIndexedRefIds,
+}) {
+  const cid = String(controlId || '').trim();
+  if (!cid || !complianceAssessmentId || !dsNormalizeRefId(rowRef)) {
+    return { linked: false };
+  }
+
+  const patchExisting = async () => {
+    let found = refToRasMap
+      ? dsRaIdsFromSheetRef(rowRef, refToRasMap, linkErrors, ctx)
+      : [];
+    if (!found.length) {
+      const apiFound = await dsFindRequirementAssessmentIdsForRef(
+        complianceAssessmentId,
+        rowRef,
+        grcUrl,
+        reqToken,
+        res,
+        linkErrors,
+        ctx
+      );
+      if (apiFound === null) return { aborted: true };
+      found = apiFound;
+    }
+    if (!found.length) {
+      linkErrors.push({
+        ...ctx,
+        error: `No requirement assessment in this audit matches ref "${rowRef}" (indexed ${raIndexedRefIds || 0} refs; POST link not used or failed).`,
+      });
+      return { linked: false };
+    }
+    const raSideOk = await dsAppendAppliedControlToRequirementAssessments(
+      cid, found, grcUrl, reqToken, res, linkErrors, ctx, raControlsCache
+    );
+    if (!raSideOk) return { aborted: true };
+    const sync = await dsEnsureAppliedControlHasRequirementAssessments(
+      cid, found, grcUrl, reqToken, res, linkErrors, ctx
+    );
+    if (sync.aborted) return { aborted: true };
+    if (!sync.ok) return { linked: false, raId: found[0] || '' };
+    return { linked: true, mode: 'patch_existing_ra', raId: found[0] || '' };
+  };
+
+  if (preferPostFirst !== false && refToRasMap && refToRasMap.size > 0) {
+    const reqUuid = dsRequirementUuidFromSheetRef(rowRef, refToRasMap, ctx);
+    if (reqUuid) {
+      const postBody = {
+        compliance_assessment: complianceAssessmentId,
+        requirement: reqUuid,
+        applied_controls: [cid],
+        result: 'not_assessed',
+        status: 'to_do',
+      };
+      const postRes = await grcFetch(`${grcUrl}/api/requirement-assessments/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(postBody),
+      }, reqToken);
+      if (postRes.ok) {
+        let raId = dsRaIdFromGrcRequirementAssessmentLocation(postRes);
+        try {
+          const data = await postRes.json();
+          const fromBody = String(data.id || data.uuid || '').trim();
+          if (fromBody) raId = fromBody;
+        } catch (_) { /* empty or non-JSON body */ }
+        if (!raId && refToRasMap) {
+          const resolved = dsRaIdsFromSheetRef(rowRef, refToRasMap, linkErrors, ctx);
+          raId = resolved[0] || '';
+        }
+        if (raId) {
+          const raSideOk = await dsAppendAppliedControlToRequirementAssessments(
+            cid, [raId], grcUrl, reqToken, res, linkErrors, ctx, raControlsCache
+          );
+          if (!raSideOk) return { aborted: true };
+          const sync = await dsEnsureAppliedControlHasRequirementAssessments(
+            cid, [raId], grcUrl, reqToken, res, linkErrors, ctx
+          );
+          if (sync.aborted) return { aborted: true };
+          if (!sync.ok) return { linked: false, raId };
+          return { linked: true, mode: 'post_requirement_assessment', raId };
+        }
+        return patchExisting();
+      }
+      const errIn = await consumeGrcErrorBody(res, reqToken, postRes);
+      if (errIn.aborted) return { aborted: true };
+      linkErrors.push({
+        ...ctx,
+        step: 'ra_post_link',
+        error: `POST /api/requirement-assessments/ (${postRes.status}): ${(errIn.errText || '').slice(0, 400)} — falling back to PATCH on existing RA.`,
+      });
+    }
+  }
+
+  return patchExisting();
+}
+
+/**
+ * GRC UI and list views often surface M2M via RequirementAssessment.applied_controls.
+ * Mirrors Phase 2 of /api/grc/applied-controls export — PATCH each RA with merged IDs.
+ * @param {Map<string, string[]>} [raControlsCache] raId -> last known applied_control ids (avoids redundant GETs).
+ */
+async function dsAppendAppliedControlToRequirementAssessments(controlId, raIds, grcUrl, reqToken, res, linkErrors, ctx, raControlsCache) {
+  const cid = String(controlId || '').trim();
+  if (!cid || !raIds || !raIds.length) return true;
+  const uniqueRa = [...new Set(raIds.map(id => String(id).trim()).filter(Boolean))];
+  for (const raId of uniqueRa) {
+    let existing = raControlsCache && raControlsCache.get(raId);
+    if (!existing) {
+      const raRes = await grcFetch(`${grcUrl}/api/requirement-assessments/${encodeURIComponent(raId)}/`, {}, reqToken);
+      if (!raRes.ok) {
+        if (res && (await finalizeGrcUpstreamError(res, reqToken, raRes))) return false;
+        const t = await raRes.text();
+        linkErrors.push({ ...ctx, raId, step: 'ra_get_applied_controls', error: t.slice(0, 400) });
+        continue;
+      }
+      const d = await raRes.json();
+      existing = [];
+      const raw = d.applied_controls;
+      if (Array.isArray(raw)) {
+        for (const x of raw) {
+          const id = typeof x === 'object' && x && x !== null ? String(x.id || x.uuid || '') : String(x);
+          if (id) existing.push(id);
+        }
+      }
+      if (raControlsCache) raControlsCache.set(raId, existing);
+    }
+    if (existing.includes(cid)) continue;
+    const merged = [...new Set([...existing, cid])];
+    const raBodies = [
+      () => ({ applied_controls: merged }),
+      () => ({ applied_controls: merged.map(id => ({ id })) }),
+    ];
+    let raPatched = false;
+    let lastRaPe = '';
+    for (let bi = 0; bi < raBodies.length; bi++) {
+      const patchRes = await grcFetch(`${grcUrl}/api/requirement-assessments/${encodeURIComponent(raId)}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(raBodies[bi]()),
+      }, reqToken);
+      if (patchRes.ok) {
+        raPatched = true;
+        break;
+      }
+      if (res && (await finalizeGrcUpstreamError(res, reqToken, patchRes))) return false;
+      lastRaPe = await patchRes.text();
+      if (patchRes.status === 400 && bi + 1 < raBodies.length) continue;
+      linkErrors.push({ ...ctx, raId, step: 'ra_patch_applied_controls', error: lastRaPe.slice(0, 500) });
+      break;
+    }
+    if (raPatched && raControlsCache) raControlsCache.set(raId, merged);
+  }
+  return true;
+}
+
+/**
+ * Resolve requirement assessment UUID(s) for one row using GRC list filter:
+ * GET /api/requirement-assessments/?compliance_assessment=&requirement__ref_id=
+ * Tries normalized ref + alias variants (dots/hyphens).
+ * @returns {Promise<string[]|null>} null only if GRC auth aborted; [] if no row; one id if found (first if several).
+ */
+async function dsFindRequirementAssessmentIdsForRef(caId, rowRef, grcUrl, reqToken, res, linkErrors, ctx) {
+  const ref = dsNormalizeRefId(rowRef);
+  if (!ref || !caId) return [];
+  const rollUp = dsRollUpUnknownRefsEnabled(ctx);
+  const candRefs = rollUp ? [ref, ...dsNumericDottedParentPrefixes(ref)] : [ref];
+  const tryVals = [];
+  const seenTry = new Set();
+  for (const cand of candRefs) {
+    if (!cand) continue;
+    for (const v of [cand, ...dsRefIdAliasKeys(cand)]) {
+      if (!v || seenTry.has(v)) continue;
+      seenTry.add(v);
+      tryVals.push(v);
+      if (tryVals.length >= 40) break;
+    }
+    if (tryVals.length >= 40) break;
+  }
+  for (let ti = 0; ti < tryVals.length; ti++) {
+    const r = tryVals[ti];
+    const q = new URLSearchParams({
+      compliance_assessment: String(caId),
+      requirement__ref_id: r,
+      page_size: '50',
+    });
+    const url = `${grcUrl}/api/requirement-assessments/?${q.toString()}`;
+    const raRes = await grcFetch(url, {}, reqToken);
+    if (!raRes.ok) {
+      const errIn = await consumeGrcErrorBody(res, reqToken, raRes);
+      if (errIn.aborted) return null;
+      continue;
+    }
+    const data = await raRes.json();
+    const results = Array.isArray(data.results) ? data.results : [];
+    if (!results.length) continue;
+    const ids = [...new Set(results.map(ra => String(ra.id || ra.uuid || '')).filter(Boolean))].sort();
+    if (!ids.length) continue;
+    if (r !== ref && linkErrors) {
+      linkErrors.push({
+        ...ctx,
+        step: 'ref_roll_up',
+        warning: `Sheet ref "${ref}" resolved requirement__ref_id="${r}" via parent prefix (Qyias 3-level roll-up).`,
+      });
+    }
+    if (ids.length > 1 && linkErrors) {
+      linkErrors.push({
+        ...ctx,
+        error: `Multiple requirement assessments (${ids.length}) for ref "${r}" in this audit — linking first (${ids[0]}).`,
+      });
+    }
+    return [ids[0]];
+  }
+  return [];
+}
+
+function dsAppliedControlRefFromItem(item) {
+  if (!item || typeof item !== 'object') return '';
+  return dsNormalizeRefId(item.ref_id || item.refId || '');
+}
+
+function dsAppliedControlFolderIdFromItem(item) {
+  const f = item && item.folder;
+  if (f == null) return '';
+  if (typeof f === 'string') return f.trim();
+  if (typeof f === 'object') return String(f.id || f.uuid || '').trim();
+  return '';
+}
+
+/**
+ * Locate an existing applied control in a folder by ref_id (GRC list filters + paginated folder scan).
+ * @returns {Promise<string[]|null>} null if auth aborted; [] if none; one id if found.
+ */
+async function dsFindAppliedControlIdForRefInFolder(folderId, rowRef, grcUrl, reqToken, res, linkErrors, ctx) {
+  const ref = dsNormalizeRefId(rowRef);
+  const folder = String(folderId || '').trim();
+  if (!ref || !folder) return [];
+  const tryVals = [...new Set([ref, ...dsRefIdAliasKeys(ref)])].slice(0, 12);
+  const matchesTry = (item, rTry) => {
+    const ir = dsAppliedControlRefFromItem(item);
+    if (!ir || !rTry) return false;
+    if (dsNormalizeRefId(ir) === dsNormalizeRefId(rTry)) return true;
+    return dsComparableRefId(ir) === dsComparableRefId(rTry);
+  };
+  const inScopeFolder = item => {
+    const fid = dsAppliedControlFolderIdFromItem(item);
+    return !fid || fid === folder;
+  };
+
+  const folderFilterBases = [{ folder }, { folder__id: folder }, { folder_id: folder }];
+
+  for (const base of folderFilterBases) {
+    for (const r of tryVals) {
+      const q = new URLSearchParams({ ...base, ref_id: r, page_size: '80' });
+      const url = `${grcUrl}/api/applied-controls/?${q.toString()}`;
+      const acRes = await grcFetch(url, {}, reqToken);
+      if (!acRes.ok) {
+        const errIn = await consumeGrcErrorBody(res, reqToken, acRes);
+        if (errIn.aborted) return null;
+        continue;
+      }
+      const data = await acRes.json();
+      const results = Array.isArray(data.results) ? data.results : [];
+      const hits = results.filter(it => inScopeFolder(it) && matchesTry(it, r));
+      if (!hits.length) continue;
+      const id = String(hits[0].id || hits[0].uuid || '').trim();
+      if (!id) continue;
+      if (hits.length > 1 && linkErrors) {
+        linkErrors.push({
+          ...ctx,
+          error: `Multiple applied controls match ref "${r}" in this folder — linking first (${id}).`,
+        });
+      }
+      return [id];
+    }
+  }
+
+  for (const base of folderFilterBases) {
+    let nextUrl = `${grcUrl}/api/applied-controls/?${new URLSearchParams({ ...base, page_size: '500' }).toString()}`;
+    const seen = new Set();
+    while (nextUrl) {
+      if (seen.has(nextUrl)) break;
+      seen.add(nextUrl);
+      const acRes = await grcFetch(nextUrl, {}, reqToken);
+      if (!acRes.ok) {
+        const errIn = await consumeGrcErrorBody(res, reqToken, acRes);
+        if (errIn.aborted) return null;
+        break;
+      }
+      const data = await acRes.json();
+      const results = Array.isArray(data.results) ? data.results : [];
+      const hits = results.filter(it => {
+        if (!inScopeFolder(it)) return false;
+        const ir = dsAppliedControlRefFromItem(it);
+        if (!ir) return false;
+        return tryVals.some(tv => matchesTry(it, tv) || dsComparableRefId(ir) === dsComparableRefId(tv));
+      });
+      if (hits.length) {
+        const id = String(hits[0].id || hits[0].uuid || '').trim();
+        if (hits.length > 1 && linkErrors) {
+          linkErrors.push({
+            ...ctx,
+            error: `Multiple applied controls match ref "${ref}" in folder (list scan) — linking first (${id}).`,
+          });
+        }
+        return id ? [id] : [];
+      }
+      const nxt = data.next;
+      nextUrl = typeof nxt === 'string' && nxt ? nxt : null;
+    }
+  }
+  return [];
+}
+
+function dsParseWorkbookToNormalizedRows(fileBuffer) {
+  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const sn = wb.SheetNames || [];
+  if (!sn.length) return { error: 'Workbook has no sheets.' };
+  const sheet = wb.Sheets[sn[0]];
+  const objects = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+  const rows = [];
+  for (const o of objects) {
+    const n = dsNormalizeImportRow(o);
+    if (!n.name) continue;
+    rows.push(n);
+  }
+  return { sheetName: sn[0], rows };
+}
+
 // ==========================================
 // Gemini Analysis API
 // ==========================================
@@ -2229,9 +3316,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       // For page requests (HTML or SPA routes), redirect to login
-      const SPA_PREFIXES = ['/', '/dashboard', '/audit-sessions', '/audit-studio', '/controls-studio', '/merge-optimizer', '/policy-ingestion', '/org-contexts', '/prompts', '/file-collections', '/workbench', '/audit-log'];
-      const isSpaRoute = SPA_PREFIXES.some(p => url.pathname === p || (p !== '/' && url.pathname.startsWith(p + '/')));
-      if (isSpaRoute || url.pathname.endsWith('.html')) {
+      if (isAdminSpaPath(url.pathname) || url.pathname.endsWith('.html')) {
         res.writeHead(302, { 'Location': '/login.html' });
         res.end();
         return;
@@ -2252,6 +3337,847 @@ const server = http.createServer(async (req, res) => {
 
   // Extract local token for GRC-authenticated fetch calls
   const reqToken = getTokenFromRequest(req);
+
+  // ---- Data Studio: Excel preview (applied controls import path) ----
+  if (url.pathname === '/api/data-studio/preview-excel' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const { fileName, data } = body;
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      const lower = String(fileName || '').toLowerCase();
+      if (!lower.endsWith('.xlsx') && !lower.endsWith('.xls') && !lower.endsWith('.csv')) {
+        sendJSON(res, 400, { error: 'Only Excel (.xlsx, .xls) or CSV files are supported.' });
+        return;
+      }
+      let fileBuffer;
+      try {
+        fileBuffer = Buffer.from(data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 payload.' });
+        return;
+      }
+      if (!fileBuffer.length) {
+        sendJSON(res, 400, { error: 'Empty file.' });
+        return;
+      }
+      const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+      const sheetNames = wb.SheetNames || [];
+      if (!sheetNames.length) {
+        sendJSON(res, 400, { error: 'Workbook has no sheets.' });
+        return;
+      }
+      const firstSheet = sheetNames[0];
+      const sheet = wb.Sheets[firstSheet];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+      const headerRow = Array.isArray(rows[0]) ? rows[0] : [];
+      const headers = headerRow.map((h, i) => {
+        const s = h != null && String(h).trim() !== '' ? String(h).trim() : `Column ${i + 1}`;
+        return s;
+      });
+      const dataRows = rows.slice(1);
+      const previewLimit = 25;
+      const preview = dataRows.slice(0, previewLimit).map(row => {
+        const arr = Array.isArray(row) ? row : [];
+        const o = {};
+        headers.forEach((h, i) => {
+          o[h] = arr[i] != null && arr[i] !== '' ? arr[i] : '';
+        });
+        return o;
+      });
+      sendJSON(res, 200, {
+        success: true,
+        fileName: fileName || 'upload',
+        sheetNames,
+        activeSheet: firstSheet,
+        totalRows: dataRows.length,
+        previewHeaders: headers,
+        previewRowCount: preview.length,
+        preview,
+      });
+    } catch (err) {
+      console.error('[DataStudio] preview-excel:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to parse workbook.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/data-studio/create-audit' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const framework =
+        body.framework && typeof body.framework === 'string' ? body.framework.trim() : '';
+      const folder =
+        body.folder && typeof body.folder === 'string' ? body.folder.trim() : '';
+      const customName = body.name && typeof body.name === 'string' ? body.name.trim() : '';
+      const description =
+        body.description && typeof body.description === 'string'
+          ? body.description.trim()
+          : 'Created from Data Studio to host requirement-assessments for imported applied controls. RAs were auto-generated by GRC on insert (CISO Assistant ComplianceAssessment.create_requirement_assessments).';
+      const perimeter =
+        body.perimeter && typeof body.perimeter === 'string' ? body.perimeter.trim() : '';
+      const version = body.version && typeof body.version === 'string' ? body.version.trim() : '1.0';
+      const status = body.status && typeof body.status === 'string' ? body.status.trim() : 'in_progress';
+
+      if (!framework) {
+        sendJSON(res, 400, { error: 'framework (UUID) is required.' });
+        return;
+      }
+
+      // Resolve the framework name so we can build a sensible default audit name.
+      let frameworkName = '';
+      try {
+        const fwRes = await grcFetch(
+          `${GRC_API_URL}/api/frameworks/${encodeURIComponent(framework)}/`,
+          {},
+          reqToken
+        );
+        if (fwRes.ok) {
+          const fwData = await fwRes.json();
+          frameworkName = fwData.name || fwData.ref_id || '';
+        } else if (await finalizeGrcUpstreamError(res, reqToken, fwRes)) {
+          return;
+        }
+      } catch (_) { /* non-fatal — name is optional */ }
+
+      const localLinkErrors = [];
+      const newCA = await dsCreateComplianceAssessmentForFramework({
+        framework: { id: framework, name: frameworkName },
+        folder,
+        perimeter,
+        name: customName || null,
+        description,
+        version,
+        status,
+        grcUrl: GRC_API_URL,
+        reqToken,
+        res,
+        linkErrors: localLinkErrors,
+      });
+
+      if (!newCA) {
+        const last = localLinkErrors[localLinkErrors.length - 1];
+        sendJSON(res, 500, {
+          error: 'create-audit failed — could not POST /api/compliance-assessments/.',
+          attemptedFramework: framework,
+          frameworkName: frameworkName || null,
+          providedPerimeter: perimeter || null,
+          hint: 'CISO Assistant typically requires perimeter. Provide body.perimeter (UUID) or create a perimeter under your folder in GRC. The server will then auto-discover it.',
+          detail: last ? last.error : null,
+        });
+        return;
+      }
+
+      const newId = newCA.id || newCA.uuid;
+
+      // Confirm RAs were auto-generated by GRC on insert (give the DB a moment to commit).
+      let raCount = null;
+      try {
+        const raRes = await grcFetch(
+          `${GRC_API_URL}/api/requirement-assessments/?compliance_assessment=${encodeURIComponent(newId)}&page_size=1`,
+          {},
+          reqToken
+        );
+        if (raRes.ok) {
+          const d = await raRes.json();
+          if (typeof d.count === 'number') raCount = d.count;
+        }
+      } catch (_) { /* non-fatal */ }
+
+      console.log(
+        `[DataStudio] New CA ${newId} has ${raCount == null ? '?' : raCount} requirement-assessments auto-generated.`
+      );
+
+      sendJSON(res, 200, {
+        success: true,
+        id: newId,
+        name: newCA.name || customName || `${frameworkName || 'Framework'} – Controls Catalog`,
+        framework,
+        frameworkName: frameworkName || null,
+        folder: newCA.folder || folder || null,
+        perimeter: newCA.perimeter || perimeter || null,
+        version: newCA.version || version,
+        status: newCA.status || status,
+        raCount,
+        grcApi: GRC_API_URL,
+      });
+    } catch (err) {
+      console.error('[DataStudio] create-audit:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to create audit.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/data-studio/diagnose-grc-audits' && req.method === 'GET') {
+    try {
+      // 1) every compliance assessment + a small sample of its requirement-assessment ref_ids
+      const cas = await dsFetchAllComplianceAssessments(GRC_API_URL, reqToken, res);
+      if (cas === null) return; // response already finalized by helper
+
+      const audits = [];
+      for (const ca of cas) {
+        const caId = ca.id || ca.uuid;
+        if (!caId) continue;
+        const ras = await dsFetchAllRequirementAssessmentsForCA(caId, GRC_API_URL, reqToken, res);
+        if (ras === null) return;
+        let raRefIdsSample = [];
+        let auditRefIdsDistinct = 0;
+        if (ras.length) {
+          const built = await dsBuildRefIdToRAsMap(ras, GRC_API_URL, reqToken, res);
+          if (built === null) return;
+          auditRefIdsDistinct = built.auditRefIdsDistinct;
+          raRefIdsSample = (built.auditRefIdSample || []).slice(0, 30);
+        }
+        let frameworkInfo = null;
+        const fw = ca.framework;
+        if (fw && typeof fw === 'object') {
+          frameworkInfo = { id: fw.id || fw.uuid || null, name: fw.name || fw.ref_id || null };
+        } else if (fw && typeof fw === 'string') {
+          frameworkInfo = { id: fw, name: null };
+        }
+        audits.push({
+          id: caId,
+          name: ca.name || ca.basename || String(caId),
+          framework: frameworkInfo,
+          raCount: ras.length,
+          distinctRefIds: auditRefIdsDistinct,
+          raRefIdsSample,
+        });
+      }
+
+      // 2) every framework + a small sample of its requirement-node ref_ids
+      const frameworks = [];
+      let nextUrl = `${GRC_API_URL}/api/frameworks/?page_size=200`;
+      while (nextUrl) {
+        const r = await grcFetch(nextUrl, {}, reqToken);
+        if (!r.ok) {
+          if (await finalizeGrcUpstreamError(res, reqToken, r)) return;
+          break;
+        }
+        const d = await r.json();
+        frameworks.push(...(Array.isArray(d.results) ? d.results : []));
+        nextUrl = d.next || null;
+      }
+      const frameworkSummaries = [];
+      for (const fw of frameworks.slice(0, 50)) {
+        const fwId = fw.id || fw.uuid;
+        if (!fwId) continue;
+        let nodeRefIdsSample = [];
+        let requirementCount = 0;
+        try {
+          const nr = await grcFetch(
+            `${GRC_API_URL}/api/requirement-nodes/?framework=${encodeURIComponent(fwId)}&page_size=80`,
+            {},
+            reqToken
+          );
+          if (nr.ok) {
+            const nd = await nr.json();
+            requirementCount = typeof nd.count === 'number' ? nd.count : (Array.isArray(nd.results) ? nd.results.length : 0);
+            const refs = (Array.isArray(nd.results) ? nd.results : [])
+              .map(n => dsNormalizeRefId(n.ref_id || n.refId || ''))
+              .filter(Boolean);
+            nodeRefIdsSample = [...new Set(refs)].slice(0, 30);
+          }
+        } catch (_) { /* ignore per-framework fetch error */ }
+        frameworkSummaries.push({
+          id: fwId,
+          name: fw.name || fw.ref_id || String(fwId),
+          ref_id: fw.ref_id || null,
+          urn: fw.urn || null,
+          requirementCount,
+          nodeRefIdsSample,
+        });
+      }
+
+      sendJSON(res, 200, {
+        grcApi: GRC_API_URL,
+        totalComplianceAssessments: cas.length,
+        totalFrameworks: frameworks.length,
+        audits,
+        frameworks: frameworkSummaries,
+      });
+    } catch (err) {
+      console.error('[DataStudio] diagnose-grc-audits:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to diagnose GRC audits.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/data-studio/import-applied-controls' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const { fileName, data, folder, complianceAssessment } = body;
+      const linkOnly = body.linkOnly === true || body.mode === 'link_only';
+      // STEP 2 default: PATCH the existing requirement-assessment looked up by
+      // (compliance_assessment, requirement.ref_id). RAs are auto-generated by GRC
+      // when an audit is created (RequirementAssessment.bulk_create off the framework
+      // — see mhrsd_sync_to_grc.py and CISO Assistant models.py:6077-6110), so POSTing
+      // /api/requirement-assessments/ would produce duplicates of rows that already
+      // exist. Callers can opt back into POST-first by sending body.allowRaPost: true.
+      // body.skipRaPost: true is still honored as the explicit "PATCH-only" flag.
+      const preferPostFirst =
+        body.allowRaPost === true && body.skipRaPost !== true;
+      // Qyias assessable standards are 3 levels (e.g. 5.1.1) while MHRSD rows often use 4+ (5.1.1.1).
+      // Default ON: resolve those to the parent standard’s requirement assessment. Opt out: body.rollUpUnknownRefs === false.
+      const rollUpUnknownRefs = body.rollUpUnknownRefs !== false;
+      let complianceAssessmentId =
+        complianceAssessment && typeof complianceAssessment === 'string' && complianceAssessment.trim()
+          ? complianceAssessment.trim()
+          : null;
+      // Caller-supplied framework UUID for the auto-create-audit fallback. When set, we skip the
+      // expensive framework-scan and POST the new audit directly from this framework.
+      const explicitFrameworkUuid =
+        body.framework && typeof body.framework === 'string' && body.framework.trim()
+          ? body.framework.trim()
+          : null;
+      // Optional perimeter UUID to forward into the audit POST.
+      const explicitPerimeterUuid =
+        body.perimeter && typeof body.perimeter === 'string' && body.perimeter.trim()
+          ? body.perimeter.trim()
+          : null;
+      if (!folder || typeof folder !== 'string') {
+        sendJSON(res, 400, { error: 'folder (UUID) is required.' });
+        return;
+      }
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      const lower = String(fileName || '').toLowerCase();
+      if (!lower.endsWith('.xlsx') && !lower.endsWith('.xls') && !lower.endsWith('.csv')) {
+        sendJSON(res, 400, { error: 'Only Excel (.xlsx, .xls) or CSV files are supported.' });
+        return;
+      }
+      let fileBuffer;
+      try {
+        fileBuffer = Buffer.from(data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 payload.' });
+        return;
+      }
+      const parsed = dsParseWorkbookToNormalizedRows(fileBuffer);
+      if (parsed.error) {
+        sendJSON(res, 400, { error: parsed.error });
+        return;
+      }
+      const { rows, sheetName } = parsed;
+      const created = [];
+      const errors = [];
+
+      let raCountInCA = 0;
+      let raIndexedRefIds = 0;
+      let auditRefIdSample = [];
+      const linkErrors = [];
+      let complianceAssessmentName = null;
+      let complianceAssessmentAutoSelected = false;
+      let complianceAssessmentAutoCreated = false;
+      let autoCreatedFramework = null;
+      let autoCreatedFrameworkScore = null;
+
+      const rowsWantRefLink = rows.some(r => dsNormalizeRefId(r.ref_id));
+
+      const autoPickCa =
+        body.autoPickComplianceAssessment !== false &&
+        !complianceAssessmentId &&
+        rowsWantRefLink;
+
+      // Default ON: when no audit matches, auto-create one from the best framework so STEP 2 has something to PATCH.
+      // Opt out with body.autoCreateAuditIfMissing === false.
+      const autoCreateAuditEnabled =
+        body.autoCreateAuditIfMissing !== false && rowsWantRefLink;
+
+      if (autoPickCa) {
+        console.log('[DataStudio] autoPickComplianceAssessment: scanning GRC audits for best كود المتطلب match…');
+        const pick = await dsPickComplianceAssessmentForRows(rows, GRC_API_URL, reqToken, res);
+        if (pick === null) return;
+        if (pick.caId && pick.score > 0) {
+          complianceAssessmentId = pick.caId;
+          complianceAssessmentName = pick.caName;
+          complianceAssessmentAutoSelected = true;
+          console.log(
+            `[DataStudio] Auto-selected audit "${pick.caName}" (${pick.caId}) — ${pick.score}/${pick.rowsWithRef} sheet rows match requirement refs in this audit`
+          );
+        } else {
+          console.log(
+            `[DataStudio] Auto-pick found no audit with overlapping requirement refs (${pick.rowsWithRef} rows in sheet have كود المتطلب).`
+          );
+        }
+      }
+
+      // ─── Auto-create audit fallback ──────────────────────────
+      // No CA in scope, but we have rows with ref_ids. Two paths:
+      //   (a) Caller supplied body.framework → POST a placeholder audit from
+      //       THAT framework directly (skip the scan).
+      //   (b) Otherwise scan GRC frameworks and pick the one whose requirement
+      //       nodes overlap the sheet best.
+      // GRC's create_requirement_assessments() bulk-inserts one RA per
+      // requirement on insert, giving STEP 2 a target to PATCH.
+      // ─────────────────────────────────────────────────────────
+      if (!complianceAssessmentId && autoCreateAuditEnabled) {
+        let frameworkForAudit = null;
+        if (explicitFrameworkUuid) {
+          // Resolve framework name (best-effort) and skip the scan entirely.
+          let fwName = '';
+          try {
+            const fwRes = await grcFetch(
+              `${GRC_API_URL}/api/frameworks/${encodeURIComponent(explicitFrameworkUuid)}/`,
+              {},
+              reqToken
+            );
+            if (fwRes.ok) {
+              const fwData = await fwRes.json();
+              fwName = fwData.name || fwData.ref_id || '';
+            } else if (await finalizeGrcUpstreamError(res, reqToken, fwRes)) {
+              return;
+            }
+          } catch (_) { /* non-fatal — name is cosmetic */ }
+          frameworkForAudit = { id: explicitFrameworkUuid, name: fwName };
+          autoCreatedFramework = { id: explicitFrameworkUuid, name: fwName || null };
+          autoCreatedFrameworkScore = 'caller-specified';
+          console.log(
+            `[DataStudio] Using caller-supplied framework "${fwName || explicitFrameworkUuid}" for auto-create-audit (no scan).`
+          );
+        } else {
+          console.log('[DataStudio] No audit matched — scanning GRC frameworks to auto-create a host audit…');
+          const fwPick = await dsPickFrameworkForRows(rows, GRC_API_URL, reqToken, res);
+          if (fwPick === null) return;
+          if (fwPick.framework && fwPick.score > 0) {
+            frameworkForAudit = fwPick.framework;
+            autoCreatedFramework = {
+              id: fwPick.framework.id || fwPick.framework.uuid,
+              name: fwPick.framework.name || fwPick.framework.ref_id || null,
+            };
+            autoCreatedFrameworkScore = `${fwPick.score}/${fwPick.rowsWithRef}`;
+            console.log(
+              `[DataStudio] Best framework match: "${autoCreatedFramework.name || autoCreatedFramework.id}" (${fwPick.score}/${fwPick.rowsWithRef}). Creating audit…`
+            );
+          } else {
+            console.log(
+              `[DataStudio] No framework found whose requirement-node ref_ids overlap the sheet. STEP 2 will be skipped. Load the matching library into GRC, then re-run.`
+            );
+          }
+        }
+
+        if (frameworkForAudit) {
+          const newCA = await dsCreateComplianceAssessmentForFramework({
+            framework: frameworkForAudit,
+            folder,
+            perimeter: explicitPerimeterUuid,
+            name: typeof body.autoCreatedAuditName === 'string' && body.autoCreatedAuditName.trim()
+              ? body.autoCreatedAuditName.trim()
+              : null,
+            grcUrl: GRC_API_URL,
+            reqToken,
+            res,
+            linkErrors,
+          });
+          if (newCA) {
+            complianceAssessmentId = newCA.id || newCA.uuid;
+            complianceAssessmentName = newCA.name || `${autoCreatedFramework.name || 'Framework'} – Controls Catalog`;
+            complianceAssessmentAutoCreated = true;
+          } else {
+            console.warn(
+              `[DataStudio] Auto-create CA failed for framework "${autoCreatedFramework.name || autoCreatedFramework.id}". STEP 2 will be skipped — see linkErrors for the GRC response.`
+            );
+          }
+        }
+      }
+
+      if (linkOnly && !complianceAssessmentId) {
+        sendJSON(res, 400, {
+          error:
+            'linkOnly needs a compliance assessment: paste audit UUID, leave Auto-pick on so an existing audit can be selected, or leave Auto-create on so a host audit can be made from the best-matching framework (no framework matched in your GRC — load the library first).',
+        });
+        return;
+      }
+
+      if (complianceAssessmentId) {
+        const metaRes = await grcFetch(
+          `${GRC_API_URL}/api/compliance-assessments/${encodeURIComponent(complianceAssessmentId)}/`,
+          {},
+          reqToken
+        );
+        if (metaRes.ok) {
+          try {
+            const meta = await metaRes.json();
+            complianceAssessmentName = meta.name || meta.basename || '';
+          } catch (_) { /* ignore */ }
+        }
+        console.log(
+          `[DataStudio] RA linking: audit ${complianceAssessmentId} — per row: POST requirement-assessment when possible, else PATCH existing RA`
+        );
+      } else if (rowsWantRefLink) {
+        console.log('[DataStudio] No complianceAssessment in request — creating controls only (folder + name); add audit UUID to link RAs.');
+      }
+
+      console.log(
+        '[DataStudio] import:',
+        linkOnly ? 'linkOnly (match existing controls + link RAs)' : 'create applied controls',
+        '| complianceAssessmentId =',
+        complianceAssessmentId || '(none)'
+      );
+
+      const excelRefIdSample = [...new Set(rows.map(r => dsNormalizeRefId(r.ref_id)).filter(Boolean))].sort().slice(0, 40);
+
+      let refToRasMap = null;
+      if (complianceAssessmentId) {
+        const allRAsForCa = await dsFetchAllRequirementAssessmentsForCA(
+          complianceAssessmentId,
+          GRC_API_URL,
+          reqToken,
+          res
+        );
+        if (allRAsForCa === null) return;
+        raCountInCA = allRAsForCa.length;
+        const built = await dsBuildRefIdToRAsMap(allRAsForCa, GRC_API_URL, reqToken, res);
+        if (built === null) return;
+        refToRasMap = built.refToRas;
+        raIndexedRefIds = built.auditRefIdsDistinct;
+        auditRefIdSample = built.auditRefIdSample;
+        console.log(
+          `[DataStudio] RA index: ${raIndexedRefIds} distinct refs from ${raCountInCA} requirement assessments`
+        );
+      }
+
+      let linkedAtCreateCount = 0;
+      let rowsWithResolvedRa = 0;
+      let linkedByPostCount = 0;
+      let linkedByPatchCount = 0;
+      const raAppliedControlsCache = new Map();
+
+      // ─── ROW-BY-ROW EXECUTION ────────────────────────────────
+      // For every Excel row we do the full POST-then-LINK cycle in order
+      // before moving on to the next row:
+      //   STEP 1 — POST /api/applied-controls/ (or, in linkOnly mode,
+      //            match an existing one by ref_id) → capture UUID.
+      //   STEP 2 — using that fresh UUID immediately POST
+      //            /api/requirement-assessments/ to attach the requirement
+      //            (falls back to PATCH on an existing RA).
+      // Each row appends one entry to phase1[] (the UUID resolution) and,
+      // when a compliance assessment is in scope and a UUID was obtained,
+      // one entry to phase2[] (the RA link). This keeps both arrays for
+      // reporting while preserving the row-by-row execution order so a
+      // partial run leaves earlier rows fully committed (control + RA).
+      // ─────────────────────────────────────────────────────────
+      const phase1 = [];
+      const phase2 = [];
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const rowCtx = { row: i + 2, ref_id: row.ref_id || '', name: row.name || '' };
+
+        // STEP 1 — resolve applied-control UUID for this row
+        let controlId = null;
+        let createdMode = null;
+
+        if (!row.name) {
+          const eMsg = 'Missing control name (اسم الكنترول / name)';
+          errors.push({ row: rowCtx.row, ref_id: rowCtx.ref_id, error: eMsg });
+          phase1.push({ ...rowCtx, controlId: null, mode: linkOnly ? 'match_skipped' : 'create_skipped', error: eMsg });
+          continue;
+        }
+
+        if (linkOnly) {
+          if (!dsNormalizeRefId(row.ref_id)) {
+            const eMsg = 'linkOnly requires كود المتطلب / ref_id on each row to find the existing applied control.';
+            errors.push({ row: rowCtx.row, ref_id: rowCtx.ref_id, error: eMsg });
+            phase1.push({ ...rowCtx, controlId: null, mode: 'match_failed', error: eMsg });
+            continue;
+          }
+          const foundAc = await dsFindAppliedControlIdForRefInFolder(
+            folder,
+            row.ref_id,
+            GRC_API_URL,
+            reqToken,
+            res,
+            linkErrors,
+            { row: rowCtx.row, ref_id: rowCtx.ref_id }
+          );
+          if (foundAc === null) return;
+          if (!foundAc.length) {
+            const eMsg = 'No applied control in this folder with ref_id matching كود المتطلب (tried API filters + folder list scan).';
+            errors.push({ row: rowCtx.row, ref_id: rowCtx.ref_id, error: eMsg });
+            phase1.push({ ...rowCtx, controlId: null, mode: 'match_failed', error: eMsg });
+            continue;
+          }
+          controlId = foundAc[0];
+          createdMode = 'matched_existing';
+          created.push({ ref_id: row.ref_id, id: controlId, name: row.name, linkOnly: true });
+          phase1.push({ ...rowCtx, controlId, mode: createdMode });
+          console.log(
+            `[DataStudio] Row ${rowCtx.row} (${rowCtx.ref_id || '—'}) STEP 1 matched existing control ${controlId}`
+          );
+        } else {
+          const grcBody = {
+            name: row.name,
+            description: row.description || '',
+            folder,
+            status: 'to_do',
+            csf_function: 'govern',
+          };
+          if (row.ref_id) grcBody.ref_id = row.ref_id;
+
+          try {
+            const grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(grcBody),
+            }, reqToken);
+            if (!grcRes.ok) {
+              const errIn = await consumeGrcErrorBody(res, reqToken, grcRes);
+              if (errIn.aborted) return;
+              const eMsg = errIn.errText.slice(0, 800);
+              errors.push({ row: rowCtx.row, ref_id: rowCtx.ref_id, error: eMsg });
+              phase1.push({ ...rowCtx, controlId: null, mode: 'create_failed', error: eMsg });
+              continue;
+            }
+            const createdObj = await grcRes.json();
+            controlId = createdObj.id || createdObj.uuid;
+            createdMode = 'created';
+            created.push({ ref_id: row.ref_id, id: controlId, name: row.name });
+            phase1.push({ ...rowCtx, controlId, mode: createdMode });
+            console.log(
+              `[DataStudio] Row ${rowCtx.row} (${rowCtx.ref_id || '—'}) STEP 1 POST applied-control → UUID ${controlId}`
+            );
+          } catch (e) {
+            errors.push({ row: rowCtx.row, ref_id: rowCtx.ref_id, error: e.message });
+            phase1.push({ ...rowCtx, controlId: null, mode: 'create_failed', error: e.message });
+            continue;
+          }
+        }
+
+        // STEP 2 — immediately link this row's UUID to its requirement assessment
+        if (!controlId || !complianceAssessmentId || !dsNormalizeRefId(row.ref_id)) {
+          continue;
+        }
+        try {
+          const lr = await dsRowLinkAppliedControlToRequirement({
+            controlId,
+            complianceAssessmentId,
+            rowRef: row.ref_id,
+            refToRasMap,
+            grcUrl: GRC_API_URL,
+            reqToken,
+            res,
+            linkErrors,
+            ctx: { row: rowCtx.row, ref_id: rowCtx.ref_id, rollUpUnknownRefs },
+            raControlsCache: raAppliedControlsCache,
+            preferPostFirst,
+            raIndexedRefIds,
+          });
+          if (lr.aborted) return;
+          if (lr.linked) {
+            linkedAtCreateCount++;
+            rowsWithResolvedRa++;
+            if (lr.mode === 'post_requirement_assessment') linkedByPostCount++;
+            else if (lr.mode === 'patch_existing_ra') linkedByPatchCount++;
+          }
+          phase2.push({
+            row: rowCtx.row,
+            ref_id: rowCtx.ref_id,
+            controlId,
+            raId: lr.raId || null,
+            linked: !!lr.linked,
+            mode: lr.mode || null,
+          });
+          console.log(
+            `[DataStudio] Row ${rowCtx.row} (${rowCtx.ref_id}) STEP 2 ${
+              lr.linked
+                ? `linked control ${controlId} ⇄ RA ${lr.raId || '?'} (${lr.mode})`
+                : 'link FAILED — see linkErrors'
+            }`
+          );
+        } catch (e) {
+          errors.push({ row: rowCtx.row, ref_id: rowCtx.ref_id || '', error: e.message });
+          phase2.push({
+            row: rowCtx.row,
+            ref_id: rowCtx.ref_id,
+            controlId,
+            raId: null,
+            linked: false,
+            mode: null,
+            error: e.message,
+          });
+        }
+      }
+
+      const phase1Resolved = phase1.filter(p => p.controlId).length;
+      console.log(
+        `[DataStudio] Done: ${phase1Resolved}/${phase1.length} rows resolved a control UUID; ${linkedAtCreateCount}/${phase2.length} linked (POST: ${linkedByPostCount}, PATCH: ${linkedByPatchCount}).`
+      );
+      if (!complianceAssessmentId) {
+        console.log('[DataStudio] STEP 2 skipped on every row: no compliance assessment in scope (controls created without RA links).');
+      }
+
+      const refIdOverlapCount = rowsWithResolvedRa;
+
+      const linkWarnings = [];
+      if (!complianceAssessmentId && rowsWantRefLink) {
+        if (autoCreateAuditEnabled) {
+          linkWarnings.push(
+            'Auto-create-audit was on but no GRC framework had requirement-node ref_ids overlapping this sheet — load the matching library into GRC, then re-run.'
+          );
+        } else if (autoPickCa) {
+          linkWarnings.push(
+            'Auto-pick did not find a GRC audit whose requirement refs overlap this sheet, and auto-create is disabled. Enable Auto-create or paste an audit UUID.'
+          );
+        } else {
+          linkWarnings.push(
+            'No audit UUID, auto-pick disabled, auto-create disabled — controls were created without requirement assessment links. Enable Auto-create or paste an audit UUID.'
+          );
+        }
+      }
+      if (complianceAssessmentAutoCreated && complianceAssessmentId) {
+        linkWarnings.push(
+          `Auto-created host audit "${complianceAssessmentName}" (${complianceAssessmentId}) from framework "${(autoCreatedFramework && autoCreatedFramework.name) || (autoCreatedFramework && autoCreatedFramework.id) || '?'}" — requirement-assessments were auto-generated by GRC and STEP 2 is PATCHing them.`
+        );
+      } else if (complianceAssessmentId && complianceAssessmentName) {
+        linkWarnings.push(`Requirement links use audit: ${complianceAssessmentName} (${complianceAssessmentId})`);
+      }
+      if (linkOnly) {
+        linkWarnings.push(
+          preferPostFirst
+            ? 'linkOnly: matched existing applied controls by ref_id; per row: POST requirement-assessment when allowRaPost is set, else PATCH existing RA.'
+            : 'linkOnly: matched existing applied controls by ref_id; per row: PATCH the existing RA (compliance_assessment + requirement.ref_id) to attach the control. No new RAs are created.'
+        );
+      }
+      if (!preferPostFirst && complianceAssessmentId) {
+        linkWarnings.push(
+          'STEP 2 mode: PATCH-only on existing requirement-assessments (RAs are auto-generated by GRC when an audit is created — see CISO Assistant ComplianceAssessment.create_requirement_assessments).'
+        );
+      }
+      if (rollUpUnknownRefs) {
+        linkWarnings.push(
+          'Requirement ref roll-up is ON: fully numeric dotted codes (e.g. 5.1.1.1) link to the nearest parent ref that exists on the audit (e.g. 5.1.1). Send rollUpUnknownRefs: false to disable.'
+        );
+      }
+
+      const newControlsCount = linkOnly ? 0 : created.filter(c => !c.linkOnly).length;
+      const matchedExistingCount = linkOnly ? created.length : 0;
+
+      const phase2Attempted = phase2.length;
+      const phase2LinkErrors = phase2.filter(p => !p.linked).length;
+
+      const step2Desc = preferPostFirst
+        ? 'STEP 2 per row — POST /api/requirement-assessments/ using STEP 1 UUID, fallback PATCH existing RA (allowRaPost mode — may create duplicates of GRC-auto-generated RAs)'
+        : 'STEP 2 per row — PATCH the existing /api/requirement-assessments/ found by (compliance_assessment, requirement.ref_id) to attach the STEP 1 UUID (no RA POSTs — matches mhrsd_sync_to_grc.py and CISO Assistant data model)';
+
+      const phases = {
+        executionMode: 'row_by_row',
+        description:
+          'Each row runs STEP 1 (POST applied control / match existing) → STEP 2 (PATCH the existing requirement-assessment to attach the STEP 1 UUID) before the next row starts.',
+        phase1: {
+          name: linkOnly
+            ? 'STEP 1 per row — match existing applied control by ref_id (no POST)'
+            : 'STEP 1 per row — POST /api/applied-controls/ and capture UUID',
+          attempted: phase1.length,
+          resolved: phase1Resolved,
+          failed: phase1.length - phase1Resolved,
+          mode: linkOnly ? 'match_existing' : 'create_new',
+        },
+        phase2: {
+          name: step2Desc,
+          ranAgainstAudit: complianceAssessmentId || null,
+          attempted: phase2Attempted,
+          linked: linkedAtCreateCount,
+          failed: complianceAssessmentId ? phase2LinkErrors : 0,
+          rollUpUnknownRefs,
+          skippedReason: complianceAssessmentId
+            ? null
+            : 'No compliance assessment in scope — STEP 2 skipped on every row. Only applied controls were imported (the --skip-link case in mhrsd_sync_to_grc.py).',
+          breakdown: {
+            via_patch_existing_ra: linkedByPatchCount,
+            via_post_requirement_assessment: linkedByPostCount,
+          },
+          raPostAllowed: preferPostFirst,
+        },
+      };
+
+      const importResponse = {
+        success: errors.length === 0,
+        linkOnly,
+        rollUpUnknownRefs,
+        preferPostRequirementAssessment: preferPostFirst,
+        autoPickComplianceAssessmentOffered: autoPickCa,
+        autoCreateAuditOffered: autoCreateAuditEnabled,
+        grcApi: GRC_API_URL,
+        sheetName,
+        totalParsed: rows.length,
+        complianceAssessmentId,
+        complianceAssessmentName: complianceAssessmentName || null,
+        complianceAssessmentAutoSelected,
+        complianceAssessmentAutoCreated,
+        autoCreatedFramework,
+        autoCreatedFrameworkScore,
+        linkWarnings,
+        createdCount: newControlsCount,
+        matchedExistingCount,
+        failedCount: errors.length,
+        linkedAtCreateCount,
+        linkedByPostCount,
+        linkedByPatchCount,
+        raCountInCA,
+        raIndexedRefIds,
+        refIdOverlapCount,
+        auditRefIdSample,
+        excelRefIdSample,
+        refIdMatchHint:
+          complianceAssessmentId && rowsWantRefLink && refIdOverlapCount === 0 && excelRefIdSample.length
+            ? 'No rows got a requirement assessment via requirement__ref_id for this audit. Check framework ref_ids in GRC match column كود المتطلب.'
+            : null,
+        created,
+        errors,
+        linkErrors: linkErrors.length ? linkErrors.slice(0, 200) : [],
+        phases,
+        phase1,
+        phase2,
+      };
+      console.log('[DataStudio] import-applied-controls response:', {
+        ...importResponse,
+        phase1: `[${phase1.length} entries]`,
+        phase2: `[${phase2.length} entries]`,
+        created: `[${created.length} entries]`,
+      });
+      sendJSON(res, 200, importResponse);
+    } catch (err) {
+      console.error('[DataStudio] import-applied-controls:', err);
+      sendJSON(res, 500, { error: err.message || 'Import failed.' });
+    }
+    return;
+  }
+
+  // ---- AI Tools: Policy update pipeline (F1–F4, Gemini) ----
+  if (url.pathname === '/api/ai-tools/policy-update-pipeline' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const apiKey = GEMINI_API_KEY || req.headers['x-api-key'];
+      if (!apiKey) {
+        sendJSON(res, 401, { error: 'API key not configured. Add GEMINI_API_KEY to .env file.' });
+        return;
+      }
+      const orgContext = body.orgContext != null ? String(body.orgContext) : '';
+      const regulationText = body.regulationText != null ? String(body.regulationText) : '';
+      const policies = Array.isArray(body.policies) ? body.policies : [];
+      if (!regulationText.trim()) {
+        sendJSON(res, 400, { error: 'regulationText is required.' });
+        return;
+      }
+      const result = await runPolicyUpdatePipeline({
+        apiKey,
+        orgContext,
+        regulationText,
+        policies,
+        overrides: body.overrides && typeof body.overrides === 'object' ? body.overrides : undefined,
+      });
+      sendJSON(res, 200, { success: true, data: result });
+    } catch (err) {
+      console.error('[PolicyUpdatePipeline]', err);
+      sendJSON(res, 500, { error: err.message || 'Pipeline failed.' });
+    }
+    return;
+  }
 
   // ---- Analyze API ----
   if (url.pathname === '/api/analyze' && req.method === 'POST') {
@@ -2288,26 +4214,26 @@ const server = http.createServer(async (req, res) => {
       }
 
       const result = await callGeminiAPIForSingle(requirement, prompt, apiKey, contextFiles);
-        let promptTemplateVersion = null;
-        try {
-          const stat = fs.statSync(promptTemplatePath);
-          promptTemplateVersion = stat.mtime.toISOString();
-        } catch (_) {}
-        const templateMeta = {
-          model: 'gemini-2.5-pro',
-          prompt_template: 'requirement-analyzer',
-          prompt_template_version: promptTemplateVersion
-        };
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, data: result, meta: templateMeta }));
+      let promptTemplateVersion = null;
+      try {
+        const stat = fs.statSync(promptTemplatePath);
+        promptTemplateVersion = stat.mtime.toISOString();
+      } catch (_) {}
+      const templateMeta = {
+        model: 'gemini-2.5-pro',
+        prompt_template: 'requirement-analyzer',
+        prompt_template_version: promptTemplateVersion
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data: result, meta: templateMeta }));
     } catch (error) {
       console.error('Analyze API Error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }
-        return;
-      }
-      
+    return;
+  }
+
   // ---- Controls Generation API ----
   if (url.pathname === '/api/controls/generate' && req.method === 'POST') {
     try {
@@ -2464,13 +4390,52 @@ const server = http.createServer(async (req, res) => {
   // ---- GRC Platform Proxy: Get compliance assessments ----
   if (url.pathname === '/api/grc/compliance-assessments' && req.method === 'GET') {
     try {
-      const grcRes = await grcFetch(`${GRC_API_URL}/api/compliance-assessments/`, {}, reqToken);
+      const qs = url.search || '';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/compliance-assessments/${qs}`, {}, reqToken);
       if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
       const data = await grcRes.json();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, results: data.results || data }));
     } catch (error) {
       console.error('[GRC] Compliance assessments error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ---- GRC Platform Proxy: Get / PATCH single applied control ----
+  const acItemMatch = url.pathname.match(/^\/api\/grc\/applied-controls\/([^/]+)$/);
+  if (acItemMatch && req.method === 'GET') {
+    try {
+      const acId = acItemMatch[1];
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/${acId}/`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data }));
+    } catch (error) {
+      console.error('[GRC] GET applied-control error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (acItemMatch && req.method === 'PATCH') {
+    try {
+      const acId = acItemMatch[1];
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/${acId}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data }));
+    } catch (error) {
+      console.error('[GRC] PATCH applied-control error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }
@@ -2638,11 +4603,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ---- GRC Platform Proxy: PATCH requirement assessment (link applied controls) ----
-  const raPatchMatch = url.pathname.match(/^\/api\/grc\/requirement-assessments\/([^/]+)$/);
-  if (raPatchMatch && req.method === 'PATCH') {
+  // ---- GRC Platform Proxy: GET / PATCH single requirement assessment ----
+  const raOneMatch = url.pathname.match(/^\/api\/grc\/requirement-assessments\/([^/]+)$/);
+  if (raOneMatch && req.method === 'GET') {
     try {
-      const raId = raPatchMatch[1];
+      const raId = raOneMatch[1];
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data }));
+    } catch (error) {
+      console.error('[GRC] GET requirement-assessment error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (raOneMatch && req.method === 'PATCH') {
+    try {
+      const raId = raOneMatch[1];
       const body = await parseBody(req);
       console.log(`[GRC] PATCH requirement-assessment ${raId}:`, JSON.stringify(body));
       const grcRes = await grcFetch(`${GRC_API_URL}/api/requirement-assessments/${raId}/`, {
@@ -2705,6 +4685,7 @@ const server = http.createServer(async (req, res) => {
             csf_function: c.csf_function || c.csfFunction || '',
             effort: effortMap[(c.effort || c.effort_estimate || 'M').toLowerCase()] || c.effort || 'M',
           };
+          if (c.ref_id) grcBody.ref_id = c.ref_id;
 
           // Only include folder if provided (otherwise GRC uses root folder)
           if (folder) grcBody.folder = folder;
@@ -5347,9 +7328,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- Client-side routes (serve admin.html for SPA pages) ----
-  const SPA_PREFIXES = ['/', '/dashboard', '/audit-sessions', '/audit-studio', '/controls-studio', '/merge-optimizer', '/policy-ingestion', '/org-contexts', '/prompts', '/file-collections', '/workbench', '/audit-log'];
-  const isSpaRoute = SPA_PREFIXES.some(p => url.pathname === p || (p !== '/' && url.pathname.startsWith(p + '/')));
-  if (isSpaRoute) {
+  if (isAdminSpaPath(url.pathname)) {
     serveStaticFile(res, path.join(__dirname, 'admin.html'));
     return;
   }
@@ -5373,6 +7352,7 @@ server.listen(PORT, () => {
 ║   Endpoints:                                              ║
 ║   • GET  /                        - Serve the app         ║
 ║   • POST /api/analyze             - Analyze requirements  ║
+║   • POST /api/ai-tools/policy-update-pipeline - F1–F4     ║
 ║   • GET  /api/collections         - List collections      ║
 ║   • POST /api/collections         - Create collection     ║
 ║   • DELETE /api/collections/:id   - Delete collection     ║

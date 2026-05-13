@@ -7,7 +7,7 @@
 
 ### 1. GRC Entity Data (via CISO Assistant API)
 
-**Source:** `https://grc.wathbah.dev`
+**Source:** `https://stage-hrsd.wathbahs.com`
 
 **Entities pulled:**
 - Frameworks (name, ref_id, description)
