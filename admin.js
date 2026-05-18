@@ -13590,12 +13590,14 @@ function initPolicyPipelineResultModalListeners() {
   const overlay = document.getElementById('pup-result-modal-overlay');
   const closeBtn = document.getElementById('pup-result-modal-close');
   const closeBtnFooter = document.getElementById('pup-result-modal-close-btn');
+  const confirmBtn = document.getElementById('pup-result-modal-confirm-btn');
   const copyBtn = document.getElementById('pup-result-modal-copy-json');
   if (!overlay || !document.body) return;
   policyUpdatePipelineResultModalWired = true;
   const close = () => closePolicyPipelineResultModal();
   if (closeBtn) closeBtn.addEventListener('click', close);
   if (closeBtnFooter) closeBtnFooter.addEventListener('click', close);
+  if (confirmBtn) confirmBtn.addEventListener('click', close);
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) close();
   });

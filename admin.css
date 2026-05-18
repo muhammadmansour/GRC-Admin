@@ -3907,6 +3907,18 @@
 .admin-modal.admin-modal-lg.pup-result-modal-shell.pup-result-modal-shell--expanded .pup-result-modal-body {
   max-height: calc(94vh - 200px);
 }
+.admin-modal-footer.pup-result-modal-footer {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.pup-result-modal-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .pup-result-top {
   display: flex;
   flex-wrap: wrap;
