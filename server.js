@@ -41,6 +41,13 @@ const GRC_API_URL = String(process.env.GRC_API_URL || 'https://grc-stage.wathbah
   .trim()
   .replace(/\/+$/, '');
 
+/** Browser-facing Muraji API origin (libraries + prompts). Set `MURAJI_API_URL` or `MURAJI_BASE_URL` in `.env`. */
+const MURAJI_API_URL = String(
+  process.env.MURAJI_API_URL || process.env.MURAJI_BASE_URL || 'https://muraji-stage.wathbahs.com',
+)
+  .trim()
+  .replace(/\/+$/, '');
+
 // ==========================================
 // Authentication (via GRC IAM)
 // ==========================================
@@ -3221,6 +3228,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  // ---- Bootstrap script: Muraji base URL from `.env` (load before admin.js / app.js / prompts.js) ----
+  if (req.method === 'GET' && url.pathname === '/client-env.js') {
+    const payload = Buffer.from(`window.__MURAJI_BASE_URL__=${JSON.stringify(MURAJI_API_URL)};\n`, 'utf8');
+    res.writeHead(200, {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Length': payload.length,
+    });
+    res.end(payload);
+    return;
+  }
 
   // ---- Auth: Login endpoint (via GRC IAM) ----
   if (url.pathname === '/api/auth/login' && req.method === 'POST') {
@@ -7348,6 +7367,9 @@ server.listen(PORT, () => {
 ║   Server running at: http://localhost:${PORT}               ║
 ║                                                           ║
 ║   Gemini API Key: ${apiKeyStatus.padEnd(36)}║
+║                                                           ║
+║   GRC API:    ${String(GRC_API_URL).slice(0, 44).padEnd(44)}║
+║   Muraji API: ${String(MURAJI_API_URL).slice(0, 44).padEnd(44)}║
 ║                                                           ║
 ║   Endpoints:                                              ║
 ║   • GET  /                        - Serve the app         ║

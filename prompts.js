@@ -3,7 +3,13 @@ if (!document.cookie.split(';').some(c => c.trim().startsWith('wathba_token=')))
   window.location.replace('/login.html');
 }
 
-const MURAJI_BASE_URL = 'https://muraji-stage.wathbahs.com';
+const MURAJI_BASE_URL = (() => {
+  const raw =
+    typeof window !== 'undefined' && typeof window.__MURAJI_BASE_URL__ === 'string'
+      ? window.__MURAJI_BASE_URL__.trim()
+      : '';
+  return (raw || 'https://muraji-stage.wathbahs.com').replace(/\/+$/, '');
+})();
 const PROMPTS_API = `${MURAJI_BASE_URL}/api/prompts`;
 const LOCAL_PROMPTS_API = '/api/local-prompts';
 

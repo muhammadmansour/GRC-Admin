@@ -49,8 +49,14 @@ window.fetch = function adminPatchedFetch(input, init) {
   });
 };
 
-/** Muraji (libraries + prompts API) — stage host */
-const MURAJI_BASE_URL = 'https://muraji-stage.wathbahs.com';
+/** Muraji origin from server `/client-env.js` (see `MURAJI_API_URL` / `MURAJI_BASE_URL` in `.env`) */
+const MURAJI_BASE_URL = (() => {
+  const raw =
+    typeof window !== 'undefined' && typeof window.__MURAJI_BASE_URL__ === 'string'
+      ? window.__MURAJI_BASE_URL__.trim()
+      : '';
+  return (raw || 'https://muraji-stage.wathbahs.com').replace(/\/+$/, '');
+})();
 
 const API = {
   sessions: '/api/chat/sessions',
