@@ -11499,6 +11499,8 @@ let policyUpdatePipelineWired = false;
 let pupOrgContextsCache = [];
 let policyUpdatePipelineLastRaw = null;
 let policyUpdatePipelineResultModalWired = false;
+/** Active fetch: abort to cancel in-flight policy pipeline run from the UI */
+let pupPipelineAbortController = null;
 /** Policy update pipeline wizard: 0 organisation, 1 regulation, 2 policies */
 let pupStepperIndex = 0;
 const PUP_PIPELINE_LAST_STEP = 2;
@@ -12894,7 +12896,7 @@ async function handleDataStudioFile(file) {
 }
 
 /**
- * Same shape as server.js buildOrgProfileText — plain text for F1 org context (no "missing profile" filler).
+ * Same shape as server.js buildOrgProfileText — plain text for pipeline org context (no "missing profile" filler).
  */
 function formatOrgProfileTextForPipeline(orgContext) {
   if (!orgContext) return '';
@@ -12921,7 +12923,7 @@ function formatOrgProfileTextForPipeline(orgContext) {
   return p.join('\n');
 }
 
-/** Sample bundles: organisation + regulation + policies aligned per sector so F1 scope matches the excerpt. Values = `#pup-preset-select`. */
+/** Sample bundles: organisation + regulation + policies aligned per sector so scope matches the excerpt. Values = `#pup-preset-select`. */
 const PUP_DATASETS = Object.freeze({
   'python-demo': {
     orgContext:
@@ -13222,6 +13224,12 @@ function syncPolicyPipelineStepperDOM() {
   const fill = document.getElementById('pup-stepper-progress-fill');
   if (fill) fill.style.width = `${((idx + 1) / total) * 100}%`;
 
+  const cap = document.getElementById('pup-step-caption');
+  if (cap) {
+    const names = ['Organisation', 'Regulation', 'Policies'];
+    cap.textContent = `Step ${idx + 1} of ${total} · ${names[idx] || ''}`;
+  }
+
   const back = document.getElementById('pup-step-back');
   const next = document.getElementById('pup-step-next');
   const run = document.getElementById('pup-run-btn');
@@ -13266,6 +13274,20 @@ function loadPolicyUpdatePipelinePage() {
   refreshPolicyUpdatePipelineOrgDropdown().catch(() => {});
 }
 
+function setPupPipelineLoadingOverlay(visible) {
+  const ov = document.getElementById('pup-pipeline-loading-overlay');
+  if (!ov) return;
+  if (visible) {
+    ov.hidden = false;
+    ov.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('pup-pipeline-overlay-open');
+  } else {
+    ov.hidden = true;
+    ov.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('pup-pipeline-overlay-open');
+  }
+}
+
 function initPolicyUpdatePipeline() {
   if (policyUpdatePipelineWired) return;
   const orgSel = document.getElementById('pup-org-select');
@@ -13273,8 +13295,16 @@ function initPolicyUpdatePipeline() {
   const backBtn = document.getElementById('pup-step-back');
   const nextBtn = document.getElementById('pup-step-next');
   const presetSel = document.getElementById('pup-preset-select');
+  const cancelPipelineBtn = document.getElementById('pup-pipeline-cancel-btn');
+  const fillSevBtn = document.getElementById('pup-f4-fill-defaults');
   if (!orgSel || !runBtn || !backBtn || !nextBtn || !presetSel) return;
   policyUpdatePipelineWired = true;
+  if (fillSevBtn) fillSevBtn.addEventListener('click', () => fillPupSeveritySuggestedDefinitions());
+  if (cancelPipelineBtn) {
+    cancelPipelineBtn.addEventListener('click', () => {
+      if (pupPipelineAbortController) pupPipelineAbortController.abort();
+    });
+  }
   runBtn.addEventListener('click', () => runPolicyUpdatePipeline());
   orgSel.addEventListener('change', () => onPolicyUpdatePipelineOrgSelect());
   presetSel.addEventListener('change', () => onPupPresetSelectChange());
@@ -13285,10 +13315,10 @@ function initPolicyUpdatePipeline() {
 }
 
 const PUP_STAGE_LABELS = {
-  f1: 'F1 — Relevance',
-  f2: 'F2 — Extract policy points',
-  f3: 'F3 — Policy match',
-  f4: 'F4 — Impact',
+  f1: 'Relevance',
+  f2: 'Extract policy points',
+  f3: 'Policy match',
+  f4: 'Impact',
 };
 
 function pupStageLabel(sr) {
@@ -13301,13 +13331,13 @@ function pupSkippedStagesNote(data) {
   if (f1 && typeof f1 === 'object' && typeof f1.is_relevant !== 'boolean') return null;
   const s = String(data.stage_reached || '').toLowerCase();
   if (s === 'f1') {
-    return 'Stages F2–F4 were not executed because this regulation was classified as not relevant to the organisation.';
+    return 'Later stages were not run because this regulation was classified as not relevant to the organisation.';
   }
   if (s === 'f2') {
-    return 'Stages F3 and F4 were not run — no policy points could be extracted from the regulation text.';
+    return 'Matching and impact were not run — no policy points could be extracted from the regulation text.';
   }
   if (s === 'f3') {
-    return 'Stage F4 was not run — no regulation points matched your indexed policies above the similarity threshold.';
+    return 'Impact analysis was not run — no regulation points matched your indexed policies above the similarity threshold.';
   }
   return null;
 }
@@ -13341,14 +13371,14 @@ function renderPolicyPipelineResultHtml(data) {
   const f1 = data.f1_relevance;
   if (f1 && typeof f1 === 'object') {
     parts.push('<div class="pup-result-panel">');
-    parts.push('<h4>F1 · Relevance assessment</h4>');
+    parts.push('<h4>Relevance assessment</h4>');
     if (typeof f1.is_relevant !== 'boolean') {
       parts.push(
-        '<p class="pup-result-note">The model did not return valid F1 JSON (expected a boolean <code>is_relevant</code>). ' +
+        '<p class="pup-result-note">The model did not return valid JSON (expected a boolean <code>is_relevant</code>). ' +
           'This is <strong>not</strong> the same as “not relevant” — the API response was empty, blocked, or unparsable. Retry, shorten inputs, or check your Gemini key / model.</p>'
       );
       parts.push(
-        '<p class="pup-result-meta">The pipeline runs in order — <strong>F1 → F2 → F3 → F4</strong>. Later stages never start unless F1 returns valid JSON ' +
+        '<p class="pup-result-meta">The pipeline runs in order — <strong>relevance → extraction → matching → impact</strong>. Later stages do not start unless the relevance step returns valid JSON ' +
           'with <code>is_relevant: true</code> (truncated Arabic/English responses often die mid-<code>"reasoning"</code> string).</p>'
       );
       if (f1.raw_response != null && String(f1.raw_response).trim()) {
@@ -13389,7 +13419,7 @@ function renderPolicyPipelineResultHtml(data) {
   if (f2 && typeof f2 === 'object') {
     const pts = Array.isArray(f2.policy_points) ? f2.policy_points : [];
     parts.push('<div class="pup-result-panel">');
-    parts.push('<h4>F2 · Regulation points extracted</h4>');
+    parts.push('<h4>Regulation points extracted</h4>');
     if (!pts.length) {
       parts.push('<p class="pup-result-prose">No policy points returned.</p>');
     } else {
@@ -13412,7 +13442,7 @@ function renderPolicyPipelineResultHtml(data) {
   const f3 = data.f3_matches;
   if (Array.isArray(f3)) {
     parts.push('<div class="pup-result-panel">');
-    parts.push('<h4>F3 · Embeddings vs policies</h4>');
+    parts.push('<h4>Policy matching</h4>');
     if (!f3.length) {
       parts.push('<p class="pup-result-prose">No points to match.</p>');
     } else {
@@ -13447,7 +13477,7 @@ function renderPolicyPipelineResultHtml(data) {
   const f4 = data.f4_impacts;
   if (Array.isArray(f4) && f4.length) {
     parts.push('<div class="pup-result-panel">');
-    parts.push('<h4>F4 · Impact analysis</h4>');
+    parts.push('<h4>Impact analysis</h4>');
     for (const block of f4) {
       parts.push('<div class="pup-result-point-card">');
       parts.push('<div class="pup-result-point-head">' + esc(block.point_id || '') + '</div>');
@@ -13516,6 +13546,15 @@ function closePolicyPipelineResultModal() {
   overlay.classList.remove('active');
   overlay.setAttribute('aria-hidden', 'true');
   document.body.style.overflow = '';
+  const shell = overlay.querySelector('.pup-result-modal-shell');
+  const expandBtn = document.getElementById('pup-result-modal-expand');
+  if (shell) shell.classList.remove('pup-result-modal-shell--expanded');
+  if (expandBtn) {
+    expandBtn.classList.remove('is-expanded');
+    expandBtn.setAttribute('aria-expanded', 'false');
+    expandBtn.setAttribute('aria-label', 'Expand result');
+    expandBtn.title = 'Expand';
+  }
 }
 
 function openPolicyPipelineResultModal(data) {
@@ -13523,6 +13562,15 @@ function openPolicyPipelineResultModal(data) {
   const bodyEl = document.getElementById('pup-result-modal-body');
   const titleEl = document.getElementById('pup-result-modal-title');
   if (!overlay || !bodyEl) return;
+  const shell = overlay.querySelector('.pup-result-modal-shell');
+  const expandBtn = document.getElementById('pup-result-modal-expand');
+  if (shell) shell.classList.remove('pup-result-modal-shell--expanded');
+  if (expandBtn) {
+    expandBtn.classList.remove('is-expanded');
+    expandBtn.setAttribute('aria-expanded', 'false');
+    expandBtn.setAttribute('aria-label', 'Expand result');
+    expandBtn.title = 'Expand';
+  }
   policyUpdatePipelineLastRaw = data;
   if (titleEl) {
     titleEl.textContent =
@@ -13568,6 +13616,61 @@ function initPolicyPipelineResultModalListeners() {
       }
     });
   }
+  const expandBtn = document.getElementById('pup-result-modal-expand');
+  const shell = document.querySelector('#pup-result-modal-overlay .pup-result-modal-shell');
+  if (expandBtn && shell) {
+    expandBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const on = shell.classList.toggle('pup-result-modal-shell--expanded');
+      expandBtn.classList.toggle('is-expanded', on);
+      expandBtn.setAttribute('aria-expanded', on ? 'true' : 'false');
+      expandBtn.setAttribute('aria-label', on ? 'Shrink result' : 'Expand result');
+      expandBtn.title = on ? 'Shrink' : 'Expand';
+    });
+  }
+}
+
+/** Suggested severity rubric for the policy pipeline UI (optional one-click fill). "None" stays empty — add text only if you want a custom definition. */
+const PUP_SEVERITY_SUGGESTED_DEFINITIONS = {
+  critical:
+    'Regulatory or business-stopping exposure: immediate compliance failure, prohibition on processing, or severe remediation obligations; policy change is mandatory before relying on current controls.',
+  high:
+    'Material gap affecting current operations, customer contracts, or audit and regulatory posture; remediate on an accelerated timeline.',
+  medium: 'Meaningful gap with moderate exposure; schedule policy updates through the normal change process.',
+  low: 'Minor clarification or tightening, or low residual risk if unchanged in the near term.',
+};
+
+function fillPupSeveritySuggestedDefinitions() {
+  const map = [
+    ['pup-f4-sev-critical', PUP_SEVERITY_SUGGESTED_DEFINITIONS.critical],
+    ['pup-f4-sev-high', PUP_SEVERITY_SUGGESTED_DEFINITIONS.high],
+    ['pup-f4-sev-medium', PUP_SEVERITY_SUGGESTED_DEFINITIONS.medium],
+    ['pup-f4-sev-low', PUP_SEVERITY_SUGGESTED_DEFINITIONS.low],
+  ];
+  for (const [id, text] of map) {
+    const el = document.getElementById(id);
+    if (el) el.value = text;
+  }
+  const noneEl = document.getElementById('pup-f4-sev-none');
+  if (noneEl) noneEl.value = '';
+  toast('success', 'Definitions filled', 'You can edit any level before running the pipeline.');
+}
+
+function collectPupF4SeverityDefinitions() {
+  const ids = [
+    ['critical', 'pup-f4-sev-critical'],
+    ['high', 'pup-f4-sev-high'],
+    ['medium', 'pup-f4-sev-medium'],
+    ['low', 'pup-f4-sev-low'],
+    ['none', 'pup-f4-sev-none'],
+  ];
+  const out = {};
+  for (const [key, id] of ids) {
+    const el = document.getElementById(id);
+    const t = el ? String(el.value || '').trim() : '';
+    if (t) out[key] = t;
+  }
+  return out;
 }
 
 async function runPolicyUpdatePipeline() {
@@ -13575,7 +13678,7 @@ async function runPolicyUpdatePipeline() {
   const regEl = document.getElementById('pup-regulation');
   const polEl = document.getElementById('pup-policies-json');
   const outEl = document.getElementById('pup-result');
-  const statusEl = document.getElementById('pup-status');
+  const stepperCard = document.querySelector('#page-policy-update-pipeline .pup-stepper-card--modern');
   const btn = document.getElementById('pup-run-btn');
   const stepBack = document.getElementById('pup-step-back');
   const stepNext = document.getElementById('pup-step-next');
@@ -13602,7 +13705,10 @@ async function runPolicyUpdatePipeline() {
   btn.disabled = true;
   if (stepBack) stepBack.disabled = true;
   if (stepNext) stepNext.disabled = true;
-  if (statusEl) statusEl.textContent = 'Running F1–F4…';
+  pupPipelineAbortController = new AbortController();
+  const { signal } = pupPipelineAbortController;
+  setPupPipelineLoadingOverlay(true);
+  if (stepperCard) stepperCard.setAttribute('aria-busy', 'true');
   if (outEl) {
     outEl.style.display = 'none';
     outEl.textContent = '';
@@ -13612,10 +13718,12 @@ async function runPolicyUpdatePipeline() {
     const r = await fetch('/api/ai-tools/policy-update-pipeline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal,
       body: JSON.stringify({
         orgContext: orgEl ? orgEl.value : '',
         regulationText,
         policies,
+        f4SeverityDefinitions: collectPupF4SeverityDefinitions(),
       }),
     });
     const j = await r.json().catch(() => ({}));
@@ -13628,6 +13736,11 @@ async function runPolicyUpdatePipeline() {
     openPolicyPipelineResultModal(payload);
     toast('success', 'Pipeline finished', `Stage: ${payload.stage_reached || 'done'}`);
   } catch (e) {
+    if (e && e.name === 'AbortError') {
+      toast('info', 'Cancelled', 'Pipeline request was cancelled. The server may still finish processing.');
+      closePolicyPipelineResultModal();
+      return;
+    }
     console.error('[Policy update pipeline]', e);
     closePolicyPipelineResultModal();
     if (outEl) {
@@ -13636,10 +13749,12 @@ async function runPolicyUpdatePipeline() {
     }
     toast('error', 'Pipeline failed', e.message || '');
   } finally {
+    pupPipelineAbortController = null;
     btn.disabled = false;
     if (stepNext) stepNext.disabled = false;
     syncPolicyPipelineStepperDOM();
-    if (statusEl) statusEl.textContent = '';
+    setPupPipelineLoadingOverlay(false);
+    if (stepperCard) stepperCard.removeAttribute('aria-busy');
   }
 }
 

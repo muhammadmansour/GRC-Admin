@@ -4702,12 +4702,17 @@ const server = http.createServer(async (req, res) => {
         sendJSON(res, 400, { error: 'regulationText is required.' });
         return;
       }
+      const f4SeverityDefinitions =
+        body.f4SeverityDefinitions && typeof body.f4SeverityDefinitions === 'object'
+          ? body.f4SeverityDefinitions
+          : undefined;
       const result = await runPolicyUpdatePipeline({
         apiKey,
         orgContext,
         regulationText,
         policies,
         overrides: body.overrides && typeof body.overrides === 'object' ? body.overrides : undefined,
+        f4SeverityDefinitions,
       });
       sendJSON(res, 200, { success: true, data: result });
     } catch (err) {

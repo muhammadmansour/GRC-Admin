@@ -20,6 +20,11 @@ const DEFAULTS = {
   f2ChunkOverlap: 1000,
   f3SimilarityThreshold: 0.4,
   excerptLen: 500,
+  /**
+   * Gemini 2.5 thinking models reject thinkingBudget 0 and may require a positive budget.
+   * Set to null in overrides to omit thinkingConfig (e.g. non-thinking models).
+   */
+  geminiThinkingBudget: 8192,
 };
 
 function policyPipelineLogsEnabled() {
@@ -105,6 +110,41 @@ Respond with ONLY a JSON object:
   ],
   "compliance_gap": "Description of the gap if the policy is not amended"
 }`;
+
+/** F4 severity labels (must match JSON "severity" enum). */
+const F4_SEVERITY_LEVELS = ['critical', 'high', 'medium', 'low', 'none'];
+
+/**
+ * @param {unknown} raw - e.g. from API body { critical?: string, high?: string, ... }
+ * @returns {Record<string, string>} only non-empty trimmed strings for keys the client supplied
+ */
+function normalizeF4SeverityDefinitions(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  const out = {};
+  for (const key of F4_SEVERITY_LEVELS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+    const v = raw[key];
+    if (v == null) continue;
+    const s = String(v).trim();
+    if (s) out[key] = s;
+  }
+  return out;
+}
+
+/**
+ * @param {Record<string, string>} defs - normalized map (subset of severity levels)
+ * @returns {string} F4 system instruction; identical to F4_SYSTEM when defs is empty
+ */
+function buildF4SystemInstruction(defs) {
+  const safe = defs && typeof defs === 'object' ? defs : {};
+  const order = F4_SEVERITY_LEVELS.filter((k) => safe[k]);
+  if (!order.length) return F4_SYSTEM;
+  const lines = order.map((k) => `- ${k}: ${safe[k]}`);
+  return `${F4_SYSTEM}
+
+Organisation-defined severity scale — use these meanings when choosing the "severity" field and align "severity_reasoning" with this scale:
+${lines.join('\n')}`;
+}
 
 function parseJsonFromLlm(raw) {
   if (raw == null) return { raw_response: String(raw) };
@@ -369,8 +409,9 @@ function cosineSimilarity(a, b) {
 
 /**
  * @param {{ includeJsonMimeType?: boolean, thinkingBudget?: number | null }} [genExtras]
- *   - thinkingBudget null/undefined: omit thinkingConfig (default for shared F2/F4 path).
- *   - thinkingBudget number: Gemini 2.x — 0 disables internal thinking budget so JSON/text can populate `parts`.
+ *   - thinkingBudget null/undefined: omit thinkingConfig (works for non-thinking models).
+ *   - thinkingBudget positive number: Gemini 2.5 thinking mode (required for thinking-only models).
+ *   Do not use 0 — the API returns 400 "Budget 0 is invalid" on thinking-only models.
  */
 async function geminiGenerateContent(apiKey, modelId, userText, systemInstruction, maxTokens, temperature, genExtras = {}) {
   const includeJsonMime = genExtras.includeJsonMimeType !== false;
@@ -442,8 +483,8 @@ async function geminiGenerateContent(apiKey, modelId, userText, systemInstructio
   return extractGeminiTextOrThrow(data, txt);
 }
 
-async function geminiJson(apiKey, modelId, systemPrompt, userText, maxTokens, temperature) {
-  const raw = await geminiGenerateContent(apiKey, modelId, userText, systemPrompt, maxTokens, temperature);
+async function geminiJson(apiKey, modelId, systemPrompt, userText, maxTokens, temperature, genExtras = {}) {
+  const raw = await geminiGenerateContent(apiKey, modelId, userText, systemPrompt, maxTokens, temperature, genExtras);
   return parseJsonFromLlm(raw);
 }
 
@@ -522,15 +563,16 @@ function matchPolicyPointsToStore(policyPoints, policyRows, threshold, excerptLe
 async function f1Relevance(apiKey, cfg, orgContext, regulationText) {
   const excerpt = regulationText.slice(0, cfg.f1ExcerptLimit);
   const user = `=== ORGANISATION CONTEXT ===\n${orgContext}\n\n=== REGULATION EXCERPT ===\n${excerpt}`;
-  /** F1 needs headroom — low maxOutputTokens can truncate JSON mid-field (esp. bilingual / long excerpts). */
-  /** Same argument order as geminiJson/F2: user payload first, system instruction second. */
-  /** JSON MIME + thinking-heavy models intermittently yield empty `parts`; retry plain text then parse. */
-  const attempts = [
-    { includeJsonMimeType: true, thinkingBudget: 0 },
-    { includeJsonMimeType: true, thinkingBudget: null },
-    { includeJsonMimeType: false, thinkingBudget: 0 },
-    { includeJsonMimeType: false, thinkingBudget: null },
-  ];
+  /** JSON MIME + thinking models: try positive thinking budget first, then omit (for non-thinking models). */
+  const tb = cfg.geminiThinkingBudget;
+  const thinkingVariants =
+    tb != null && typeof tb === 'number' ? [tb, null] : [null];
+  const attempts = [];
+  for (const thinkingBudget of thinkingVariants) {
+    for (const includeJsonMimeType of [true, false]) {
+      attempts.push({ includeJsonMimeType, thinkingBudget });
+    }
+  }
 
   const runId = cfg._pupRunId ?? null;
   let lastErr;
@@ -642,7 +684,11 @@ async function f2Summarize(apiKey, cfg, regulationText) {
   const allPoints = [];
   for (let i = 0; i < chunks.length; i++) {
     const user = `=== REGULATION TEXT (part ${i + 1}/${chunks.length}) ===\n${chunks[i]}`;
-    const result = await geminiJson(apiKey, cfg.reasoningModel, F2_SYSTEM, user, 8192, 0.15);
+    const f2Extras = {};
+    if (cfg.geminiThinkingBudget != null && typeof cfg.geminiThinkingBudget === 'number') {
+      f2Extras.thinkingBudget = cfg.geminiThinkingBudget;
+    }
+    const result = await geminiJson(apiKey, cfg.reasoningModel, F2_SYSTEM, user, 8192, 0.15, f2Extras);
     const pts = result.policy_points;
     const took = Array.isArray(pts) ? pts.length : 0;
     policyPipelineLog({
@@ -685,7 +731,8 @@ async function f4Impact(apiKey, cfg, ragMatchesWithPoints) {
       const user =
         `=== NEW REGULATION POINT ===\n${item.point_text}\n\n` +
         `=== EXISTING POLICY (${match.policy_title}) ===\n${match.content_excerpt}`;
-      const analysis = await geminiJson(apiKey, cfg.fastModel, F4_SYSTEM, user, 2048, 0.15);
+      const system = cfg.f4SystemInstruction || F4_SYSTEM;
+      const analysis = await geminiJson(apiKey, cfg.fastModel, system, user, 2048, 0.15);
       impacts.push({
         policy_id: match.policy_id,
         policy_title: match.policy_title,
@@ -714,10 +761,13 @@ async function f4Impact(apiKey, cfg, ragMatchesWithPoints) {
  * @param {string} opts.regulationText
  * @param {Array<{ id: string, title: string, content: string }>} opts.policies
  * @param {object} [opts.overrides] - optional model names / thresholds
+ * @param {object} [opts.f4SeverityDefinitions] - optional per-level impact rubric (critical/high/medium/low/none); empty values ignored
  */
 async function runPolicyUpdatePipeline(opts) {
   const apiKey = opts.apiKey;
   if (!apiKey) throw new Error('apiKey is required');
+
+  const f4SevDefs = normalizeF4SeverityDefinitions(opts.f4SeverityDefinitions);
 
   const cfg = {
     reasoningModel: opts.overrides?.reasoningModel || DEFAULTS.reasoningModel,
@@ -729,6 +779,11 @@ async function runPolicyUpdatePipeline(opts) {
     f2ChunkOverlap: opts.overrides?.f2ChunkOverlap ?? DEFAULTS.f2ChunkOverlap,
     f3SimilarityThreshold: opts.overrides?.f3SimilarityThreshold ?? DEFAULTS.f3SimilarityThreshold,
     excerptLen: opts.overrides?.excerptLen ?? DEFAULTS.excerptLen,
+    geminiThinkingBudget:
+      opts.overrides && Object.prototype.hasOwnProperty.call(opts.overrides, 'geminiThinkingBudget')
+        ? opts.overrides.geminiThinkingBudget
+        : DEFAULTS.geminiThinkingBudget,
+    f4SystemInstruction: buildF4SystemInstruction(f4SevDefs),
   };
 
   const runId = `pup_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -753,6 +808,7 @@ async function runPolicyUpdatePipeline(opts) {
     fastModel: cfg.fastModel,
     embeddingModel: cfg.embeddingModel,
     hasOverrides: !!(opts.overrides && typeof opts.overrides === 'object'),
+    f4SeverityDefinitionLevels: Object.keys(f4SevDefs).length,
   });
 
   // Embed all organisation policies once (same as wathbah_grc upload_policies → query)
@@ -904,4 +960,6 @@ module.exports = {
   DEFAULTS,
   parseJsonFromLlm,
   cosineSimilarity,
+  normalizeF4SeverityDefinitions,
+  buildF4SystemInstruction,
 };
