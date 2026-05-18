@@ -3,7 +3,8 @@ if (!document.cookie.split(';').some(c => c.trim().startsWith('wathba_token=')))
   window.location.replace('/login.html');
 }
 
-const PROMPTS_API = 'https://muraji-api.wathbah.dev/api/prompts';
+const MURAJI_BASE_URL = 'https://muraji-stage.wathbahs.com';
+const PROMPTS_API = `${MURAJI_BASE_URL}/api/prompts`;
 const LOCAL_PROMPTS_API = '/api/local-prompts';
 
 const promptsList = document.getElementById('prompts-list');

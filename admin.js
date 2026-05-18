@@ -49,12 +49,15 @@ window.fetch = function adminPatchedFetch(input, init) {
   });
 };
 
+/** Muraji (libraries + prompts API) — stage host */
+const MURAJI_BASE_URL = 'https://muraji-stage.wathbahs.com';
+
 const API = {
   sessions: '/api/chat/sessions',
   collections: '/api/collections',
   localPrompts: '/api/local-prompts',
-  prompts: 'https://muraji-api.wathbah.dev/api/prompts',
-  libraries: 'https://muraji-api.wathbah.dev/api/libraries',
+  prompts: `${MURAJI_BASE_URL}/api/prompts`,
+  libraries: `${MURAJI_BASE_URL}/api/libraries`,
   orgContexts: '/api/org-contexts',
   csSessions: '/api/cs-sessions',
   controlsGenerate: '/api/controls/generate',
@@ -3229,7 +3232,7 @@ if (orgSearch) {
 
 // ─── Prompts Page ────────────────────────────────────────────
 
-const PROMPTS_API_URL = 'https://muraji-api.wathbah.dev/api/prompts';
+const PROMPTS_API_URL = `${MURAJI_BASE_URL}/api/prompts`;
 const LOCAL_PROMPTS_URL = '/api/local-prompts';
 const PROMPTS_HIDDEN_IDS = ['64d28cc6-e8c2-4de1-8842-e1f9c65e9173'];
 
@@ -9098,7 +9101,7 @@ let wbAdminUser = 'admin';
   } catch (_) {}
 })();
 
-const MURAJI_API = 'https://muraji-api.wathbah.dev/api/libraries';
+const MURAJI_API = `${MURAJI_BASE_URL}/api/libraries`;
 let wbLibraries = [];
 let wbCurrentLibrary = null;
 let wbCurrentNode = null;
