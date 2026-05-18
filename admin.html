@@ -100,6 +100,18 @@
           </div>
         </div>
 
+        <button class="sidebar-section-toggle" data-section="legislative-updates">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2H12V4H4V2ZM3 5H13V14C13 14.6 12.6 15 12 15H4C3.4 15 3 14.6 3 14V5ZM5 8H11M5 11H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          LEGISLATIVE UPDATES
+          <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <div class="sidebar-section" id="section-legislative-updates">
+          <button class="sidebar-item" data-page="legislative-updates">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1L2 4V8C2 11.3 4.7 14.3 8 15C11.3 14.3 14 11.3 14 8V4L8 1Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 5V8.5L10.5 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Legislative updates
+          </button>
+        </div>
+
         <button class="sidebar-section-toggle" data-section="auditlog">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H10L13 5V14H3V2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 2V5H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 8H11M5 10.5H9M5 13H7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
           AUDIT LOG
@@ -1118,6 +1130,23 @@
             </div>
             <div class="fc-stats-grid" id="fc-stats"><!-- Populated by JS --></div>
             <div id="fc-collections-list"><!-- Populated by JS --></div>
+          </div>
+        </section>
+
+        <!-- =================== LEGISLATIVE UPDATES =================== -->
+        <section class="admin-page" id="page-legislative-updates">
+          <div class="page-container">
+            <div class="page-header">
+              <div>
+                <h1 class="page-title">Legislative updates</h1>
+                <p class="page-subtitle">Track regulatory changes and align organisational policies</p>
+              </div>
+            </div>
+            <div class="admin-card">
+              <p class="lu-placeholder-text" style="margin:0;color:var(--admin-text-muted, #64748b);line-height:1.6">
+                This area is for legislative and regulatory update workflows. Use <strong>Policy update pipeline</strong> under Studio to run impact analysis on new regulation text against your policy library.
+              </p>
+            </div>
           </div>
         </section>
 

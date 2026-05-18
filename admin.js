@@ -93,6 +93,7 @@ const PAGE_NAMES = {
   'prompts': 'Prompts',
   'file-collections': 'File Collections',
   'workbench': 'Workbench',
+  'legislative-updates': 'Legislative updates',
   'audit-log': 'Audit Log',
 };
 const VALID_PAGES = Object.keys(PAGE_NAMES);
@@ -145,6 +146,7 @@ function navigateTo(page, pushState = true, subId = null) {
   if (page === 'data-studio') loadDataStudioPage();
   if (page === 'policy-update-pipeline') loadPolicyUpdatePipelinePage();
   if (page === 'workbench') loadWorkbench(subId);
+  if (page === 'legislative-updates') loadLegislativeUpdatesPage();
   if (page === 'audit-log') loadAuditLog(subId);
 
   // Scroll to top
@@ -9292,6 +9294,10 @@ function wbShowView(view) {
     if (searchWrap) searchWrap.style.display = view === 'tree' ? '' : 'none';
     document.querySelectorAll('.wb-view-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   }
+}
+
+function loadLegislativeUpdatesPage() {
+  /* Placeholder: extend with feeds, tracked instruments, or links to policy pipeline. */
 }
 
 async function loadWorkbench(subId) {

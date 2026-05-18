@@ -155,6 +155,7 @@ const ADMIN_SPA_ROUTE_PREFIXES = [
   '/prompts',
   '/file-collections',
   '/workbench',
+  '/legislative-updates',
   '/audit-log',
 ];
 
