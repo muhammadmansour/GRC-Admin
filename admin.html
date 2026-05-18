@@ -106,9 +106,13 @@
           <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         </button>
         <div class="sidebar-section" id="section-legislative-updates">
-          <button class="sidebar-item" data-page="legislative-updates">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1L2 4V8C2 11.3 4.7 14.3 8 15C11.3 14.3 14 11.3 14 8V4L8 1Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 5V8.5L10.5 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Legislative updates
+          <button class="sidebar-item" data-page="legislative-internal-sources">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2H12V4H4V2ZM3 5H13V14C13 14.6 12.6 15 12 15H4C3.4 15 3 14.6 3 14V5ZM5 8H11M5 11H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Internal sources
+          </button>
+          <button class="sidebar-item" data-page="legislative-external-sources">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1C4.1 1 1 4.1 1 8C1 11.9 4.1 15 8 15C11.9 15 15 11.9 15 8C15 4.1 11.9 1 8 1Z" stroke="currentColor" stroke-width="1.5"/><path d="M1 8H15M8 1C9.7 2.7 10.5 5.3 10.5 8C10.5 10.7 9.7 13.3 8 15C6.3 13.3 5.5 10.7 5.5 8C5.5 5.3 6.3 2.7 8 1Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            External sources
           </button>
         </div>
 
@@ -1133,19 +1137,73 @@
           </div>
         </section>
 
-        <!-- =================== LEGISLATIVE UPDATES =================== -->
-        <section class="admin-page" id="page-legislative-updates">
-          <div class="page-container">
-            <div class="page-header">
-              <div>
-                <h1 class="page-title">Legislative updates</h1>
-                <p class="page-subtitle">Track regulatory changes and align organisational policies</p>
+        <!-- =================== LEGISLATIVE — INTERNAL SOURCES =================== -->
+        <section class="admin-page lu-page" id="page-legislative-internal-sources">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header page-header-row">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">Internal sources</h1>
+                <p class="page-subtitle">Upload and manage legislative documents in your organisation bucket</p>
               </div>
+              <button type="button" class="btn-admin-primary lu-btn-add-source" id="lu-add-source-btn">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3V13M3 8H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                Add source
+              </button>
+            </header>
+
+            <div class="admin-card lu-panel">
+              <div class="lu-panel-head">
+                <span class="lu-bucket-pill" id="lu-bucket-hint" hidden>
+                  <span class="lu-bucket-k">Bucket</span>
+                  <span class="lu-bucket-v" id="lu-bucket-value"></span>
+                </span>
+              </div>
+              <div id="lu-internal-loading" class="lu-loading lu-loading-panel" style="display:none">
+                <div class="spinner"></div>
+                <span>Loading sources…</span>
+              </div>
+              <div id="lu-internal-empty" class="lu-empty-state" style="display:none">
+                <div class="lu-empty-icon" aria-hidden="true">
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8M14 2L20 8M14 2V8H20" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
+                <p class="lu-empty-title">No sources yet</p>
+                <p class="lu-empty-desc">Add PDFs, Word, or other reference files. They are stored securely in your GCS bucket and listed here.</p>
+              </div>
+              <div class="lu-table-shell" id="lu-internal-table-wrap" style="display:none">
+                <table class="lu-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Description</th>
+                      <th>File</th>
+                      <th>Uploaded by</th>
+                      <th>Date</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="lu-internal-tbody"></tbody>
+                </table>
+              </div>
+              <p class="lu-error" id="lu-internal-error" role="alert" style="display:none"></p>
             </div>
-            <div class="admin-card">
-              <p class="lu-placeholder-text" style="margin:0;color:var(--admin-text-muted, #64748b);line-height:1.6">
-                This area is for legislative and regulatory update workflows. Use <strong>Policy update pipeline</strong> under Studio to run impact analysis on new regulation text against your policy library.
-              </p>
+          </div>
+        </section>
+
+        <!-- =================== LEGISLATIVE — EXTERNAL SOURCES =================== -->
+        <section class="admin-page lu-page" id="page-legislative-external-sources">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">External sources</h1>
+                <p class="page-subtitle">Connectors and feeds for portals outside your organisation</p>
+              </div>
+            </header>
+            <div class="lu-external-card">
+              <div class="lu-external-inner">
+                <span class="lu-badge-soon">Coming soon</span>
+                <h2 class="lu-external-heading">External integrations</h2>
+                <p class="lu-external-copy">Plug in official gazettes, regulator APIs, and third-party legislative feeds. This space will let you subscribe and sync external sources alongside your internal library.</p>
+              </div>
             </div>
           </div>
         </section>
@@ -1825,6 +1883,43 @@
           <span class="btn-loading hidden">
             <svg class="spinner" width="14" height="14" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="2" stroke-opacity="0.3"/><path d="M9 2C13 2 16 5 16 9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             Saving...
+          </span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Legislative updates — add internal source -->
+  <div class="admin-modal-overlay" id="lu-add-modal-overlay" aria-hidden="true">
+    <div class="admin-modal lu-add-modal" role="dialog" aria-modal="true" aria-labelledby="lu-add-modal-title">
+      <div class="admin-modal-header">
+        <h3 class="admin-modal-title" id="lu-add-modal-title">Add source</h3>
+        <button type="button" class="admin-modal-close" id="lu-add-modal-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="admin-modal-body">
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-input-name">Name <span class="required">*</span></label>
+          <input type="text" class="admin-form-input" id="lu-input-name" placeholder="Source title" autocomplete="off">
+        </div>
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-input-description">Description</label>
+          <textarea class="admin-form-textarea" id="lu-input-description" rows="3" placeholder="Short description (optional)"></textarea>
+        </div>
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-input-file">File <span class="required">*</span></label>
+          <input type="file" class="admin-form-input" id="lu-input-file">
+        </div>
+        <p class="lu-modal-hint" id="lu-modal-error" style="display:none;color:var(--admin-danger,#b91c1c);margin:0;font-size:0.85rem"></p>
+      </div>
+      <div class="admin-modal-footer">
+        <button type="button" class="btn-admin-ghost" id="lu-add-modal-cancel">Cancel</button>
+        <button type="button" class="btn-admin-primary" id="lu-add-modal-submit">
+          <span class="btn-text">Upload</span>
+          <span class="btn-loading hidden" id="lu-add-modal-loading">
+            <svg class="spinner" width="14" height="14" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="2" stroke-opacity="0.3"/><path d="M9 2C13 2 16 5 16 9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            Uploading…
           </span>
         </button>
       </div>

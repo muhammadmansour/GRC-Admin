@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const { GoogleGenAI } = require('@google/genai');
 const Database = require('better-sqlite3');
@@ -38,6 +39,93 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // GRC Platform configuration
 const GRC_API_URL = (process.env.GRC_API_URL || 'https://grc.wathbah.dev').replace(/\/+$/, '');
+
+/** GCS bucket for legislative internal documents (override with GCS_LEGISLATIVE_BUCKET). Uses GOOGLE_APPLICATION_CREDENTIALS or default credentials. */
+const GCS_LEGISLATIVE_BUCKET_NAME = String(
+  process.env.GCS_LEGISLATIVE_BUCKET || 'local-legislative-updates-docs'
+).replace(/\/+$/, '');
+
+/** Lazy-init GCS client for legislative uploads (optional dependency at runtime). */
+let _legislativeGcsCache = null;
+function getLegislativeGcsClient() {
+  if (_legislativeGcsCache && _legislativeGcsCache.err)
+    return { ok: false, error: _legislativeGcsCache.err };
+  if (_legislativeGcsCache && _legislativeGcsCache.storage)
+    return { ok: true, storage: _legislativeGcsCache.storage };
+  try {
+    const { Storage } = require('@google-cloud/storage');
+    const storage = new Storage();
+    _legislativeGcsCache = { storage };
+    return { ok: true, storage };
+  } catch (e) {
+    const err = e.message || String(e);
+    _legislativeGcsCache = { err };
+    return { ok: false, error: `Google Cloud Storage: ${err}` };
+  }
+}
+
+function legislativeSafeObjectSegment(name) {
+  const base = path.basename(String(name || 'file')).replace(/[^a-zA-Z0-9._-]/g, '_');
+  return base.slice(0, 200) || 'file';
+}
+
+function legislativePublicUrl(bucketName, objectPath) {
+  const enc = objectPath
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  return `https://storage.googleapis.com/${bucketName}/${enc}`;
+}
+
+async function legislativeSignedDownloadUrl(storage, bucketName, objectPath) {
+  const [url] = await storage.bucket(bucketName).file(objectPath).getSignedUrl({
+    version: 'v4',
+    action: 'read',
+    expires: Date.now() + 60 * 60 * 1000,
+  });
+  return url;
+}
+
+/**
+ * Upload a buffer to GCS. Uses resumable upload + validation disabled to avoid
+ * "Cannot call write after a stream was destroyed" (HashStreamValidator) seen
+ * with resumable:false on some Windows / Node versions. Falls back to temp-file upload.
+ */
+async function legislativeUploadBuffer(storage, bucketName, objectPath, buf, mimeType, customMeta) {
+  const bucket = storage.bucket(bucketName);
+  const file = bucket.file(objectPath);
+  const saveOpts = {
+    resumable: true,
+    validation: false,
+    timeout: 180000,
+    contentType: mimeType || 'application/octet-stream',
+    metadata: { metadata: customMeta },
+  };
+  try {
+    await file.save(buf, saveOpts);
+    return;
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    if (!/stream was destroyed|write after a stream was destroyed/i.test(msg)) throw err;
+    console.warn('[Legislative] save() stream error, retrying via temp file:', msg.slice(0, 120));
+  }
+  const tmpPath = path.join(os.tmpdir(), `legislative_${crypto.randomUUID()}.upload`);
+  fs.writeFileSync(tmpPath, buf);
+  try {
+    await bucket.upload(tmpPath, {
+      destination: objectPath,
+      gzip: false,
+      metadata: {
+        contentType: mimeType || 'application/octet-stream',
+        metadata: customMeta,
+      },
+    });
+  } finally {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (_) { /* ignore */ }
+  }
+}
 
 // ==========================================
 // Authentication (via GRC IAM)
@@ -155,6 +243,8 @@ const ADMIN_SPA_ROUTE_PREFIXES = [
   '/prompts',
   '/file-collections',
   '/workbench',
+  '/legislative-internal-sources',
+  '/legislative-external-sources',
   '/legislative-updates',
   '/audit-log',
 ];
@@ -339,6 +429,21 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_chain_org ON org_context_chain(org_context_id);
   CREATE INDEX IF NOT EXISTS idx_chain_fw  ON org_context_chain(framework_uuid);
+
+  CREATE TABLE IF NOT EXISTS legislative_internal_sources (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    original_file_name TEXT NOT NULL,
+    mime_type TEXT DEFAULT 'application/octet-stream',
+    size INTEGER DEFAULT 0,
+    gcs_bucket TEXT NOT NULL,
+    gcs_object_path TEXT NOT NULL,
+    public_url TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_legislative_internal_created ON legislative_internal_sources(created_at DESC);
 `);
 
 // Migrate policy_generation_history: add extraction_data and policy_uuid columns if missing
@@ -456,6 +561,19 @@ const dbUpdateOrgContext = db.prepare(`
 const dbDeleteOrgContext = db.prepare(`DELETE FROM org_contexts WHERE id = ?`);
 
 const dbUpdateOrgContextStoreId = db.prepare(`UPDATE org_contexts SET store_id = ?, updated_at = ? WHERE id = ?`);
+
+const dbInsertLegislativeInternal = db.prepare(`
+  INSERT INTO legislative_internal_sources (
+    id, name, description, original_file_name, mime_type, size,
+    gcs_bucket, gcs_object_path, public_url, uploaded_by, created_at
+  ) VALUES (
+    @id, @name, @description, @original_file_name, @mime_type, @size,
+    @gcs_bucket, @gcs_object_path, @public_url, @uploaded_by, @created_at
+  )
+`);
+const dbListLegislativeInternal = db.prepare(
+  `SELECT * FROM legislative_internal_sources ORDER BY datetime(created_at) DESC`
+);
 
 // ---- CISO Entity Cache DB helpers ----
 const dbGetCachedEntity = db.prepare(`SELECT * FROM ciso_entity_cache WHERE id = ? AND entity_type = ?`);
@@ -4687,6 +4805,152 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ---- Legislative updates: internal sources (GCS + SQLite) ----
+  if (url.pathname === '/api/legislative-updates/internal-sources' && req.method === 'GET') {
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) {
+        sendJSON(res, 401, { error: 'Unauthorized.' });
+        return;
+      }
+      const rows = dbListLegislativeInternal.all();
+      const gcs = getLegislativeGcsClient();
+      const sources = [];
+      for (const row of rows) {
+        let download_url = row.public_url;
+        if (gcs.ok) {
+          try {
+            download_url = await legislativeSignedDownloadUrl(
+              gcs.storage,
+              row.gcs_bucket,
+              row.gcs_object_path
+            );
+          } catch (sigErr) {
+            console.warn('[Legislative] signed URL:', sigErr.message);
+          }
+        }
+        sources.push({
+          id: row.id,
+          name: row.name,
+          description: row.description,
+          original_file_name: row.original_file_name,
+          mime_type: row.mime_type,
+          size: row.size,
+          gcs_bucket: row.gcs_bucket,
+          uploaded_by: row.uploaded_by,
+          created_at: row.created_at,
+          download_url,
+        });
+      }
+      sendJSON(res, 200, { success: true, sources, bucket: GCS_LEGISLATIVE_BUCKET_NAME });
+    } catch (err) {
+      console.error('[Legislative] list:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to list sources.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/legislative-updates/internal-sources' && req.method === 'POST') {
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) {
+        sendJSON(res, 401, { error: 'Unauthorized.' });
+        return;
+      }
+      const gcs = getLegislativeGcsClient();
+      if (!gcs.ok) {
+        sendJSON(res, 503, {
+          error: gcs.error,
+          hint: 'Install @google-cloud/storage and set GOOGLE_APPLICATION_CREDENTIALS (or run on GCP with a service account that can sign URLs and write to the bucket).',
+        });
+        return;
+      }
+      const body = await parseBody(req);
+      const name = String(body.name || '').trim();
+      const description = String(body.description != null ? body.description : '').trim();
+      const fileName = String(body.fileName || body.originalName || '').trim();
+      const mimeType = String(body.mimeType || 'application/octet-stream').trim();
+      if (!name) {
+        sendJSON(res, 400, { error: 'name is required.' });
+        return;
+      }
+      if (!body.data || typeof body.data !== 'string') {
+        sendJSON(res, 400, { error: 'File data (base64) is required.' });
+        return;
+      }
+      let buf;
+      try {
+        buf = Buffer.from(body.data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 file payload.' });
+        return;
+      }
+      const MAX_LEGISLATIVE_FILE = 50 * 1024 * 1024;
+      if (!buf.length) {
+        sendJSON(res, 400, { error: 'Empty file.' });
+        return;
+      }
+      if (buf.length > MAX_LEGISLATIVE_FILE) {
+        sendJSON(res, 400, { error: 'File too large (max 50 MB).' });
+        return;
+      }
+
+      const id = crypto.randomUUID();
+      const safeSeg = legislativeSafeObjectSegment(fileName || 'document');
+      const objectPath = `internal/${id}/${safeSeg}`;
+      const bucketName = GCS_LEGISLATIVE_BUCKET_NAME;
+      const file = gcs.storage.bucket(bucketName).file(objectPath);
+
+      await legislativeUploadBuffer(
+        gcs.storage,
+        bucketName,
+        objectPath,
+        buf,
+        mimeType || 'application/octet-stream',
+        { uploaded_by: session.username, source_name: name }
+      );
+
+      const publicUrl = legislativePublicUrl(bucketName, objectPath);
+      const createdAt = new Date().toISOString();
+      const meta = {
+        id,
+        name,
+        description,
+        original_file_name: fileName || safeSeg,
+        mime_type: mimeType || 'application/octet-stream',
+        size: buf.length,
+        gcs_bucket: bucketName,
+        gcs_object_path: objectPath,
+        public_url: publicUrl,
+        uploaded_by: session.username,
+        created_at: createdAt,
+      };
+
+      try {
+        dbInsertLegislativeInternal.run(meta);
+      } catch (dbErr) {
+        try {
+          await file.delete({ ignoreNotFound: true });
+        } catch (_) { /* ignore */ }
+        throw dbErr;
+      }
+
+      let download_url = publicUrl;
+      try {
+        download_url = await legislativeSignedDownloadUrl(gcs.storage, bucketName, objectPath);
+      } catch (_) { /* keep publicUrl */ }
+
+      sendJSON(res, 201, {
+        success: true,
+        source: { ...meta, download_url },
+      });
+    } catch (err) {
+      console.error('[Legislative] upload:', err);
+      sendJSON(res, 500, { error: err.message || 'Upload failed.' });
+    }
+    return;
+  }
+
   // ---- AI Tools: Policy update pipeline (F1–F4, Gemini) ----
   if (url.pathname === '/api/ai-tools/policy-update-pipeline' && req.method === 'POST') {
     try {
@@ -8191,6 +8455,7 @@ server.listen(PORT, () => {
 ║   • GET  /                        - Serve the app         ║
 ║   • POST /api/analyze             - Analyze requirements  ║
 ║   • POST /api/ai-tools/policy-update-pipeline - F1–F4     ║
+║   • GET/POST /api/legislative-updates/internal-sources      ║
 ║   • GET  /api/collections         - List collections      ║
 ║   • POST /api/collections         - Create collection     ║
 ║   • DELETE /api/collections/:id   - Delete collection     ║

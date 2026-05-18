@@ -93,7 +93,8 @@ const PAGE_NAMES = {
   'prompts': 'Prompts',
   'file-collections': 'File Collections',
   'workbench': 'Workbench',
-  'legislative-updates': 'Legislative updates',
+  'legislative-internal-sources': 'Internal sources',
+  'legislative-external-sources': 'External sources',
   'audit-log': 'Audit Log',
 };
 const VALID_PAGES = Object.keys(PAGE_NAMES);
@@ -146,7 +147,8 @@ function navigateTo(page, pushState = true, subId = null) {
   if (page === 'data-studio') loadDataStudioPage();
   if (page === 'policy-update-pipeline') loadPolicyUpdatePipelinePage();
   if (page === 'workbench') loadWorkbench(subId);
-  if (page === 'legislative-updates') loadLegislativeUpdatesPage();
+  if (page === 'legislative-internal-sources') loadLegislativeInternalSourcesPage();
+  if (page === 'legislative-external-sources') loadLegislativeExternalSourcesPage();
   if (page === 'audit-log') loadAuditLog(subId);
 
   // Scroll to top
@@ -174,7 +176,10 @@ window.addEventListener('popstate', (e) => {
 // Parse page + optional sub-ID from URL pathname
 function parseRoute() {
   const parts = window.location.pathname.replace(/^\//, '').split('/');
-  const page = (parts[0] && VALID_PAGES.includes(parts[0])) ? parts[0] : 'dashboard';
+  const raw = parts[0] || '';
+  let page = 'dashboard';
+  if (raw === 'legislative-updates') page = 'legislative-internal-sources';
+  else if (raw && VALID_PAGES.includes(raw)) page = raw;
   const subId = parts[1] || null;
   return { page, subId };
 }
@@ -9296,8 +9301,197 @@ function wbShowView(view) {
   }
 }
 
-function loadLegislativeUpdatesPage() {
-  /* Placeholder: extend with feeds, tracked instruments, or links to policy pipeline. */
+let legislativeInternalPageWired = false;
+
+function openLuAddModal() {
+  const o = document.getElementById('lu-add-modal-overlay');
+  if (!o) return;
+  document.getElementById('lu-input-name').value = '';
+  document.getElementById('lu-input-description').value = '';
+  document.getElementById('lu-input-file').value = '';
+  const err = document.getElementById('lu-modal-error');
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  o.classList.add('active');
+  o.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLuAddModal() {
+  const o = document.getElementById('lu-add-modal-overlay');
+  if (!o) return;
+  o.classList.remove('active');
+  o.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+  const submit = document.getElementById('lu-add-modal-submit');
+  if (submit) {
+    const btnText = submit.querySelector('.btn-text');
+    const loading = document.getElementById('lu-add-modal-loading');
+    if (btnText) btnText.classList.remove('hidden');
+    if (loading) loading.classList.add('hidden');
+    submit.disabled = false;
+  }
+}
+
+function luFileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = r.result;
+      const i = typeof s === 'string' ? s.indexOf(',') : -1;
+      resolve(i >= 0 ? s.slice(i + 1) : '');
+    };
+    r.onerror = () => reject(new Error('Failed to read file'));
+    r.readAsDataURL(file);
+  });
+}
+
+function initLegislativeInternalPageListeners() {
+  const addBtn = document.getElementById('lu-add-source-btn');
+  const overlay = document.getElementById('lu-add-modal-overlay');
+  const closeBtn = document.getElementById('lu-add-modal-close');
+  const cancelBtn = document.getElementById('lu-add-modal-cancel');
+  const submitBtn = document.getElementById('lu-add-modal-submit');
+  if (addBtn) addBtn.addEventListener('click', () => openLuAddModal());
+  if (closeBtn) closeBtn.addEventListener('click', () => closeLuAddModal());
+  if (cancelBtn) cancelBtn.addEventListener('click', () => closeLuAddModal());
+  if (overlay) {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeLuAddModal();
+    });
+  }
+  if (submitBtn) {
+    submitBtn.addEventListener('click', async () => {
+      const err = document.getElementById('lu-modal-error');
+      const name = document.getElementById('lu-input-name').value.trim();
+      const description = document.getElementById('lu-input-description').value.trim();
+      const fileInput = document.getElementById('lu-input-file');
+      const file = fileInput.files && fileInput.files[0];
+      err.style.display = 'none';
+      err.textContent = '';
+      if (!name) {
+        err.textContent = 'Name is required.';
+        err.style.display = 'block';
+        return;
+      }
+      if (!file) {
+        err.textContent = 'Please choose a file.';
+        err.style.display = 'block';
+        return;
+      }
+      const btnText = submitBtn.querySelector('.btn-text');
+      const loading = document.getElementById('lu-add-modal-loading');
+      if (btnText) btnText.classList.add('hidden');
+      if (loading) loading.classList.remove('hidden');
+      submitBtn.disabled = true;
+      try {
+        const data = await luFileToBase64(file);
+        const res = await fetch('/api/legislative-updates/internal-sources', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name,
+            description,
+            fileName: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            data,
+          }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json.error || json.hint || res.statusText);
+        closeLuAddModal();
+        toast('success', 'Uploaded', 'Source saved to bucket.');
+        loadLegislativeInternalSourcesList();
+      } catch (e) {
+        err.textContent = e.message || String(e);
+        err.style.display = 'block';
+      } finally {
+        if (btnText) btnText.classList.remove('hidden');
+        if (loading) loading.classList.add('hidden');
+        submitBtn.disabled = false;
+      }
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const o = document.getElementById('lu-add-modal-overlay');
+    if (o && o.classList.contains('active')) closeLuAddModal();
+  });
+}
+
+async function loadLegislativeInternalSourcesList() {
+  const loadEl = document.getElementById('lu-internal-loading');
+  const emptyEl = document.getElementById('lu-internal-empty');
+  const wrap = document.getElementById('lu-internal-table-wrap');
+  const tbody = document.getElementById('lu-internal-tbody');
+  const errEl = document.getElementById('lu-internal-error');
+  const hint = document.getElementById('lu-bucket-hint');
+  if (!loadEl || !tbody) return;
+  if (errEl) {
+    errEl.style.display = 'none';
+    errEl.textContent = '';
+  }
+  loadEl.style.display = 'flex';
+  if (emptyEl) emptyEl.style.display = 'none';
+  if (wrap) wrap.style.display = 'none';
+  tbody.innerHTML = '';
+  try {
+    const res = await fetch('/api/legislative-updates/internal-sources');
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+    loadEl.style.display = 'none';
+    if (hint) {
+      const v = document.getElementById('lu-bucket-value');
+      if (json.bucket) {
+        if (v) v.textContent = json.bucket;
+        hint.removeAttribute('hidden');
+      } else {
+        if (v) v.textContent = '';
+        hint.setAttribute('hidden', '');
+      }
+    }
+    const sources = json.sources || [];
+    if (!sources.length) {
+      if (emptyEl) {
+        emptyEl.style.display = 'flex';
+      }
+      return;
+    }
+    if (emptyEl) emptyEl.style.display = 'none';
+    if (wrap) wrap.style.display = 'block';
+    tbody.innerHTML = sources.map((s) => {
+      const dateStr = s.created_at ? new Date(s.created_at).toLocaleString() : '—';
+      const href = s.download_url ? escapeHtml(s.download_url) : '';
+      return `<tr>
+        <td><span class="lu-cell-name">${escapeHtml(s.name)}</span></td>
+        <td class="lu-desc">${escapeHtml(s.description || '—')}</td>
+        <td>${escapeHtml(s.original_file_name || '')}</td>
+        <td>${escapeHtml(s.uploaded_by || '—')}</td>
+        <td>${escapeHtml(dateStr)}</td>
+        <td>${href ? `<a class="lu-link-download" href="${href}" target="_blank" rel="noopener noreferrer"><span>Download</span><svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M6 1V8M6 8L3 5M6 8L9 5M2 11H10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></a>` : '—'}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    loadEl.style.display = 'none';
+    if (errEl) {
+      errEl.textContent = e.message || String(e);
+      errEl.style.display = 'block';
+    }
+  }
+}
+
+function loadLegislativeExternalSourcesPage() {
+  /* Static placeholder until connectors ship */
+}
+
+function loadLegislativeInternalSourcesPage() {
+  if (!legislativeInternalPageWired) {
+    legislativeInternalPageWired = true;
+    initLegislativeInternalPageListeners();
+  }
+  loadLegislativeInternalSourcesList();
 }
 
 async function loadWorkbench(subId) {
