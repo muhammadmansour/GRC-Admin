@@ -7,6 +7,9 @@
  *   node scripts/dump-singleview-sql.js --pg            # PostgreSQL flavour
  *   node scripts/dump-singleview-sql.js --id <uuid>     # pin a specific id
  *   node scripts/dump-singleview-sql.js --db <path>     # read a different sqlite file
+ *   node scripts/dump-singleview-sql.js --out seed.sql  # write directly (avoids
+ *                                                        PowerShell adding a BOM
+ *                                                        when you use `>` to redirect)
  *
  * Apply on remote:
  *   sqlite3 /path/to/sessions.db < seed.sql
@@ -20,10 +23,12 @@ const args = process.argv.slice(2);
 let dbPath = path.join(__dirname, '..', 'sessions.db');
 let pinId = null;
 let pg = false;
+let outPath = null;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--db') dbPath = args[++i];
   else if (args[i] === '--id') pinId = args[++i];
   else if (args[i] === '--pg') pg = true;
+  else if (args[i] === '--out') outPath = args[++i];
 }
 if (!fs.existsSync(dbPath)) {
   console.error(`DB not found: ${dbPath}`);
@@ -70,22 +75,34 @@ const banner = [
   '',
 ];
 
+let sqlOut = banner.join('\n');
 if (pg) {
   // PostgreSQL flavour: ON CONFLICT (id) DO UPDATE
-  process.stdout.write(banner.join('\n'));
-  process.stdout.write('BEGIN;\n');
-  process.stdout.write(`INSERT INTO org_contexts (\n  ${cols.join(', ')}\n) VALUES (\n  ${vals.join(', ')}\n)\n`);
-  process.stdout.write('ON CONFLICT (id) DO UPDATE SET\n');
+  sqlOut += 'BEGIN;\n';
+  sqlOut += `INSERT INTO org_contexts (\n  ${cols.join(', ')}\n) VALUES (\n  ${vals.join(', ')}\n)\n`;
+  sqlOut += 'ON CONFLICT (id) DO UPDATE SET\n';
   const updateCols = cols.filter(c => c !== 'id' && c !== 'created_at');
-  process.stdout.write(updateCols.map(c => `  ${c} = EXCLUDED.${c}`).join(',\n'));
-  process.stdout.write(';\nCOMMIT;\n');
+  sqlOut += updateCols.map(c => `  ${c} = EXCLUDED.${c}`).join(',\n');
+  sqlOut += ';\nCOMMIT;\n';
 } else {
   // SQLite flavour: INSERT OR REPLACE
-  process.stdout.write(banner.join('\n'));
-  process.stdout.write('BEGIN TRANSACTION;\n');
-  process.stdout.write(`INSERT OR REPLACE INTO org_contexts (\n  ${cols.join(', ')}\n) VALUES (\n  ${vals.join(', ')}\n);\n`);
-  process.stdout.write('COMMIT;\n');
+  sqlOut += 'BEGIN TRANSACTION;\n';
+  sqlOut += `INSERT OR REPLACE INTO org_contexts (\n  ${cols.join(', ')}\n) VALUES (\n  ${vals.join(', ')}\n);\n`;
+  sqlOut += 'COMMIT;\n';
+}
+
+if (outPath) {
+  /* Write through Node's fs so we get plain UTF-8 with no BOM regardless of
+     the parent shell — PowerShell's `>` redirect adds a UTF-16 BOM that
+     SQLite can't parse, which is exactly what we're avoiding here. */
+  fs.writeFileSync(outPath, sqlOut, { encoding: 'utf8' });
+  console.error(`\nWrote ${outPath} (${Buffer.byteLength(sqlOut, 'utf8')} bytes, plain UTF-8, no BOM).`);
+} else {
+  process.stdout.write(sqlOut);
 }
 
 console.error(`\n✅ Emitted ${pg ? 'PostgreSQL' : 'SQLite'} SQL for SingleView (id=${row.id}).`);
-console.error('Pipe stdout to a file:  node scripts/dump-singleview-sql.js > seed.sql');
+if (!outPath) {
+  console.error('Tip: use --out FILE to avoid shell encoding issues:');
+  console.error('     node scripts/dump-singleview-sql.js --out seed.sql');
+}
