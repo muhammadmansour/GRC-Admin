@@ -19,3 +19,12 @@ collection-uploads/
 # OS
 .DS_Store
 Thumbs.db
+
+# Service account / API credentials (never commit)
+*-key.json
+*-credentials.json
+google-credentials.json
+
+# Local data spreadsheets / dumps
+*.xlsx
+*.xls

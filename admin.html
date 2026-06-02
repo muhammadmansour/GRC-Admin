@@ -100,6 +100,26 @@
           </div>
         </div>
 
+        <button class="sidebar-section-toggle" data-section="legislative-updates">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2H12V4H4V2ZM3 5H13V14C13 14.6 12.6 15 12 15H4C3.4 15 3 14.6 3 14V5ZM5 8H11M5 11H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          LEGISLATIVE UPDATES
+          <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <div class="sidebar-section" id="section-legislative-updates">
+          <button class="sidebar-item" data-page="legislative-internal-sources">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2H12V4H4V2ZM3 5H13V14C13 14.6 12.6 15 12 15H4C3.4 15 3 14.6 3 14V5ZM5 8H11M5 11H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Internal sources
+          </button>
+          <button class="sidebar-item" data-page="legislative-external-sources">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1C4.1 1 1 4.1 1 8C1 11.9 4.1 15 8 15C11.9 15 15 11.9 15 8C15 4.1 11.9 1 8 1Z" stroke="currentColor" stroke-width="1.5"/><path d="M1 8H15M8 1C9.7 2.7 10.5 5.3 10.5 8C10.5 10.7 9.7 13.3 8 15C6.3 13.3 5.5 10.7 5.5 8C5.5 5.3 6.3 2.7 8 1Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            External sources
+          </button>
+          <button class="sidebar-item" data-page="pipeline-configuration">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1V3M8 13V15M2.5 4L4 5.5M12 10.5L13.5 12M1 8H3M13 8H15M2.5 12L4 10.5M12 5.5L13.5 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8 5C9.657 5 11 6.343 11 8C11 9.657 9.657 11 8 11C6.343 11 5 9.657 5 8C5 6.343 6.343 5 8 5Z" stroke="currentColor" stroke-width="1.5"/></svg>
+            Pipeline configuration
+          </button>
+        </div>
+
         <button class="sidebar-section-toggle" data-section="auditlog">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H10L13 5V14H3V2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 2V5H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 8H11M5 10.5H9M5 13H7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
           AUDIT LOG
@@ -151,6 +171,25 @@
           </div>
         </div>
         <div class="admin-header-right">
+          <!-- Notification bell -->
+          <div class="notif-wrap" id="notif-wrap">
+            <button type="button" class="notif-bell-btn" id="notif-bell-btn" aria-label="Notifications" aria-haspopup="true" aria-expanded="false" onclick="toggleNotifPanel()">
+              <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M10 2a6 6 0 0 0-6 6v3l-1.5 2.5A1 1 0 0 0 3.5 15h13a1 1 0 0 0 .866-1.5L16 11V8a6 6 0 0 0-6-6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                <path d="M8.5 17a1.5 1.5 0 0 0 3 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <span class="notif-badge" id="notif-badge" hidden></span>
+            </button>
+            <div class="notif-panel" id="notif-panel" hidden>
+              <div class="notif-panel-header">
+                <span class="notif-panel-title">Notifications</span>
+                <button type="button" class="notif-clear-btn" id="notif-clear-btn" onclick="clearDoneNotifications()">Clear done</button>
+              </div>
+              <div class="notif-list" id="notif-list">
+                <div class="notif-empty-msg">No active processes</div>
+              </div>
+            </div>
+          </div>
           <span class="admin-header-powered">Powered by <strong>WATHBAH</strong></span>
         </div>
       </header>
@@ -887,6 +926,10 @@
             <header class="pup-page-header">
               <div class="pup-page-header-main">
                 <h1 class="page-title pup-page-title">Policy update pipeline</h1>
+                <button type="button" class="pup-history-btn" onclick="navigateTo('pipeline-history')">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.4"/><path d="M8 4.5V8l2.5 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  History
+                </button>
               </div>
               <div class="pup-stage-rail" aria-label="Pipeline stages" title="Stages run in order after you submit">
                 <span class="pup-stage-rail-label">Flow</span>
@@ -989,7 +1032,17 @@
                     <div class="pup-panel pup-panel--single">
                       <h3 class="pup-panel-title">Indexed policies <span class="pup-tag-muted">JSON</span></h3>
                       <p class="pup-panel-lead">Each object needs <code>id</code> and <code>content</code>; <code>title</code> is optional.</p>
-                      <p class="pup-code-hint">Example: <code>[{&quot;id&quot;:&quot;p1&quot;,&quot;title&quot;:&quot;Access&quot;,&quot;content&quot;:&quot;…&quot;}]</code></p>
+                      <div class="pup-f4-toolbar" style="margin-bottom:8px">
+                        <button type="button" class="btn-admin-ghost pup-f4-toolbar-btn" id="pup-load-grc-policies">
+                          Load from GRC
+                        </button>
+                        <button type="button" class="btn-admin-ghost pup-f4-toolbar-btn pup-upload-extract-btn" id="pup-upload-extract-btn">
+                          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true"><path d="M6.5 1v7M3.5 3.5L6.5 1l3 2.5M2 9.5v1.5a.5.5 0 00.5.5h8a.5.5 0 00.5-.5V9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                          Upload &amp; Extract
+                        </button>
+                        <input type="file" id="pup-policy-file-input" accept=".pdf,.docx,.doc,.txt,.md" hidden aria-hidden="true">
+                        <span id="pup-grc-policies-status" class="pup-grc-status"></span>
+                      </div>
                       <div class="ds-import-row pup-field-flush">
                         <label class="ds-label visually-hidden" for="pup-policies-json">Policies JSON array</label>
                         <textarea id="pup-policies-json" class="admin-form-textarea admin-form-textarea-mono pup-step-tall-textarea" rows="12" placeholder='[{"id":"pol-1","title":"Example policy","content":"Policy body text…"}]'></textarea>
@@ -1118,6 +1171,180 @@
             </div>
             <div class="fc-stats-grid" id="fc-stats"><!-- Populated by JS --></div>
             <div id="fc-collections-list"><!-- Populated by JS --></div>
+          </div>
+        </section>
+
+        <!-- =================== LEGISLATIVE — INTERNAL SOURCES =================== -->
+        <section class="admin-page lu-page" id="page-legislative-internal-sources">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header page-header-row">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">Internal sources</h1>
+                <p class="page-subtitle">Upload and manage legislative reference documents for your organisation</p>
+              </div>
+              <button type="button" class="btn-admin-primary lu-btn-add-source" id="lu-add-source-btn">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3V13M3 8H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                Add source
+              </button>
+            </header>
+
+            <!-- Tabs -->
+            <div class="lu-is-tabs-wrap">
+              <div class="lu-is-tabs" role="tablist" aria-label="Internal sources views">
+                <button type="button" class="lu-is-tab is-active" role="tab" id="lu-is-tab-files" data-lu-is-tab="files" aria-selected="true" aria-controls="lu-is-panel-files">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M8 1H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5L8 1zm0 0v4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Uploaded files
+                  <span class="lu-is-tab-count" id="lu-is-tab-files-count"></span>
+                </button>
+                <button type="button" class="lu-is-tab" role="tab" id="lu-is-tab-policies" data-lu-is-tab="policies" aria-selected="false" aria-controls="lu-is-panel-policies">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M2 4h10M2 7h7M2 10h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+                  Extracted regulations
+                  <span class="lu-is-tab-count" id="lu-is-tab-policies-count"></span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Tab panel: Uploaded Files -->
+            <div id="lu-is-panel-files" role="tabpanel" aria-labelledby="lu-is-tab-files">
+              <div class="admin-card lu-panel">
+                <div id="lu-internal-loading" class="lu-loading lu-loading-panel" style="display:none">
+                  <div class="spinner"></div>
+                  <span>Loading sources…</span>
+                </div>
+                <div id="lu-internal-empty" class="lu-empty-state" style="display:none">
+                  <div class="lu-empty-icon" aria-hidden="true">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8M14 2L20 8M14 2V8H20" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </div>
+                  <p class="lu-empty-title">No sources yet</p>
+                  <p class="lu-empty-desc">Add PDFs, Word, or other reference files. They are stored securely and listed here.</p>
+                </div>
+                <div class="lu-table-shell" id="lu-internal-table-wrap" style="display:none">
+                  <table class="lu-table lu-table-internal">
+                    <thead>
+                      <tr>
+                        <th class="lu-col-name">Name</th>
+                        <th class="lu-col-desc">Description</th>
+                        <th class="lu-col-user">Uploaded by</th>
+                        <th class="lu-col-date">Added</th>
+                        <th class="lu-col-actions" scope="col">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody id="lu-internal-tbody"></tbody>
+                  </table>
+                </div>
+                <p class="lu-error" id="lu-internal-error" role="alert" style="display:none"></p>
+              </div>
+            </div>
+
+            <!-- Tab panel: Extracted Regulations -->
+            <div id="lu-is-panel-policies" role="tabpanel" aria-labelledby="lu-is-tab-policies" hidden>
+              <div id="lu-ep-loading" class="lu-loading lu-loading-panel" style="display:none">
+                <div class="spinner"></div>
+                <span>Loading extracted regulations…</span>
+              </div>
+              <div id="lu-ep-empty" class="lu-empty-state" style="display:none">
+                <div class="lu-empty-icon" aria-hidden="true">
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M9 12h6M9 16h4M17 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7l-4-4z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
+                <p class="lu-empty-title">No extracted regulations yet</p>
+                <p class="lu-empty-desc">Upload a regulation or legislation document — articles will be extracted automatically and appear here.</p>
+              </div>
+              <div id="lu-ep-grid" class="lu-ep-grid"></div>
+              <p class="lu-error" id="lu-ep-error" role="alert" style="display:none"></p>
+            </div>
+          </div>
+        </section>
+
+        <!-- =================== LEGISLATIVE — EXTERNAL SOURCES =================== -->
+        <section class="admin-page lu-page" id="page-legislative-external-sources">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">External sources</h1>
+                <p class="page-subtitle">Connectors and feeds for portals outside your organisation</p>
+              </div>
+            </header>
+            <div class="lu-external-card">
+              <div class="lu-external-inner">
+                <span class="lu-badge-soon">Coming soon</span>
+                <h2 class="lu-external-heading">External integrations</h2>
+                <p class="lu-external-copy">Plug in official gazettes, regulator APIs, and third-party legislative feeds. This space will let you subscribe and sync external sources alongside your internal library.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- =================== PIPELINE HISTORY =================== -->
+        <section class="admin-page lu-page" id="page-pipeline-history">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">Pipeline history</h1>
+                <p class="page-subtitle">Past policy update pipeline runs — click a card to view the full result.</p>
+              </div>
+              <button type="button" class="btn-admin-primary" onclick="navigateTo('policy-update-pipeline')" style="flex-shrink:0">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 2.5L11 7L3 11.5V2.5Z" fill="currentColor"/></svg>
+                New run
+              </button>
+            </header>
+            <div id="ph-loading" class="lu-loading lu-loading-panel" style="display:none">
+              <div class="spinner"></div>
+              <span>Loading history…</span>
+            </div>
+            <div id="ph-empty" class="lu-empty-state" style="display:none">
+              <div class="lu-empty-icon" aria-hidden="true">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/><path d="M12 7v5l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              </div>
+              <p class="lu-empty-title">No runs yet</p>
+              <p class="lu-empty-desc">Run the pipeline at least once and results will appear here automatically.</p>
+            </div>
+            <p class="lu-error" id="ph-error" role="alert" style="display:none"></p>
+            <div id="ph-grid" class="ph-grid"></div>
+          </div>
+        </section>
+
+        <!-- =================== PIPELINE CONFIGURATION =================== -->
+        <section class="admin-page lu-page" id="page-pipeline-configuration">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">Pipeline configuration</h1>
+                <p class="page-subtitle">Tune how the policy update pipeline assesses impact and which organisation context is used by default.</p>
+              </div>
+            </header>
+            <div class="pcfg-tabs-wrap">
+              <div class="pcfg-tabs" role="tablist" aria-label="Pipeline configuration sections">
+                <button type="button" class="pcfg-tab active" role="tab" id="pcfg-tab-impact" data-pcfg-tab="impact" aria-selected="true" aria-controls="pcfg-panel-impact">Impact criteria</button>
+                <button type="button" class="pcfg-tab" role="tab" id="pcfg-tab-default-org" data-pcfg-tab="default-org" aria-selected="false" aria-controls="pcfg-panel-default-org">Default org selection</button>
+              </div>
+            </div>
+            <div id="pcfg-panel-impact" class="pcfg-tab-panel" role="tabpanel" aria-labelledby="pcfg-tab-impact">
+              <div class="admin-card lu-panel pcfg-panel">
+                <div class="pcfg-panel-inner">
+                  <p class="pcfg-lead">Use this space to configure impact scales, thresholds, and how pipeline outputs map to your risk or compliance taxonomy.</p>
+                  <p class="pcfg-muted">Wiring to saved settings and the pipeline API will be added here.</p>
+                </div>
+              </div>
+            </div>
+            <div id="pcfg-panel-default-org" class="pcfg-tab-panel" role="tabpanel" hidden aria-labelledby="pcfg-tab-default-org">
+              <div class="admin-card lu-panel pcfg-panel">
+                <div class="pcfg-panel-inner">
+                  <p class="pcfg-lead">Select a default organisation — it will be pre-selected every time you open the Policy Update Pipeline.</p>
+                  <div id="pcfg-org-loading" class="lu-loading lu-loading-panel" style="display:none">
+                    <div class="spinner"></div>
+                    <span>Loading organisations…</span>
+                  </div>
+                  <div id="pcfg-org-empty" class="lu-empty-state" style="display:none">
+                    <div class="lu-empty-icon" aria-hidden="true">
+                      <svg width="38" height="38" viewBox="0 0 24 24" fill="none"><rect x="3" y="7" width="18" height="13" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M8 7V5a2 2 0 0 1 4 0v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    </div>
+                    <p class="lu-empty-title">No organisations yet</p>
+                    <p class="lu-empty-desc">Add organisation contexts first, then return here to set a default.</p>
+                  </div>
+                  <div id="pcfg-org-list" class="pcfg-org-list"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1802,6 +2029,82 @@
     </div>
   </div>
 
+  <!-- Legislative updates — add internal source -->
+  <div class="admin-modal-overlay" id="lu-add-modal-overlay" aria-hidden="true">
+    <div class="admin-modal lu-add-modal" role="dialog" aria-modal="true" aria-labelledby="lu-add-modal-title">
+      <div class="admin-modal-header">
+        <h3 class="admin-modal-title" id="lu-add-modal-title">Add source</h3>
+        <button type="button" class="admin-modal-close" id="lu-add-modal-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="admin-modal-body">
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-input-name">Name <span class="required">*</span></label>
+          <input type="text" class="admin-form-input" id="lu-input-name" placeholder="Source title" autocomplete="off">
+        </div>
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-input-description">Description</label>
+          <textarea class="admin-form-textarea" id="lu-input-description" rows="3" placeholder="Short description (optional)"></textarea>
+        </div>
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-input-file">File <span class="required">*</span></label>
+          <input type="file" class="admin-form-input" id="lu-input-file">
+        </div>
+        <p class="lu-modal-hint" id="lu-modal-error" style="display:none;color:var(--admin-danger,#b91c1c);margin:0;font-size:0.85rem"></p>
+      </div>
+      <div class="admin-modal-footer">
+        <button type="button" class="btn-admin-ghost" id="lu-add-modal-cancel">Cancel</button>
+        <button type="button" class="btn-admin-primary" id="lu-add-modal-submit">
+          <span class="btn-text">Upload</span>
+          <span class="btn-loading hidden" id="lu-add-modal-loading">
+            <svg class="spinner" width="14" height="14" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="2" stroke-opacity="0.3"/><path d="M9 2C13 2 16 5 16 9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            Uploading…
+          </span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Legislative updates — edit internal source -->
+  <div class="admin-modal-overlay" id="lu-edit-modal-overlay" aria-hidden="true">
+    <div class="admin-modal lu-add-modal" role="dialog" aria-modal="true" aria-labelledby="lu-edit-modal-title">
+      <div class="admin-modal-header">
+        <h3 class="admin-modal-title" id="lu-edit-modal-title">Edit source</h3>
+        <button type="button" class="admin-modal-close" id="lu-edit-modal-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="admin-modal-body">
+        <input type="hidden" id="lu-edit-input-id" value="">
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-edit-input-name">Name <span class="required">*</span></label>
+          <input type="text" class="admin-form-input" id="lu-edit-input-name" placeholder="Source title" autocomplete="off">
+        </div>
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-edit-input-description">Description</label>
+          <textarea class="admin-form-textarea" id="lu-edit-input-description" rows="3" placeholder="Short description (optional)"></textarea>
+        </div>
+        <div class="admin-form-row lu-edit-file-row">
+          <span class="admin-form-label">Attached file</span>
+          <p class="lu-edit-file-hint" id="lu-edit-file-hint">—</p>
+          <p class="lu-edit-file-note">Replace the file by deleting this entry and adding a new source.</p>
+        </div>
+        <p class="lu-modal-hint" id="lu-edit-modal-error" style="display:none;color:var(--admin-danger,#b91c1c);margin:0;font-size:0.85rem"></p>
+      </div>
+      <div class="admin-modal-footer">
+        <button type="button" class="btn-admin-ghost" id="lu-edit-modal-cancel">Cancel</button>
+        <button type="button" class="btn-admin-primary" id="lu-edit-modal-submit">
+          <span class="btn-text">Save changes</span>
+          <span class="btn-loading hidden" id="lu-edit-modal-loading">
+            <svg class="spinner" width="14" height="14" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="2" stroke-opacity="0.3"/><path d="M9 2C13 2 16 5 16 9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            Saving…
+          </span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Policy update pipeline — result modal -->
   <div class="admin-modal-overlay" id="pup-result-modal-overlay" aria-hidden="true">
     <div class="admin-modal admin-modal-lg pup-result-modal-shell" role="dialog" aria-modal="true" aria-labelledby="pup-result-modal-title">
@@ -1851,6 +2154,56 @@
       <div class="confirm-dialog-actions">
         <button class="confirm-dialog-btn confirm-dialog-cancel" id="confirm-dialog-cancel">Cancel</button>
         <button class="confirm-dialog-btn confirm-dialog-confirm" id="confirm-dialog-confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Global: Raw extracted policies data modal ───────────── -->
+  <div class="lu-raw-modal-overlay" id="lu-raw-modal-overlay">
+    <div class="lu-raw-modal">
+      <div class="lu-raw-modal-header">
+        <span class="lu-raw-modal-title" id="lu-raw-modal-title">Raw extracted policies</span>
+        <button class="lu-raw-modal-close" onclick="closeLuRawModal()" title="Close">&#x2715;</button>
+      </div>
+      <div class="lu-raw-modal-body">
+        <pre id="lu-raw-modal-pre"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Global: Regulation extraction result modal ───────────── -->
+  <div class="pup-extract-modal-overlay" id="pup-extract-modal-overlay" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="pup-extract-modal-title">
+    <div class="pup-extract-modal">
+      <div class="pup-extract-modal-header">
+        <h2 class="pup-extract-modal-title" id="pup-extract-modal-title">Extracted regulation</h2>
+        <span class="pup-extract-modal-meta" id="pup-extract-modal-meta"></span>
+      </div>
+      <div class="pup-extract-modal-body" id="pup-extract-modal-body"></div>
+      <div class="pup-extract-modal-footer">
+        <button type="button" class="btn-admin-ghost" id="pup-extract-cancel-btn">Cancel</button>
+        <button type="button" class="btn-admin-primary" id="pup-extract-run-btn">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 2.5L11 7L3 11.5V2.5Z" fill="currentColor"/></svg>
+          <span id="pup-extract-run-label">Run pipeline</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Global: Extraction in-progress overlay ──────────────── -->
+  <div class="pup-extract-loading-overlay" id="pup-extract-loading-overlay" hidden aria-hidden="true" role="status">
+    <div class="pup-extract-loading-panel">
+      <div class="pup-extract-spinner-wrap" aria-hidden="true">
+        <div class="pup-extract-spinner-ring"></div>
+        <div class="pup-extract-spinner-dot"></div>
+      </div>
+      <p class="pup-extract-loading-title">Extracting regulation</p>
+      <p class="pup-extract-loading-label" id="pup-extract-loading-label">Reading document…</p>
+      <div class="pup-extract-stages" aria-hidden="true">
+        <span class="pup-extract-stage-pill" id="pup-extract-stage-0">Reading</span>
+        <span class="pup-extract-stage-sep"></span>
+        <span class="pup-extract-stage-pill" id="pup-extract-stage-1">Analysing</span>
+        <span class="pup-extract-stage-sep"></span>
+        <span class="pup-extract-stage-pill" id="pup-extract-stage-2">Extracting</span>
       </div>
     </div>
   </div>

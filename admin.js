@@ -2,6 +2,134 @@
    WathbaGRC Admin Panel JS
    ============================ */
 
+// ─── Notification Manager ────────────────────────────────────
+const _notifs = []; // [{id, title, message, status:'running'|'success'|'error'|'info', result, createdAt}]
+let _notifOpen = false;
+
+function _notifRender() {
+  const list  = document.getElementById('notif-list');
+  const badge = document.getElementById('notif-badge');
+  const btn   = document.getElementById('notif-bell-btn');
+  if (!list) return;
+
+  const running = _notifs.filter(n => n.status === 'running').length;
+  const unseen  = _notifs.filter(n => n.status !== 'info' || n.unseen).length;
+
+  if (badge) {
+    if (running > 0) {
+      badge.hidden = false;
+      badge.textContent = running;
+      badge.className = 'notif-badge notif-badge--running';
+    } else if (unseen > 0) {
+      badge.hidden = false;
+      badge.textContent = unseen;
+      badge.className = 'notif-badge';
+    } else {
+      badge.hidden = true;
+    }
+  }
+  if (btn) btn.classList.toggle('is-running', running > 0);
+
+  if (!_notifs.length) {
+    list.innerHTML = '<div class="notif-empty-msg">No active processes</div>';
+    return;
+  }
+
+  list.innerHTML = _notifs.map(n => {
+    const iconHtml = n.status === 'running'
+      ? `<span class="notif-item-icon notif-icon--running" aria-hidden="true"><span class="notif-spinner"></span></span>`
+      : n.status === 'success'
+        ? `<span class="notif-item-icon notif-icon--success" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`
+        : n.status === 'error'
+          ? `<span class="notif-item-icon notif-icon--error" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>`
+          : `<span class="notif-item-icon notif-icon--info" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.4"/><path d="M6 5.5V8.5M6 3.5v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>`;
+    const timeStr = n.createdAt ? new Date(n.createdAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+    const clickable = n.result && n.status === 'success';
+    return `<div class="notif-item${clickable ? ' notif-item--clickable' : ''}" data-notif-id="${esc(n.id)}"
+        ${clickable ? `onclick="onNotifClick('${esc(n.id)}')"` : ''}>
+      ${iconHtml}
+      <div class="notif-item-body">
+        <div class="notif-item-title">${esc(n.title)}</div>
+        ${n.message ? `<div class="notif-item-msg">${esc(n.message)}</div>` : ''}
+      </div>
+      <div class="notif-item-right">
+        <span class="notif-item-time">${esc(timeStr)}</span>
+        ${n.status !== 'running' ? `<button class="notif-dismiss-btn" onclick="dismissNotif(event,'${esc(n.id)}')" title="Dismiss">×</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function addNotif(id, title, message, status = 'running', result = null) {
+  const existing = _notifs.findIndex(n => n.id === id);
+  const entry = { id, title, message, status, result, createdAt: new Date().toISOString(), unseen: true };
+  if (existing >= 0) _notifs[existing] = { ..._notifs[existing], ...entry };
+  else _notifs.unshift(entry);
+  _notifRender();
+}
+
+function updateNotif(id, updates) {
+  const idx = _notifs.findIndex(n => n.id === id);
+  if (idx < 0) return;
+  _notifs[idx] = { ..._notifs[idx], ...updates };
+  _notifRender();
+  if (updates.status === 'success' || updates.status === 'error') {
+    const panel = document.getElementById('notif-panel');
+    if (panel && panel.hidden) {
+      const badge = document.getElementById('notif-badge');
+      if (badge) { badge.hidden = false; badge.className = 'notif-badge notif-badge--pulse'; }
+    }
+  }
+}
+
+function dismissNotif(e, id) {
+  if (e) e.stopPropagation();
+  const idx = _notifs.findIndex(n => n.id === id);
+  if (idx >= 0) _notifs.splice(idx, 1);
+  _notifRender();
+}
+
+function clearDoneNotifications() {
+  for (let i = _notifs.length - 1; i >= 0; i--) {
+    if (_notifs[i].status !== 'running') _notifs.splice(i, 1);
+  }
+  _notifRender();
+}
+
+function onNotifClick(id) {
+  const n = _notifs.find(x => x.id === id);
+  if (n && n.result) {
+    toggleNotifPanel(); // close panel
+    openPolicyPipelineResultModal(n.result);
+  }
+}
+
+function toggleNotifPanel() {
+  const panel = document.getElementById('notif-panel');
+  const btn   = document.getElementById('notif-bell-btn');
+  if (!panel) return;
+  _notifOpen = panel.hidden;
+  panel.hidden = !_notifOpen;
+  if (btn) btn.setAttribute('aria-expanded', String(_notifOpen));
+  if (_notifOpen) {
+    _notifs.forEach(n => { n.unseen = false; });
+    _notifRender();
+    // Close on outside click
+    setTimeout(() => document.addEventListener('click', _notifOutsideClick, { once: true }), 0);
+  }
+}
+
+function _notifOutsideClick(e) {
+  const wrap = document.getElementById('notif-wrap');
+  if (wrap && !wrap.contains(e.target)) {
+    const panel = document.getElementById('notif-panel');
+    if (panel) panel.hidden = true;
+    _notifOpen = false;
+    const btn = document.getElementById('notif-bell-btn');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+}
+
 // ─── Auth Guard ──────────────────────────────────────────────
 (function checkAuth() {
   const hasCookie = document.cookie.split(';').some(c => c.trim().startsWith('wathba_token='));
@@ -90,9 +218,13 @@ const PAGE_NAMES = {
   'org-contexts': 'Organization Contexts',
   'data-studio': 'Data Studio',
   'policy-update-pipeline': 'Policy update pipeline',
+  'pipeline-history': 'Pipeline history',
   'prompts': 'Prompts',
   'file-collections': 'File Collections',
   'workbench': 'Workbench',
+  'legislative-internal-sources': 'Internal sources',
+  'legislative-external-sources': 'External sources',
+  'pipeline-configuration': 'Pipeline configuration',
   'audit-log': 'Audit Log',
 };
 const VALID_PAGES = Object.keys(PAGE_NAMES);
@@ -121,6 +253,17 @@ function navigateTo(page, pushState = true, subId = null) {
   const target = document.querySelector(`.sidebar-item[data-page="${page}"]`);
   if (target) target.classList.add('active');
 
+  if (
+    page === 'legislative-internal-sources' ||
+    page === 'legislative-external-sources' ||
+    page === 'pipeline-configuration'
+  ) {
+    const legSec = document.getElementById('section-legislative-updates');
+    const legToggle = document.querySelector('.sidebar-section-toggle[data-section="legislative-updates"]');
+    if (legSec) legSec.classList.add('open');
+    if (legToggle) legToggle.classList.remove('collapsed');
+  }
+
   // Update pages
   document.querySelectorAll('.admin-page').forEach(p => p.classList.remove('active'));
   const pageEl = document.getElementById('page-' + page);
@@ -144,7 +287,11 @@ function navigateTo(page, pushState = true, subId = null) {
   if (page === 'policy-ingestion') loadPolicyIngestion(subId);
   if (page === 'data-studio') loadDataStudioPage();
   if (page === 'policy-update-pipeline') loadPolicyUpdatePipelinePage();
+  if (page === 'pipeline-history') loadPipelineHistoryPage();
   if (page === 'workbench') loadWorkbench(subId);
+  if (page === 'legislative-internal-sources') loadLegislativeInternalSourcesPage();
+  if (page === 'legislative-external-sources') loadLegislativeExternalSourcesPage();
+  if (page === 'pipeline-configuration') loadPipelineConfigurationPage();
   if (page === 'audit-log') loadAuditLog(subId);
 
   // Scroll to top
@@ -172,8 +319,21 @@ window.addEventListener('popstate', (e) => {
 // Parse page + optional sub-ID from URL pathname
 function parseRoute() {
   const parts = window.location.pathname.replace(/^\//, '').split('/');
-  const page = (parts[0] && VALID_PAGES.includes(parts[0])) ? parts[0] : 'dashboard';
-  const subId = parts[1] || null;
+  const raw = parts[0] || '';
+  let page = 'dashboard';
+  let subId = parts[1] || null;
+
+  if (raw === 'legislative-updates') {
+    page = 'legislative-internal-sources';
+  } else if (raw === 'pipeline-impact-criteria') {
+    page = 'pipeline-configuration';
+    subId = null;
+  } else if (raw === 'pipeline-default-org') {
+    page = 'pipeline-configuration';
+    subId = 'default-org';
+  } else if (raw && VALID_PAGES.includes(raw)) {
+    page = raw;
+  }
   return { page, subId };
 }
 
@@ -1161,6 +1321,7 @@ async function fetchGrcPolicies() {
       id: p.id,
       name: p.name || '',
       refId: p.ref_id || '',
+      description: p.description || p.observation || '',
       category: p.category || '',
       status: p.status || '',
       csfFunction: p.csf_function || '',
@@ -9294,6 +9455,626 @@ function wbShowView(view) {
   }
 }
 
+let legislativeInternalPageWired = false;
+/** @type {Array<Record<string, unknown>>} */
+let luInternalSourcesCache = [];
+
+const LU_ICON_PREVIEW =
+  '<svg class="lu-preview-svg" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 12s4.2-7 10-7 10 7 10 7-4.2 7-10 7S2 12 2 12z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/></svg>';
+const LU_ICON_EDIT =
+  '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8.84058 2.85709L13.1432 7.15979L4.45285 15.8501H0.150146V11.5474L8.84058 2.85709Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M11.25 1.75L14.25 4.75" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+const LU_ICON_TRASH =
+  '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 4.5h9M6.5 4.5V3.5a1.5 1.5 0 0 1 1.5-1.5h0a1.5 1.5 0 0 1 1.5 1.5v1M12.5 4.5v8.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1V4.5M6.5 7v4M9.5 7v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function luBuildDocPreviewCell(href, fileName) {
+  if (!href)
+    return '<span class="lu-action-preview-placeholder" title="No preview available">—</span>';
+  const safeName = fileName ? String(fileName).replace(/"/g, '') : '';
+  const t = safeName ? `Preview “${safeName}” in new tab` : 'Preview document in new tab';
+  return `<a class="lu-doc-open lu-doc-open--preview lu-action-preview" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(t)}">${LU_ICON_PREVIEW}<span class="visually-hidden">Preview document</span></a>`;
+}
+
+function openLuAddModal() {
+  const o = document.getElementById('lu-add-modal-overlay');
+  if (!o) return;
+  document.getElementById('lu-input-name').value = '';
+  document.getElementById('lu-input-description').value = '';
+  document.getElementById('lu-input-file').value = '';
+  const err = document.getElementById('lu-modal-error');
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  o.classList.add('active');
+  o.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLuAddModal() {
+  const o = document.getElementById('lu-add-modal-overlay');
+  if (!o) return;
+  o.classList.remove('active');
+  o.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+  const submit = document.getElementById('lu-add-modal-submit');
+  if (submit) {
+    const btnText = submit.querySelector('.btn-text');
+    const loading = document.getElementById('lu-add-modal-loading');
+    if (btnText) btnText.classList.remove('hidden');
+    if (loading) loading.classList.add('hidden');
+    submit.disabled = false;
+  }
+}
+
+function luFileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = r.result;
+      const i = typeof s === 'string' ? s.indexOf(',') : -1;
+      resolve(i >= 0 ? s.slice(i + 1) : '');
+    };
+    r.onerror = () => reject(new Error('Failed to read file'));
+    r.readAsDataURL(file);
+  });
+}
+
+function openLuEditModal(id) {
+  const row = luInternalSourcesCache.find((s) => s.id === id);
+  const o = document.getElementById('lu-edit-modal-overlay');
+  if (!row || !o) return;
+  document.getElementById('lu-edit-input-id').value = String(row.id);
+  document.getElementById('lu-edit-input-name').value = String(row.name || '');
+  document.getElementById('lu-edit-input-description').value = String(
+    row.description != null ? row.description : '',
+  );
+  const hint = document.getElementById('lu-edit-file-hint');
+  if (hint) hint.textContent = row.original_file_name ? String(row.original_file_name) : '—';
+  const err = document.getElementById('lu-edit-modal-error');
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  o.classList.add('active');
+  o.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLuEditModal() {
+  const o = document.getElementById('lu-edit-modal-overlay');
+  if (!o) return;
+  o.classList.remove('active');
+  o.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+  const submit = document.getElementById('lu-edit-modal-submit');
+  if (submit) {
+    const btnText = submit.querySelector('.btn-text');
+    const loading = document.getElementById('lu-edit-modal-loading');
+    if (btnText) btnText.classList.remove('hidden');
+    if (loading) loading.classList.add('hidden');
+    submit.disabled = false;
+  }
+}
+
+async function luDeleteInternalSource(id) {
+  const row = luInternalSourcesCache.find((s) => s.id === id);
+  const label = row && row.name ? String(row.name) : 'this source';
+  if (!window.confirm(`Delete “${label}”? The file will be removed from storage.`)) return;
+  try {
+    const res = await fetch(
+      `/api/legislative-updates/internal-sources/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+    toast('success', 'Deleted', 'Source removed.');
+    loadLegislativeInternalSourcesList();
+  } catch (e) {
+    toast('error', 'Delete failed', e.message || String(e));
+  }
+}
+
+function initLegislativeInternalPageListeners() {
+  const addBtn = document.getElementById('lu-add-source-btn');
+  const overlay = document.getElementById('lu-add-modal-overlay');
+  const closeBtn = document.getElementById('lu-add-modal-close');
+  const cancelBtn = document.getElementById('lu-add-modal-cancel');
+  const submitBtn = document.getElementById('lu-add-modal-submit');
+  const editOverlay = document.getElementById('lu-edit-modal-overlay');
+  const editClose = document.getElementById('lu-edit-modal-close');
+  const editCancel = document.getElementById('lu-edit-modal-cancel');
+  const editSubmit = document.getElementById('lu-edit-modal-submit');
+  const tableWrap = document.getElementById('lu-internal-table-wrap');
+
+  if (addBtn) addBtn.addEventListener('click', () => openLuAddModal());
+  if (closeBtn) closeBtn.addEventListener('click', () => closeLuAddModal());
+  if (cancelBtn) cancelBtn.addEventListener('click', () => closeLuAddModal());
+  if (overlay) {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeLuAddModal();
+    });
+  }
+  if (editClose) editClose.addEventListener('click', () => closeLuEditModal());
+  if (editCancel) editCancel.addEventListener('click', () => closeLuEditModal());
+  if (editOverlay) {
+    editOverlay.addEventListener('click', (e) => {
+      if (e.target === editOverlay) closeLuEditModal();
+    });
+  }
+  if (tableWrap && !tableWrap.dataset.luAct) {
+    tableWrap.dataset.luAct = '1';
+    tableWrap.addEventListener('click', (e) => {
+      const editBtn = e.target.closest('[data-lu-edit]');
+      if (editBtn) {
+        openLuEditModal(editBtn.getAttribute('data-lu-edit'));
+        return;
+      }
+      const delBtn = e.target.closest('[data-lu-delete]');
+      if (delBtn) luDeleteInternalSource(delBtn.getAttribute('data-lu-delete'));
+    });
+  }
+  if (editSubmit) {
+    editSubmit.addEventListener('click', async () => {
+      const err = document.getElementById('lu-edit-modal-error');
+      const idEl = document.getElementById('lu-edit-input-id');
+      const id = idEl && idEl.value ? idEl.value.trim() : '';
+      const name = document.getElementById('lu-edit-input-name').value.trim();
+      const description = document.getElementById('lu-edit-input-description').value.trim();
+      if (err) {
+        err.style.display = 'none';
+        err.textContent = '';
+      }
+      if (!id) return;
+      if (!name) {
+        if (err) {
+          err.textContent = 'Name is required.';
+          err.style.display = 'block';
+        }
+        return;
+      }
+      const btnText = editSubmit.querySelector('.btn-text');
+      const loading = document.getElementById('lu-edit-modal-loading');
+      if (btnText) btnText.classList.add('hidden');
+      if (loading) loading.classList.remove('hidden');
+      editSubmit.disabled = true;
+      try {
+        const res = await fetch(
+          `/api/legislative-updates/internal-sources/${encodeURIComponent(id)}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, description }),
+          },
+        );
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json.error || res.statusText);
+        closeLuEditModal();
+        toast('success', 'Saved', 'Source updated.');
+        loadLegislativeInternalSourcesList();
+      } catch (e) {
+        if (err) {
+          err.textContent = e.message || String(e);
+          err.style.display = 'block';
+        }
+      } finally {
+        if (btnText) btnText.classList.remove('hidden');
+        if (loading) loading.classList.add('hidden');
+        editSubmit.disabled = false;
+      }
+    });
+  }
+  if (submitBtn) {
+    submitBtn.addEventListener('click', async () => {
+      const err = document.getElementById('lu-modal-error');
+      const name = document.getElementById('lu-input-name').value.trim();
+      const description = document.getElementById('lu-input-description').value.trim();
+      const fileInput = document.getElementById('lu-input-file');
+      const file = fileInput.files && fileInput.files[0];
+      err.style.display = 'none';
+      err.textContent = '';
+      if (!name) {
+        err.textContent = 'Name is required.';
+        err.style.display = 'block';
+        return;
+      }
+      if (!file) {
+        err.textContent = 'Please choose a file.';
+        err.style.display = 'block';
+        return;
+      }
+      const btnText = submitBtn.querySelector('.btn-text');
+      const loading = document.getElementById('lu-add-modal-loading');
+      if (btnText) btnText.classList.add('hidden');
+      if (loading) loading.classList.remove('hidden');
+      submitBtn.disabled = true;
+      try {
+        const data = await luFileToBase64(file);
+        const res = await fetch('/api/legislative-updates/internal-sources', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name,
+            description,
+            fileName: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            data,
+          }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json.error || json.hint || res.statusText);
+        closeLuAddModal();
+        toast('success', 'Uploaded', 'Source saved. Extracting policies…');
+        loadLegislativeInternalSourcesList();
+        // Trigger Gemini policy extraction in the background
+        onPupPolicyFileSelected(file, 'internal-sources');
+      } catch (e) {
+        err.textContent = e.message || String(e);
+        err.style.display = 'block';
+      } finally {
+        if (btnText) btnText.classList.remove('hidden');
+        if (loading) loading.classList.add('hidden');
+        submitBtn.disabled = false;
+      }
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const addO = document.getElementById('lu-add-modal-overlay');
+    if (addO && addO.classList.contains('active')) closeLuAddModal();
+    const editO = document.getElementById('lu-edit-modal-overlay');
+    if (editO && editO.classList.contains('active')) closeLuEditModal();
+  });
+}
+
+// ─── Internal Sources tabs ─────────────────────────────────────────────────
+
+let luIsActiveTab = 'files';
+
+function showLuIsTab(tab) {
+  luIsActiveTab = tab;
+  const tabs = document.querySelectorAll('.lu-is-tab');
+  tabs.forEach(btn => {
+    const on = btn.getAttribute('data-lu-is-tab') === tab;
+    btn.classList.toggle('is-active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  const filesPanel = document.getElementById('lu-is-panel-files');
+  const policiesPanel = document.getElementById('lu-is-panel-policies');
+  if (filesPanel)    { filesPanel.hidden    = tab !== 'files';    }
+  if (policiesPanel) { policiesPanel.hidden = tab !== 'policies'; }
+
+  if (tab === 'policies') loadLuExtractedRegulations();
+}
+
+function initLuIsTabs() {
+  document.querySelectorAll('.lu-is-tab').forEach(btn => {
+    btn.addEventListener('click', () => showLuIsTab(btn.getAttribute('data-lu-is-tab')));
+  });
+}
+
+async function loadLuExtractedRegulations() {
+  const loadEl  = document.getElementById('lu-ep-loading');
+  const emptyEl = document.getElementById('lu-ep-empty');
+  const gridEl  = document.getElementById('lu-ep-grid');
+  const errEl   = document.getElementById('lu-ep-error');
+  if (!gridEl) return;
+
+  if (loadEl)  { loadEl.style.display = 'flex'; }
+  if (emptyEl) { emptyEl.style.display = 'none'; }
+  if (errEl)   { errEl.style.display = 'none'; errEl.textContent = ''; }
+  gridEl.innerHTML = '';
+
+  try {
+    const res  = await fetch('/api/ai-tools/extracted-regulations');
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+
+    if (loadEl) loadEl.style.display = 'none';
+    const records = json.data || [];
+
+    // Update tab badge
+    const totalArticles = records.reduce((s, r) => s + (r.articles ? r.articles.length : 0), 0);
+    const badge = document.getElementById('lu-is-tab-policies-count');
+    if (badge) badge.textContent = totalArticles > 0 ? String(totalArticles) : '';
+
+    if (!records.length) {
+      if (emptyEl) emptyEl.style.display = 'flex';
+      return;
+    }
+
+    // Store raw data for the modal
+    window._luEpRecords = records;
+
+    gridEl.innerHTML = records.map((record, idx) => {
+      const dateStr  = record.createdAt ? new Date(record.createdAt).toLocaleString() : '—';
+      const fileName = record.sourceFile || 'Unknown file';
+      const articles = Array.isArray(record.articles) ? record.articles : [];
+      const articleItems = articles.map((a, ai) => {
+        const uid = `acc-${idx}-${ai}`;
+        return `<div class="lu-acc-item" id="${uid}">
+          <button type="button" class="lu-acc-trigger" onclick="toggleLuAccItem('${uid}')" aria-expanded="false">
+            <span class="lu-ep-article-label">${esc(a.article || '')}</span>
+            <span class="lu-acc-title">${esc(a.title || '')}</span>
+            <svg class="lu-acc-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="lu-acc-body" hidden>
+            <p class="lu-ep-policy-content">${esc(a.text || '')}</p>
+          </div>
+        </div>`;
+      }).join('');
+
+      const groupId = `lu-group-${idx}`;
+      return `<div class="lu-ep-group" id="${groupId}">
+        <button type="button" class="lu-ep-group-header lu-ep-group-toggle" onclick="toggleLuGroup('${groupId}')" aria-expanded="false">
+          <div class="lu-ep-group-icon" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9 1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5L9 1zm0 0v4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="lu-ep-group-meta">
+            <div class="lu-ep-group-file" title="${esc(fileName)}">${esc(fileName)}</div>
+            <div class="lu-ep-group-date">${esc(dateStr)}</div>
+          </div>
+          <span class="lu-ep-group-badge">${articles.length} article${articles.length === 1 ? '' : 's'}</span>
+          <svg class="lu-ep-group-chevron" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 5l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="lu-ep-group-body" hidden>
+          <div class="lu-acc-list">${articleItems || '<p style="padding:12px 16px;font-size:12px;color:#94a3b8">No articles in this extraction.</p>'}</div>
+          <div class="lu-ep-group-actions">
+            <button class="lu-ep-raw-btn" onclick="openLuRawModal(${idx})">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M5 3L1 8l4 5M11 3l4 5-4 5M9 2l-2 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Raw data
+            </button>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+    // Wire raw data modal close on overlay click
+    const rawOverlay = document.getElementById('lu-raw-modal-overlay');
+    if (rawOverlay) {
+      rawOverlay.onclick = e => { if (e.target === rawOverlay) closeLuRawModal(); };
+    }
+
+  } catch (e) {
+    if (loadEl)  loadEl.style.display  = 'none';
+    if (errEl)   { errEl.textContent = e.message || String(e); errEl.style.display = 'block'; }
+  }
+}
+
+function toggleLuGroup(groupId) {
+  const group = document.getElementById(groupId);
+  if (!group) return;
+  const btn  = group.querySelector('.lu-ep-group-toggle');
+  const body = group.querySelector('.lu-ep-group-body');
+  const open = btn.getAttribute('aria-expanded') === 'true';
+  btn.setAttribute('aria-expanded', String(!open));
+  body.hidden = open;
+  group.classList.toggle('is-open', !open);
+}
+
+function toggleLuAccItem(uid) {
+  const item    = document.getElementById(uid);
+  if (!item) return;
+  const trigger = item.querySelector('.lu-acc-trigger');
+  const body    = item.querySelector('.lu-acc-body');
+  const open    = trigger.getAttribute('aria-expanded') === 'true';
+  trigger.setAttribute('aria-expanded', String(!open));
+  body.hidden = open;
+  item.classList.toggle('is-open', !open);
+}
+
+function openLuRawModal(idx) {
+  const records = window._luEpRecords || [];
+  const record  = records[idx];
+  if (!record) return;
+  const overlay = document.getElementById('lu-raw-modal-overlay');
+  const pre     = document.getElementById('lu-raw-modal-pre');
+  const title   = document.getElementById('lu-raw-modal-title');
+  if (!overlay || !pre) return;
+  if (title) title.textContent = record.sourceFile || 'Raw extracted regulation';
+  pre.textContent = JSON.stringify(record.articles || record.policies, null, 2);
+  overlay.classList.add('active');
+}
+
+function closeLuRawModal() {
+  const overlay = document.getElementById('lu-raw-modal-overlay');
+  if (overlay) overlay.classList.remove('active');
+}
+
+async function loadLegislativeInternalSourcesList() {
+  const loadEl = document.getElementById('lu-internal-loading');
+  const emptyEl = document.getElementById('lu-internal-empty');
+  const wrap = document.getElementById('lu-internal-table-wrap');
+  const tbody = document.getElementById('lu-internal-tbody');
+  const errEl = document.getElementById('lu-internal-error');
+  if (!loadEl || !tbody) return;
+  if (errEl) {
+    errEl.style.display = 'none';
+    errEl.textContent = '';
+  }
+  loadEl.style.display = 'flex';
+  if (emptyEl) emptyEl.style.display = 'none';
+  if (wrap) wrap.style.display = 'none';
+  tbody.innerHTML = '';
+  try {
+    const res = await fetch('/api/legislative-updates/internal-sources');
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+    loadEl.style.display = 'none';
+    const sources = json.sources || [];
+    luInternalSourcesCache = sources;
+    const filesBadge = document.getElementById('lu-is-tab-files-count');
+    if (filesBadge) filesBadge.textContent = sources.length > 0 ? String(sources.length) : '';
+    if (!sources.length) {
+      if (emptyEl) {
+        emptyEl.style.display = 'flex';
+      }
+      return;
+    }
+    if (emptyEl) emptyEl.style.display = 'none';
+    if (wrap) wrap.style.display = 'block';
+    tbody.innerHTML = sources
+      .map((s) => {
+        const dateStr = s.created_at ? new Date(s.created_at).toLocaleString() : '—';
+        const href = s.download_url ? String(s.download_url) : '';
+        const sid = escapeHtml(String(s.id));
+        const fname = s.original_file_name ? String(s.original_file_name) : '';
+        return `<tr class="lu-data-row" data-lu-id="${sid}">
+        <td class="lu-col-name"><span class="lu-cell-name">${escapeHtml(s.name)}</span></td>
+        <td class="lu-desc lu-col-desc">${escapeHtml(s.description || '') || '<span class="lu-desc-empty">—</span>'}</td>
+        <td class="lu-col-user lu-cell-muted">${escapeHtml(s.uploaded_by || '—')}</td>
+        <td class="lu-col-date lu-cell-muted">${escapeHtml(dateStr)}</td>
+        <td class="lu-col-actions"><div class="lu-row-actions">
+          <button type="button" class="lu-icon-btn" data-lu-edit="${sid}" aria-label="Edit source">${LU_ICON_EDIT}</button>
+          <button type="button" class="lu-icon-btn lu-icon-btn--danger" data-lu-delete="${sid}" aria-label="Delete source">${LU_ICON_TRASH}</button>
+          ${luBuildDocPreviewCell(href, fname)}
+        </div></td>
+      </tr>`;
+      })
+      .join('');
+  } catch (e) {
+    loadEl.style.display = 'none';
+    luInternalSourcesCache = [];
+    if (errEl) {
+      errEl.textContent = e.message || String(e);
+      errEl.style.display = 'block';
+    }
+  }
+}
+
+function loadLegislativeExternalSourcesPage() {
+  /* Static placeholder until connectors ship */
+}
+
+let pcfgTabsWired = false;
+
+function showPcfgTab(slug, pushHistory) {
+  const tab = slug === 'default-org' ? 'default-org' : 'impact';
+  const pageRoot = document.getElementById('page-pipeline-configuration');
+  if (!pageRoot) return;
+  pageRoot.querySelectorAll('[data-pcfg-tab]').forEach((btn) => {
+    const on = btn.getAttribute('data-pcfg-tab') === tab;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  const impactPanel = document.getElementById('pcfg-panel-impact');
+  const orgPanel = document.getElementById('pcfg-panel-default-org');
+  if (impactPanel) {
+    const show = tab === 'impact';
+    impactPanel.hidden = !show;
+    impactPanel.style.display = show ? '' : 'none';
+  }
+  if (orgPanel) {
+    const show = tab === 'default-org';
+    orgPanel.hidden = !show;
+    orgPanel.style.display = show ? '' : 'none';
+    if (show) loadPcfgDefaultOrgPanel();
+  }
+  if (pushHistory && currentPage === 'pipeline-configuration') {
+    if (tab === 'default-org') updateRoute('pipeline-configuration', 'default-org');
+    else updateRoute('pipeline-configuration', null);
+  }
+}
+
+const PCFG_DEFAULT_ORG_KEY = 'wathba_default_pipeline_org';
+
+function getPcfgDefaultOrgId() {
+  try { return localStorage.getItem(PCFG_DEFAULT_ORG_KEY) || ''; } catch { return ''; }
+}
+
+function setPcfgDefaultOrgId(id) {
+  try {
+    if (id) localStorage.setItem(PCFG_DEFAULT_ORG_KEY, id);
+    else localStorage.removeItem(PCFG_DEFAULT_ORG_KEY);
+  } catch { /* ignore */ }
+}
+
+async function loadPcfgDefaultOrgPanel() {
+  const listEl   = document.getElementById('pcfg-org-list');
+  const loadEl   = document.getElementById('pcfg-org-loading');
+  const emptyEl  = document.getElementById('pcfg-org-empty');
+  if (!listEl) return;
+
+  if (loadEl)  { loadEl.style.display = 'flex'; }
+  if (emptyEl) { emptyEl.style.display = 'none'; }
+  listEl.innerHTML = '';
+
+  let orgs = [];
+  try {
+    const d = await fetchJSON(API.orgContexts);
+    orgs = Array.isArray(d.contexts) ? d.contexts : [];
+  } catch (e) {
+    if (loadEl) loadEl.style.display = 'none';
+    listEl.innerHTML = `<p style="color:#ef4444;font-size:13px">Failed to load organisations: ${esc(e.message)}</p>`;
+    return;
+  }
+
+  if (loadEl) loadEl.style.display = 'none';
+
+  if (!orgs.length) {
+    if (emptyEl) emptyEl.style.display = 'flex';
+    return;
+  }
+
+  const currentDefault = getPcfgDefaultOrgId();
+
+  listEl.innerHTML = orgs.map(org => {
+    const id      = String(org.id || '');
+    const name    = org.nameEn || org.name || 'Untitled';
+    const sector  = org.sector || org.sectorCustom || '';
+    const country = org.country || org.geographic_scope || '';
+    const isDefault = id && id === currentDefault;
+    const initials = name.split(' ').slice(0, 2).map(w => w[0] || '').join('').toUpperCase() || '?';
+
+    return `<div class="pcfg-org-card${isDefault ? ' is-default' : ''}" data-org-id="${esc(id)}">
+      <div class="pcfg-org-avatar">${esc(initials)}</div>
+      <div class="pcfg-org-info">
+        <div class="pcfg-org-name">${esc(name)}</div>
+        ${sector || country ? `<div class="pcfg-org-meta">${[sector, country].filter(Boolean).map(esc).join(' · ')}</div>` : ''}
+      </div>
+      ${isDefault
+        ? `<span class="pcfg-org-badge-default">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Default
+          </span>`
+        : `<button class="pcfg-org-set-default-btn" onclick="onSetPcfgDefaultOrg('${esc(id)}')">Set as default</button>`
+      }
+    </div>`;
+  }).join('');
+}
+
+function onSetPcfgDefaultOrg(id) {
+  setPcfgDefaultOrgId(id);
+  loadPcfgDefaultOrgPanel();
+  toast('success', 'Default organisation set', 'This org will be pre-selected in the pipeline.');
+}
+
+function loadPipelineConfigurationPage() {
+  const slug = currentSubId === 'default-org' ? 'default-org' : 'impact';
+  showPcfgTab(slug, false);
+
+  const pageRoot = document.getElementById('page-pipeline-configuration');
+  if (!pageRoot) return;
+  if (!pcfgTabsWired) {
+    pcfgTabsWired = true;
+    pageRoot.querySelectorAll('[data-pcfg-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const t = btn.getAttribute('data-pcfg-tab');
+        showPcfgTab(t === 'default-org' ? 'default-org' : 'impact', true);
+      });
+    });
+  }
+}
+
+function loadLegislativeInternalSourcesPage() {
+  if (!legislativeInternalPageWired) {
+    legislativeInternalPageWired = true;
+    initLegislativeInternalPageListeners();
+    initLuIsTabs();
+  }
+  showLuIsTab('files');
+  loadLegislativeInternalSourcesList();
+}
+
 async function loadWorkbench(subId) {
   if (subId) {
     await loadWorkbenchDetail(subId);
@@ -13181,8 +13962,14 @@ async function refreshPolicyUpdatePipelineOrgDropdown() {
     opt.textContent = label;
     sel.appendChild(opt);
   }
-  if (prev && pupOrgContextsCache.some(x => String(x.id) === String(prev))) {
-    sel.value = prev;
+  // Restore previous selection, or fall back to the configured default org
+  const defaultId = getPcfgDefaultOrgId();
+  const restoreId = (prev && pupOrgContextsCache.some(x => String(x.id) === String(prev))) ? prev
+    : (defaultId && pupOrgContextsCache.some(x => String(x.id) === String(defaultId))) ? defaultId
+    : '';
+  if (restoreId) {
+    sel.value = restoreId;
+    onPolicyUpdatePipelineOrgSelect();
   }
 }
 
@@ -13251,6 +14038,9 @@ function resetPolicyPipelineStepper() {
 function pupStepperGo(delta) {
   pupStepperIndex = Math.max(0, Math.min(PUP_PIPELINE_LAST_STEP, pupStepperIndex + delta));
   syncPolicyPipelineStepperDOM();
+  if (pupStepperIndex === PUP_PIPELINE_LAST_STEP) {
+    loadPupPoliciesFromGrc();
+  }
 }
 
 function pupStepperBack() {
@@ -13271,7 +14061,9 @@ function pupStepperNext() {
 
 function loadPolicyUpdatePipelinePage() {
   initPolicyUpdatePipeline();
+  initPupExtractModal();
   refreshPolicyUpdatePipelineOrgDropdown().catch(() => {});
+  fetchGrcPolicies().catch(() => {});
 }
 
 function setPupPipelineLoadingOverlay(visible) {
@@ -13297,9 +14089,11 @@ function initPolicyUpdatePipeline() {
   const presetSel = document.getElementById('pup-preset-select');
   const cancelPipelineBtn = document.getElementById('pup-pipeline-cancel-btn');
   const fillSevBtn = document.getElementById('pup-f4-fill-defaults');
+  const loadGrcPoliciesBtn = document.getElementById('pup-load-grc-policies');
   if (!orgSel || !runBtn || !backBtn || !nextBtn || !presetSel) return;
   policyUpdatePipelineWired = true;
   if (fillSevBtn) fillSevBtn.addEventListener('click', () => fillPupSeveritySuggestedDefinitions());
+  if (loadGrcPoliciesBtn) loadGrcPoliciesBtn.addEventListener('click', () => loadPupPoliciesFromGrc());
   if (cancelPipelineBtn) {
     cancelPipelineBtn.addEventListener('click', () => {
       if (pupPipelineAbortController) pupPipelineAbortController.abort();
@@ -13675,6 +14469,263 @@ function collectPupF4SeverityDefinitions() {
   return out;
 }
 
+// ─── Policy file extraction ────────────────────────────────────────────────
+
+let pupExtractedPoliciesResult = null; // holds the last extraction for the modal
+
+function openPupExtractModal(articles, sourceFile, elapsed, context) {
+  const overlay = document.getElementById('pup-extract-modal-overlay');
+  const body = document.getElementById('pup-extract-modal-body');
+  const meta = document.getElementById('pup-extract-modal-meta');
+  const runLabel = document.getElementById('pup-extract-run-label');
+  if (!overlay || !body) return;
+
+  // context: 'pipeline' (PUP page) | 'internal-sources'
+  pupExtractedPoliciesResult = { articles, sourceFile, context: context || 'pipeline' };
+
+  if (meta) {
+    meta.textContent = `${articles.length} article${articles.length === 1 ? '' : 's'} · ${sourceFile}${elapsed ? ' · ' + elapsed + 's' : ''}`;
+  }
+  if (runLabel) {
+    runLabel.textContent = context === 'internal-sources' ? 'Save regulation' : 'Run pipeline';
+  }
+
+  body.innerHTML = articles.map((a, i) =>
+    `<div class="pup-extract-policy-card">
+      <span class="pup-extract-article-label">${esc(a.article || 'Article ' + (i + 1))}</span>
+      <p class="pup-extract-policy-title">${esc(a.title || '')}</p>
+      <p class="pup-extract-policy-content">${esc(a.text || '')}</p>
+    </div>`
+  ).join('');
+
+  overlay.hidden = false;
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function closePupExtractModal() {
+  const overlay = document.getElementById('pup-extract-modal-overlay');
+  if (overlay) { overlay.hidden = true; overlay.setAttribute('aria-hidden', 'true'); }
+}
+
+let _pupExtractStageTimer = null;
+
+function setPupExtractLoading(visible, fileName) {
+  const ov = document.getElementById('pup-extract-loading-overlay');
+  const lbl = document.getElementById('pup-extract-loading-label');
+  if (!ov) return;
+
+  if (visible) {
+    ov.hidden = false;
+    ov.setAttribute('aria-hidden', 'false');
+
+    // Stage messages + pill progression
+    const stages = [
+      { label: `Reading "${fileName || 'document'}"…`,   pill: 0 },
+      { label: 'Analysing document structure…',           pill: 1 },
+      { label: 'Extracting regulation articles…',         pill: 2 },
+      { label: 'Finalising results…',                     pill: 2 },
+    ];
+    const pills = [0, 1, 2].map(i => document.getElementById(`pup-extract-stage-${i}`));
+
+    function applyStage(idx) {
+      const s = stages[Math.min(idx, stages.length - 1)];
+      if (lbl) lbl.textContent = s.label;
+      pills.forEach((p, i) => {
+        if (!p) return;
+        p.classList.toggle('is-active', i === s.pill);
+        p.classList.toggle('is-done', i < s.pill);
+        p.classList.toggle('is-active', i === s.pill && idx < stages.length - 1 || (i === s.pill && idx === stages.length - 1));
+      });
+    }
+
+    applyStage(0);
+    let stageIdx = 1;
+    const delays = [4000, 8000, 14000]; // advance at 4s, 12s, 26s
+    function scheduleNext(delay) {
+      _pupExtractStageTimer = setTimeout(() => {
+        applyStage(stageIdx);
+        stageIdx++;
+        if (stageIdx < stages.length) scheduleNext(delays[stageIdx - 1] || 8000);
+      }, delay);
+    }
+    scheduleNext(delays[0]);
+
+  } else {
+    ov.hidden = true;
+    ov.setAttribute('aria-hidden', 'true');
+    if (_pupExtractStageTimer) { clearTimeout(_pupExtractStageTimer); _pupExtractStageTimer = null; }
+    // Reset pills
+    [0, 1, 2].forEach(i => {
+      const p = document.getElementById(`pup-extract-stage-${i}`);
+      if (p) { p.classList.remove('is-active', 'is-done'); }
+    });
+  }
+}
+
+async function onPupPolicyFileSelected(file, context) {
+  if (!file) return;
+  const allowed = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/msword', 'text/plain', 'text/markdown'];
+  if (!allowed.includes(file.type) && !file.name.match(/\.(pdf|docx?|txt|md)$/i)) {
+    toast('error', 'Unsupported file', 'Please upload a PDF, Word, or text document.');
+    return;
+  }
+
+  const extractNotifId = `extract-${Date.now()}`;
+  addNotif(extractNotifId, `Extracting: ${file.name}`, 'Analysing document with Gemini…', 'running');
+  setPupExtractLoading(true, file.name);
+  try {
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    const r = await fetch('/api/ai-tools/extract-policies-from-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: file.name, mimeType: file.type || 'application/octet-stream', data: base64 }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText || 'Extraction failed');
+
+    const { articles, elapsed } = j;
+    if (!articles || !articles.length) {
+      updateNotif(extractNotifId, { status: 'info', message: 'No articles found in document.' });
+      toast('info', 'No articles found', 'Gemini could not find any regulation articles in this document.');
+      return;
+    }
+    updateNotif(extractNotifId, { status: 'success', message: `${articles.length} article${articles.length === 1 ? '' : 's'} extracted` });
+
+    if (context === 'internal-sources') {
+      // Skip the modal — save and run pipeline automatically
+      const regulationText = articles.map(a =>
+        `${a.article}${a.title ? ' — ' + a.title : ''}\n${a.text}`
+      ).join('\n\n');
+      fetch('/api/ai-tools/extracted-regulations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ articles, sourceFile: file.name }),
+      }).catch(() => {});
+      toast('info', 'Pipeline started', `Running pipeline for "${file.name}" in the background.`);
+      runPipelineInBackground(regulationText, file.name);
+      return;
+    }
+
+    openPupExtractModal(articles, file.name, elapsed, context || 'pipeline');
+  } catch (err) {
+    console.error('[RegulationExtract]', err);
+    updateNotif(extractNotifId, { status: 'error', message: err.message || 'Extraction failed' });
+    toast('error', 'Extraction failed', err.message || 'Could not extract regulation from file.');
+  } finally {
+    setPupExtractLoading(false);
+    // Reset file input so same file can be re-selected
+    const fi = document.getElementById('pup-policy-file-input');
+    if (fi) fi.value = '';
+  }
+}
+
+async function onPupExtractRunPipeline() {
+  if (!pupExtractedPoliciesResult) return;
+  const { articles, sourceFile, context } = pupExtractedPoliciesResult;
+
+  // Save to DB
+  try {
+    await fetch('/api/ai-tools/extracted-regulations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ articles, sourceFile }),
+    });
+  } catch (e) {
+    console.warn('[RegulationExtract] DB save failed (non-fatal):', e.message);
+  }
+
+  // Reconstruct regulation plain text from articles
+  const regulationText = articles.map(a =>
+    `${a.article}${a.title ? ' — ' + a.title : ''}\n${a.text}`
+  ).join('\n\n');
+
+  closePupExtractModal();
+  pupExtractedPoliciesResult = null;
+
+  if (context === 'internal-sources') {
+    // Fire pipeline in the background and track via notification system
+    runPipelineInBackground(regulationText, sourceFile);
+    return;
+  }
+
+  // PUP context: fill regulation textarea and run pipeline
+  const regEl = document.getElementById('pup-regulation');
+  if (regEl) regEl.value = regulationText;
+
+  const statusEl = document.getElementById('pup-grc-policies-status');
+  if (statusEl) { statusEl.innerHTML = ''; statusEl.textContent = `${articles.length} article${articles.length === 1 ? '' : 's'} extracted from "${sourceFile}"`; }
+
+  runPolicyUpdatePipeline();
+}
+
+function initPupExtractModal() {
+  const cancelBtn = document.getElementById('pup-extract-cancel-btn');
+  const runBtn = document.getElementById('pup-extract-run-btn');
+  const uploadBtn = document.getElementById('pup-upload-extract-btn');
+  const fileInput = document.getElementById('pup-policy-file-input');
+
+  if (cancelBtn) cancelBtn.addEventListener('click', closePupExtractModal);
+  if (runBtn) runBtn.addEventListener('click', onPupExtractRunPipeline);
+  if (uploadBtn && fileInput) {
+    uploadBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files && fileInput.files[0]) onPupPolicyFileSelected(fileInput.files[0]);
+    });
+  }
+
+  // Close on backdrop click
+  const overlay = document.getElementById('pup-extract-modal-overlay');
+  if (overlay) {
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closePupExtractModal(); });
+  }
+}
+
+async function loadPupPoliciesFromGrc() {
+  const btn = document.getElementById('pup-load-grc-policies');
+  const statusEl = document.getElementById('pup-grc-policies-status');
+  const polEl = document.getElementById('pup-policies-json');
+  if (!polEl) return;
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+  polEl.classList.add('pup-policies-textarea-loading');
+  if (statusEl) {
+    statusEl.className = 'pup-grc-status';
+    statusEl.innerHTML = '<span class="pup-grc-spinner"></span>Loading policies from GRC…';
+  }
+
+  try {
+    const policies = await fetchGrcPolicies();
+    if (!policies.length) {
+      if (statusEl) { statusEl.innerHTML = ''; statusEl.textContent = 'No policies found in GRC.'; }
+      toast('info', 'No policies', 'The GRC API returned no policies.');
+      return;
+    }
+    const mapped = policies.map(p => ({
+      id: String(p.id),
+      title: p.refId ? `[${p.refId}] ${p.name}` : p.name,
+      content: p.description || p.name,
+    }));
+    polEl.value = JSON.stringify(mapped, null, 2);
+    const label = `${mapped.length} polic${mapped.length === 1 ? 'y' : 'ies'} loaded from GRC`;
+    if (statusEl) { statusEl.innerHTML = ''; statusEl.textContent = label; }
+    toast('success', 'Policies loaded', label);
+  } catch (err) {
+    console.error('[Policy pipeline] loadPupPoliciesFromGrc:', err);
+    if (statusEl) { statusEl.innerHTML = ''; statusEl.textContent = 'Failed to load from GRC.'; }
+    toast('error', 'Load failed', err.message || 'Could not fetch policies from GRC.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Load from GRC'; }
+    polEl.classList.remove('pup-policies-textarea-loading');
+  }
+}
+
 async function runPolicyUpdatePipeline() {
   const orgEl = document.getElementById('pup-org-context');
   const regEl = document.getElementById('pup-regulation');
@@ -13737,6 +14788,21 @@ async function runPolicyUpdatePipeline() {
     }
     openPolicyPipelineResultModal(payload);
     toast('success', 'Pipeline finished', `Stage: ${payload.stage_reached || 'done'}`);
+    addNotif(`pup-fg-${Date.now()}`, 'Pipeline complete', `Stage reached: ${pupStageLabel(payload.stage_reached)}`, 'success', payload);
+
+    // Persist result to DB (non-blocking, non-fatal)
+    fetch('/api/ai-tools/pipeline-runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgContext: orgEl ? orgEl.value : '',
+        regulationText,
+        policyCount: policies.length,
+        result: payload,
+      }),
+    }).then(r => r.json()).then(saved => {
+      if (saved && saved.id) console.log('[PipelineRuns] Saved run:', saved.id);
+    }).catch(e => console.warn('[PipelineRuns] Save failed (non-fatal):', e.message));
   } catch (e) {
     if (e && e.name === 'AbortError') {
       toast('info', 'Cancelled', 'Pipeline request was cancelled. The server may still finish processing.');
@@ -13760,6 +14826,164 @@ async function runPolicyUpdatePipeline() {
   }
 }
 
+// ─── Background Pipeline Run (triggered from internal sources) ─
+
+async function runPipelineInBackground(regulationText, sourceFile) {
+  const runId = `bg-pipeline-${Date.now()}`;
+  addNotif(runId, `Pipeline: ${sourceFile}`, 'Loading org context…', 'running');
+
+  try {
+    // ── 1. Resolve org context ──────────────────────────────────
+    let orgContextText = '';
+    let orgName = '';
+    const defaultOrgId = getPcfgDefaultOrgId();
+
+    // Use already-cached orgs if available, otherwise fetch
+    let allOrgs = Array.isArray(pupOrgContextsCache) && pupOrgContextsCache.length
+      ? pupOrgContextsCache
+      : [];
+    if (!allOrgs.length) {
+      try {
+        const od = await fetchJSON(API.orgContexts);
+        allOrgs = Array.isArray(od.contexts) ? od.contexts : [];
+        pupOrgContextsCache = allOrgs;
+      } catch (e) { console.warn('[BgPipeline] org fetch failed:', e.message); }
+    }
+
+    // Pick: configured default → first available
+    const org = (defaultOrgId && allOrgs.find(o => String(o.id) === String(defaultOrgId)))
+      || allOrgs[0]
+      || null;
+
+    if (org) {
+      orgContextText = formatOrgProfileTextForPipeline(org);
+      orgName = org.nameEn || org.name || 'Unknown org';
+      updateNotif(runId, { message: `Org: ${orgName} · Fetching GRC policies…` });
+    } else {
+      updateNotif(runId, { message: '⚠ No org context found · Fetching GRC policies…' });
+      toast('warning', 'No default org set', 'Go to Pipeline Configuration → Default org selection to set one.');
+    }
+
+    // ── 2. GRC policies ────────────────────────────────────────
+    let policies = [];
+    try {
+      const rawPols = await fetchGrcPolicies();
+      policies = rawPols.map(p => ({
+        id:      String(p.id),
+        title:   p.refId ? `[${p.refId}] ${p.name}` : p.name,
+        content: p.description || p.name,
+      }));
+    } catch (e) { console.warn('[BgPipeline] GRC policies fetch failed:', e.message); }
+
+    updateNotif(runId, { message: `Running · ${orgName || 'no org'} · ${policies.length} policies · ${sourceFile}` });
+
+    // ── 3. Run the pipeline ────────────────────────────────────
+    const r = await fetch('/api/ai-tools/policy-update-pipeline', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgContext:    orgContextText,
+        regulationText,
+        policies,
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText || 'Pipeline failed');
+    const payload = j.data != null ? j.data : j;
+
+    // ── 4. Persist to DB ───────────────────────────────────────
+    fetch('/api/ai-tools/pipeline-runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orgContext: orgContextText, regulationText, policyCount: policies.length, result: payload }),
+    }).catch(() => {});
+
+    updateNotif(runId, {
+      status:  'success',
+      message: `Stage: ${pupStageLabel(payload.stage_reached)} · ${policies.length} policies · click to view`,
+      result:  payload,
+    });
+
+  } catch (e) {
+    console.error('[BgPipeline]', e);
+    updateNotif(runId, { status: 'error', message: e.message || 'Pipeline failed' });
+  }
+}
+
+// ─── Pipeline History ──────────────────────────────────────────
+
+async function loadPipelineHistoryPage() {
+  const loadEl  = document.getElementById('ph-loading');
+  const emptyEl = document.getElementById('ph-empty');
+  const errEl   = document.getElementById('ph-error');
+  const gridEl  = document.getElementById('ph-grid');
+  if (!gridEl) return;
+
+  if (loadEl)  { loadEl.style.display = 'flex'; }
+  if (emptyEl) { emptyEl.style.display = 'none'; }
+  if (errEl)   { errEl.style.display = 'none'; errEl.textContent = ''; }
+  gridEl.innerHTML = '';
+
+  try {
+    const res  = await fetch('/api/ai-tools/pipeline-runs');
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+
+    if (loadEl) loadEl.style.display = 'none';
+    const runs = json.data || [];
+
+    if (!runs.length) {
+      if (emptyEl) emptyEl.style.display = 'flex';
+      return;
+    }
+
+    gridEl.innerHTML = runs.map(run => {
+      const date    = run.created_at ? new Date(run.created_at).toLocaleString() : '—';
+      const stage   = run.stage_reached || '—';
+      const snippet = run.regulation_snippet || 'No regulation text';
+      const org     = run.org_context ? run.org_context.slice(0, 80).replace(/\s+/g, ' ').trim() : '—';
+      const count   = run.policy_count ?? '—';
+      const stageColor = stage === 'f4' ? '#16a34a' : stage === 'f3' ? '#ca8a04' : stage === 'f2' ? '#2563eb' : stage === 'f1' ? '#9333ea' : '#64748b';
+
+      return `<div class="ph-card" onclick="openPhRunDetail('${esc(run.id)}')">
+        <div class="ph-card-header">
+          <span class="ph-stage-badge" style="background:${stageColor}1a;color:${stageColor};border-color:${stageColor}40">${esc(pupStageLabel ? pupStageLabel(stage) : stage)}</span>
+          <span class="ph-card-date">${esc(date)}</span>
+        </div>
+        <p class="ph-card-snippet">${esc(snippet)}</p>
+        <div class="ph-card-meta">
+          <span class="ph-meta-item">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" stroke-width="1.4"/><path d="M5 7h6M5 10h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+            ${esc(String(count))} polic${count === 1 ? 'y' : 'ies'}
+          </span>
+          ${org !== '—' ? `<span class="ph-meta-item">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="2" y="6" width="12" height="8" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M5 6V5a3 3 0 0 1 6 0v1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+            ${esc(org)}…
+          </span>` : ''}
+        </div>
+        <div class="ph-card-arrow" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+      </div>`;
+    }).join('');
+
+  } catch (e) {
+    if (loadEl) loadEl.style.display = 'none';
+    if (errEl)  { errEl.textContent = e.message || String(e); errEl.style.display = 'block'; }
+  }
+}
+
+async function openPhRunDetail(id) {
+  try {
+    const res  = await fetch(`/api/ai-tools/pipeline-runs/${encodeURIComponent(id)}`);
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+    openPolicyPipelineResultModal(json.data.result);
+  } catch (e) {
+    toast('error', 'Could not load run', e.message || String(e));
+  }
+}
+
 // ─── Init ─────────────────────────────────────────────────────
 
 console.log('[admin.js] Script loaded, readyState:', document.readyState);
@@ -13771,6 +14995,7 @@ function initApp() {
   initDataStudioRiskScenarioUpload();
   initPolicyPipelineResultModalListeners();
   initPolicyUpdatePipeline();
+  initPupExtractModal();
   const { page, subId } = parseRoute();
   console.log(`[admin.js] Initializing → route: /${page}${subId ? '/' + subId : ''}`);
   navigateTo(page, true, subId);

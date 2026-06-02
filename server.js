@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const { GoogleGenAI } = require('@google/genai');
 const Database = require('better-sqlite3');
@@ -38,6 +39,95 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // GRC Platform configuration
 const GRC_API_URL = (process.env.GRC_API_URL || 'https://grc.wathbah.dev').replace(/\/+$/, '');
+
+/** GCS bucket for legislative internal documents (override with GCS_LEGISLATIVE_BUCKET). Uses GOOGLE_APPLICATION_CREDENTIALS or default credentials. */
+const GCS_LEGISLATIVE_BUCKET_NAME = String(
+  process.env.GCS_LEGISLATIVE_BUCKET || 'local-legislative-updates-docs'
+).replace(/\/+$/, '');
+
+/** Lazy-init GCS client for legislative uploads (optional dependency at runtime). */
+let _legislativeGcsCache = null;
+function getLegislativeGcsClient() {
+  if (_legislativeGcsCache && _legislativeGcsCache.err)
+    return { ok: false, error: _legislativeGcsCache.err };
+  if (_legislativeGcsCache && _legislativeGcsCache.storage)
+    return { ok: true, storage: _legislativeGcsCache.storage };
+  try {
+    const { Storage } = require('@google-cloud/storage');
+    const storage = new Storage();
+    _legislativeGcsCache = { storage };
+    return { ok: true, storage };
+  } catch (e) {
+    const err = e.message || String(e);
+    _legislativeGcsCache = { err };
+    return { ok: false, error: `Google Cloud Storage: ${err}` };
+  }
+}
+
+function legislativeSafeObjectSegment(name) {
+  const base = path.basename(String(name || 'file')).replace(/[^a-zA-Z0-9._-]/g, '_');
+  return base.slice(0, 200) || 'file';
+}
+
+function legislativePublicUrl(bucketName, objectPath) {
+  const enc = objectPath
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  return `https://storage.googleapis.com/${bucketName}/${enc}`;
+}
+
+async function legislativeSignedDownloadUrl(storage, bucketName, objectPath, mimeType) {
+  const opts = {
+    version: 'v4',
+    action: 'read',
+    expires: Date.now() + 60 * 60 * 1000,
+  };
+  if (mimeType && /pdf/i.test(String(mimeType))) opts.responseDisposition = 'inline';
+  const [url] = await storage.bucket(bucketName).file(objectPath).getSignedUrl(opts);
+  return url;
+}
+
+/**
+ * Upload a buffer to GCS. Uses resumable upload + validation disabled to avoid
+ * "Cannot call write after a stream was destroyed" (HashStreamValidator) seen
+ * with resumable:false on some Windows / Node versions. Falls back to temp-file upload.
+ */
+async function legislativeUploadBuffer(storage, bucketName, objectPath, buf, mimeType, customMeta) {
+  const bucket = storage.bucket(bucketName);
+  const file = bucket.file(objectPath);
+  const saveOpts = {
+    resumable: true,
+    validation: false,
+    timeout: 180000,
+    contentType: mimeType || 'application/octet-stream',
+    metadata: { metadata: customMeta },
+  };
+  try {
+    await file.save(buf, saveOpts);
+    return;
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    if (!/stream was destroyed|write after a stream was destroyed/i.test(msg)) throw err;
+    console.warn('[Legislative] save() stream error, retrying via temp file:', msg.slice(0, 120));
+  }
+  const tmpPath = path.join(os.tmpdir(), `legislative_${crypto.randomUUID()}.upload`);
+  fs.writeFileSync(tmpPath, buf);
+  try {
+    await bucket.upload(tmpPath, {
+      destination: objectPath,
+      gzip: false,
+      metadata: {
+        contentType: mimeType || 'application/octet-stream',
+        metadata: customMeta,
+      },
+    });
+  } finally {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (_) { /* ignore */ }
+  }
+}
 
 // ==========================================
 // Authentication (via GRC IAM)
@@ -155,6 +245,12 @@ const ADMIN_SPA_ROUTE_PREFIXES = [
   '/prompts',
   '/file-collections',
   '/workbench',
+  '/legislative-internal-sources',
+  '/legislative-external-sources',
+  '/legislative-updates',
+  '/pipeline-configuration',
+  '/pipeline-impact-criteria',
+  '/pipeline-default-org',
   '/audit-log',
 ];
 
@@ -338,6 +434,21 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_chain_org ON org_context_chain(org_context_id);
   CREATE INDEX IF NOT EXISTS idx_chain_fw  ON org_context_chain(framework_uuid);
+
+  CREATE TABLE IF NOT EXISTS legislative_internal_sources (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    original_file_name TEXT NOT NULL,
+    mime_type TEXT DEFAULT 'application/octet-stream',
+    size INTEGER DEFAULT 0,
+    gcs_bucket TEXT NOT NULL,
+    gcs_object_path TEXT NOT NULL,
+    public_url TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_legislative_internal_created ON legislative_internal_sources(created_at DESC);
 `);
 
 // Migrate policy_generation_history: add extraction_data and policy_uuid columns if missing
@@ -382,6 +493,46 @@ try {
     db.exec(`ALTER TABLE cs_sessions ADD COLUMN exported_control_ids TEXT NOT NULL DEFAULT '[]'`);
   }
 } catch (migErr) { console.warn('CS sessions migration:', migErr.message); }
+
+// Create extracted_policies table (legacy — kept for backward compat)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extracted_policies (
+      id TEXT PRIMARY KEY,
+      source_file TEXT NOT NULL DEFAULT '',
+      policies TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL
+    )
+  `);
+} catch (migErr) { console.warn('extracted_policies table migration:', migErr.message); }
+
+// Create extracted_regulations table (regulation articles from uploaded files)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extracted_regulations (
+      id TEXT PRIMARY KEY,
+      source_file TEXT NOT NULL DEFAULT '',
+      articles TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL
+    )
+  `);
+} catch (migErr) { console.warn('extracted_regulations table migration:', migErr.message); }
+
+// Create pipeline_runs table (Policy Update Pipeline execution history)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pipeline_runs (
+      id TEXT PRIMARY KEY,
+      org_context TEXT NOT NULL DEFAULT '',
+      regulation_snippet TEXT NOT NULL DEFAULT '',
+      regulation_text TEXT NOT NULL DEFAULT '',
+      policy_count INTEGER NOT NULL DEFAULT 0,
+      stage_reached TEXT NOT NULL DEFAULT '',
+      result TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    )
+  `);
+} catch (migErr) { console.warn('pipeline_runs table migration:', migErr.message); }
 
 // Migrate org_contexts: add new profile columns if missing
 try {
@@ -430,6 +581,33 @@ const dbListSessions = db.prepare(`
 const dbDeleteSession = db.prepare(`DELETE FROM sessions WHERE id = ?`);
 const dbDeleteSessionMessages = db.prepare(`DELETE FROM messages WHERE session_id = ?`);
 
+// Extracted policies DB helpers (legacy)
+const dbInsertExtractedPolicies = db.prepare(`
+  INSERT INTO extracted_policies (id, source_file, policies, created_at)
+  VALUES (?, ?, ?, ?)
+`);
+const dbGetExtractedPolicies = db.prepare(`SELECT * FROM extracted_policies WHERE id = ?`);
+const dbListExtractedPolicies = db.prepare(`SELECT * FROM extracted_policies ORDER BY created_at DESC LIMIT 50`);
+
+// Extracted regulations DB helpers
+const dbInsertExtractedRegulations = db.prepare(`
+  INSERT INTO extracted_regulations (id, source_file, articles, created_at)
+  VALUES (?, ?, ?, ?)
+`);
+const dbGetExtractedRegulation = db.prepare(`SELECT * FROM extracted_regulations WHERE id = ?`);
+const dbListExtractedRegulations = db.prepare(`SELECT * FROM extracted_regulations ORDER BY created_at DESC LIMIT 50`);
+
+// Pipeline runs DB helpers
+const dbInsertPipelineRun = db.prepare(`
+  INSERT INTO pipeline_runs (id, org_context, regulation_snippet, regulation_text, policy_count, stage_reached, result, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const dbGetPipelineRun = db.prepare(`SELECT * FROM pipeline_runs WHERE id = ?`);
+const dbListPipelineRuns = db.prepare(`
+  SELECT id, org_context, regulation_snippet, regulation_text, policy_count, stage_reached, result, created_at
+  FROM pipeline_runs ORDER BY created_at DESC LIMIT 100
+`);
+
 // Local prompts DB helpers
 const dbGetLocalPrompt = db.prepare(`SELECT * FROM local_prompts WHERE id = ?`);
 const dbGetLocalPromptByKey = db.prepare(`SELECT * FROM local_prompts WHERE key = ?`);
@@ -455,6 +633,26 @@ const dbUpdateOrgContext = db.prepare(`
 const dbDeleteOrgContext = db.prepare(`DELETE FROM org_contexts WHERE id = ?`);
 
 const dbUpdateOrgContextStoreId = db.prepare(`UPDATE org_contexts SET store_id = ?, updated_at = ? WHERE id = ?`);
+
+const dbInsertLegislativeInternal = db.prepare(`
+  INSERT INTO legislative_internal_sources (
+    id, name, description, original_file_name, mime_type, size,
+    gcs_bucket, gcs_object_path, public_url, uploaded_by, created_at
+  ) VALUES (
+    @id, @name, @description, @original_file_name, @mime_type, @size,
+    @gcs_bucket, @gcs_object_path, @public_url, @uploaded_by, @created_at
+  )
+`);
+const dbListLegislativeInternal = db.prepare(
+  `SELECT * FROM legislative_internal_sources ORDER BY datetime(created_at) DESC`
+);
+const dbGetLegislativeInternal = db.prepare(
+  `SELECT * FROM legislative_internal_sources WHERE id = ?`
+);
+const dbUpdateLegislativeInternalMeta = db.prepare(
+  `UPDATE legislative_internal_sources SET name = ?, description = ? WHERE id = ?`
+);
+const dbDeleteLegislativeInternal = db.prepare(`DELETE FROM legislative_internal_sources WHERE id = ?`);
 
 // ---- CISO Entity Cache DB helpers ----
 const dbGetCachedEntity = db.prepare(`SELECT * FROM ciso_entity_cache WHERE id = ? AND entity_type = ?`);
@@ -1319,6 +1517,50 @@ function sendJSON(res, statusCode, data) {
     'Content-Length': buf.length,
   });
   res.end(buf);
+}
+
+/**
+ * Recover complete {...} objects from a truncated JSON array string.
+ * Walks brace depth while respecting strings and escapes so it can salvage
+ * partial responses when an LLM hits its output token limit mid-array.
+ * Each recovered object is JSON.parsed individually; malformed ones are skipped.
+ */
+function salvageArticleObjects(rawJsonArrayStr) {
+  if (typeof rawJsonArrayStr !== 'string' || !rawJsonArrayStr.length) return [];
+  const s = rawJsonArrayStr;
+  const out = [];
+  let i = s.indexOf('[');
+  if (i < 0) i = 0; else i++;
+  while (i < s.length) {
+    while (i < s.length && /\s|,/.test(s[i])) i++;
+    if (i >= s.length || s[i] !== '{') break;
+    const start = i;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (; i < s.length; i++) {
+      const c = s[i];
+      if (esc) { esc = false; continue; }
+      if (inStr) {
+        if (c === '\\') { esc = true; continue; }
+        if (c === '"')  { inStr = false; continue; }
+        continue;
+      }
+      if (c === '"') { inStr = true; continue; }
+      if (c === '{') depth++;
+      else if (c === '}') {
+        depth--;
+        if (depth === 0) {
+          const candidate = s.slice(start, i + 1);
+          try { out.push(JSON.parse(candidate)); } catch (_) { /* skip malformed */ }
+          i++;
+          break;
+        }
+      }
+    }
+    if (depth !== 0) break; // truncated mid-object — done
+  }
+  return out;
 }
 
 // Parse JSON body from request
@@ -4686,6 +4928,242 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ---- Legislative updates: internal sources (GCS + SQLite) ----
+  if (url.pathname === '/api/legislative-updates/internal-sources' && req.method === 'GET') {
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) {
+        sendJSON(res, 401, { error: 'Unauthorized.' });
+        return;
+      }
+      const rows = dbListLegislativeInternal.all();
+      const gcs = getLegislativeGcsClient();
+      const sources = [];
+      for (const row of rows) {
+        let download_url = row.public_url;
+        if (gcs.ok) {
+          try {
+            download_url = await legislativeSignedDownloadUrl(
+              gcs.storage,
+              row.gcs_bucket,
+              row.gcs_object_path,
+              row.mime_type
+            );
+          } catch (sigErr) {
+            console.warn('[Legislative] signed URL:', sigErr.message);
+          }
+        }
+        sources.push({
+          id: row.id,
+          name: row.name,
+          description: row.description,
+          original_file_name: row.original_file_name,
+          mime_type: row.mime_type,
+          size: row.size,
+          uploaded_by: row.uploaded_by,
+          created_at: row.created_at,
+          download_url,
+        });
+      }
+      sendJSON(res, 200, { success: true, sources });
+    } catch (err) {
+      console.error('[Legislative] list:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to list sources.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/legislative-updates/internal-sources' && req.method === 'POST') {
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) {
+        sendJSON(res, 401, { error: 'Unauthorized.' });
+        return;
+      }
+      const gcs = getLegislativeGcsClient();
+      if (!gcs.ok) {
+        sendJSON(res, 503, {
+          error: gcs.error,
+          hint: 'Install @google-cloud/storage and set GOOGLE_APPLICATION_CREDENTIALS (or run on GCP with a service account that can sign URLs and write to the bucket).',
+        });
+        return;
+      }
+      const body = await parseBody(req);
+      const name = String(body.name || '').trim();
+      const description = String(body.description != null ? body.description : '').trim();
+      const fileName = String(body.fileName || body.originalName || '').trim();
+      const mimeType = String(body.mimeType || 'application/octet-stream').trim();
+      if (!name) {
+        sendJSON(res, 400, { error: 'name is required.' });
+        return;
+      }
+      if (!body.data || typeof body.data !== 'string') {
+        sendJSON(res, 400, { error: 'File data (base64) is required.' });
+        return;
+      }
+      let buf;
+      try {
+        buf = Buffer.from(body.data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 file payload.' });
+        return;
+      }
+      const MAX_LEGISLATIVE_FILE = 50 * 1024 * 1024;
+      if (!buf.length) {
+        sendJSON(res, 400, { error: 'Empty file.' });
+        return;
+      }
+      if (buf.length > MAX_LEGISLATIVE_FILE) {
+        sendJSON(res, 400, { error: 'File too large (max 50 MB).' });
+        return;
+      }
+
+      const id = crypto.randomUUID();
+      const safeSeg = legislativeSafeObjectSegment(fileName || 'document');
+      const objectPath = `internal/${id}/${safeSeg}`;
+      const bucketName = GCS_LEGISLATIVE_BUCKET_NAME;
+      const file = gcs.storage.bucket(bucketName).file(objectPath);
+
+      await legislativeUploadBuffer(
+        gcs.storage,
+        bucketName,
+        objectPath,
+        buf,
+        mimeType || 'application/octet-stream',
+        { uploaded_by: session.username, source_name: name }
+      );
+
+      const publicUrl = legislativePublicUrl(bucketName, objectPath);
+      const createdAt = new Date().toISOString();
+      const meta = {
+        id,
+        name,
+        description,
+        original_file_name: fileName || safeSeg,
+        mime_type: mimeType || 'application/octet-stream',
+        size: buf.length,
+        gcs_bucket: bucketName,
+        gcs_object_path: objectPath,
+        public_url: publicUrl,
+        uploaded_by: session.username,
+        created_at: createdAt,
+      };
+
+      try {
+        dbInsertLegislativeInternal.run(meta);
+      } catch (dbErr) {
+        try {
+          await file.delete({ ignoreNotFound: true });
+        } catch (_) { /* ignore */ }
+        throw dbErr;
+      }
+
+      let download_url = publicUrl;
+      try {
+        download_url = await legislativeSignedDownloadUrl(
+          gcs.storage,
+          bucketName,
+          objectPath,
+          mimeType || 'application/octet-stream'
+        );
+      } catch (_) { /* keep publicUrl */ }
+
+      sendJSON(res, 201, {
+        success: true,
+        source: {
+          id: meta.id,
+          name: meta.name,
+          description: meta.description,
+          original_file_name: meta.original_file_name,
+          mime_type: meta.mime_type,
+          size: meta.size,
+          uploaded_by: meta.uploaded_by,
+          created_at: meta.created_at,
+          download_url,
+        },
+      });
+    } catch (err) {
+      console.error('[Legislative] upload:', err);
+      sendJSON(res, 500, { error: err.message || 'Upload failed.' });
+    }
+    return;
+  }
+
+  const luInternalOneMatch = url.pathname.match(
+    /^\/api\/legislative-updates\/internal-sources\/([^/]+)$/
+  );
+  if (luInternalOneMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
+    const id = luInternalOneMatch[1];
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) {
+        sendJSON(res, 401, { error: 'Unauthorized.' });
+        return;
+      }
+      const row = dbGetLegislativeInternal.get(id);
+      if (!row) {
+        sendJSON(res, 404, { error: 'Source not found.' });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const gcs = getLegislativeGcsClient();
+        if (gcs.ok) {
+          try {
+            await gcs.storage.bucket(row.gcs_bucket).file(row.gcs_object_path).delete({ ignoreNotFound: true });
+          } catch (delErr) {
+            console.warn('[Legislative] GCS delete:', delErr.message);
+          }
+        }
+        dbDeleteLegislativeInternal.run(id);
+        sendJSON(res, 200, { success: true, deleted: true });
+        return;
+      }
+
+      const body = await parseBody(req);
+      const name = String(body.name != null ? body.name : '').trim();
+      const description = String(body.description != null ? body.description : '').trim();
+      if (!name) {
+        sendJSON(res, 400, { error: 'name is required.' });
+        return;
+      }
+      dbUpdateLegislativeInternalMeta.run(name, description, id);
+      const updated = dbGetLegislativeInternal.get(id);
+      let download_url = updated.public_url;
+      const gcs = getLegislativeGcsClient();
+      if (gcs.ok) {
+        try {
+          download_url = await legislativeSignedDownloadUrl(
+            gcs.storage,
+            updated.gcs_bucket,
+            updated.gcs_object_path,
+            updated.mime_type
+          );
+        } catch (sigErr) {
+          console.warn('[Legislative] signed URL (patch):', sigErr.message);
+        }
+      }
+      sendJSON(res, 200, {
+        success: true,
+        source: {
+          id: updated.id,
+          name: updated.name,
+          description: updated.description,
+          original_file_name: updated.original_file_name,
+          mime_type: updated.mime_type,
+          size: updated.size,
+          uploaded_by: updated.uploaded_by,
+          created_at: updated.created_at,
+          download_url,
+        },
+      });
+    } catch (err) {
+      console.error('[Legislative] patch/delete:', err);
+      sendJSON(res, 500, { error: err.message || 'Operation failed.' });
+    }
+    return;
+  }
+
   // ---- AI Tools: Policy update pipeline (F1–F4, Gemini) ----
   if (url.pathname === '/api/ai-tools/policy-update-pipeline' && req.method === 'POST') {
     try {
@@ -4718,6 +5196,229 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       console.error('[PolicyUpdatePipeline]', err);
       sendJSON(res, 500, { error: err.message || 'Pipeline failed.' });
+    }
+    return;
+  }
+
+  // ---- AI Tools: Extract policies from uploaded file (Gemini 2.5 Pro → [{title, content}]) ----
+  if (url.pathname === '/api/ai-tools/extract-policies-from-file' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const apiKey = GEMINI_API_KEY || req.headers['x-api-key'];
+      if (!apiKey) {
+        sendJSON(res, 401, { error: 'API key not configured. Add GEMINI_API_KEY to .env file.' });
+        return;
+      }
+      const { fileName, mimeType, data } = body;
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      if (!mimeType || typeof mimeType !== 'string') {
+        sendJSON(res, 400, { error: 'mimeType is required.' });
+        return;
+      }
+
+      if (!genai) genai = new GoogleGenAI({ apiKey });
+
+      const systemPrompt = `You are a legal and regulatory analyst specialising in extracting structured articles from legislation, regulations, standards, and policy documents.
+
+Your task is to read the uploaded document and extract every article, clause, section, or rule it contains.
+
+OUTPUT FORMAT — return ONLY a valid JSON array, no markdown fences, no commentary:
+[
+  {
+    "article": "The exact article/section label from the document (e.g. 'Article 1', 'Section 2.3', 'Clause 4', 'المادة الأولى')",
+    "title": "Short descriptive title for this article (3–8 words)",
+    "text": "The full verbatim or faithfully summarised text of this article. Preserve all obligations, conditions, actors, scope, and deadlines. Be comprehensive — do not truncate."
+  }
+]
+
+RULES:
+- Extract ALL articles, sections, clauses, and sub-clauses — do not sample.
+- article: use the exact label from the document. If no label exists, infer one (e.g. 'Section 1').
+- title: concise, specific, unique per entry. Derive from the article heading or its main subject.
+- text: faithful and complete. Preserve important legal language, obligations, and numeric thresholds.
+- Do NOT include: table of contents, preamble metadata, signature blocks, page numbers, or revision histories as separate entries unless they contain substantive obligations.
+- Preserve the source language (Arabic document → Arabic output, English document → English output).
+- Output MUST be a valid JSON array parseable by JSON.parse() with no trailing commas.`;
+
+      const userPrompt = `Extract all articles and regulatory clauses from the uploaded document "${fileName || 'document'}".
+Return a JSON array where each element has "article", "title", and "text" fields as described.`;
+
+      console.log(`[RegulationExtract] Calling Gemini 2.5 Pro for file "${fileName}" (${mimeType})`);
+      const startTime = Date.now();
+
+      const response = await genai.models.generateContent({
+        model: 'gemini-2.5-pro',
+        contents: [{
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType, data } },
+            { text: userPrompt },
+          ],
+        }],
+        config: {
+          systemInstruction: systemPrompt,
+          temperature: 0.1,
+          maxOutputTokens: 32768,
+          responseMimeType: 'application/json',
+        },
+      });
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      const textResponse = response.text || '';
+      if (!textResponse) throw new Error('No response from Gemini');
+
+      // Parse JSON array from response
+      let jsonStr = textResponse.trim();
+      const fenceMatch = textResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (fenceMatch) jsonStr = fenceMatch[1].trim();
+      // Trim to first [...] block if there's surrounding text
+      if (!jsonStr.startsWith('[')) {
+        const openIdx = jsonStr.indexOf('[');
+        if (openIdx >= 0) jsonStr = jsonStr.slice(openIdx);
+      }
+
+      let articles;
+      try {
+        articles = JSON.parse(jsonStr);
+      } catch (parseErr) {
+        // Salvage: JSON likely truncated mid-array (Gemini hit maxOutputTokens).
+        // Walk balanced braces and collect every COMPLETE {...} object.
+        const salvaged = salvageArticleObjects(jsonStr);
+        if (salvaged.length) {
+          console.warn(`[RegulationExtract] JSON truncated — salvaged ${salvaged.length} complete articles before parse error: ${parseErr.message}`);
+          articles = salvaged;
+        } else {
+          throw new Error(`Gemini returned unparseable JSON: ${parseErr.message}. Raw (first 500): ${jsonStr.slice(0, 500)}`);
+        }
+      }
+      if (!Array.isArray(articles)) throw new Error('Gemini response was not a JSON array.');
+
+      // Normalise: ensure each item has article + title + text
+      articles = articles.filter(a => a && (a.article || a.title || a.text)).map((a, i) => ({
+        article: String(a.article || `Article ${i + 1}`).trim(),
+        title:   String(a.title   || '').trim(),
+        text:    String(a.text    || a.content || a.description || '').trim(),
+      }));
+
+      console.log(`[RegulationExtract] ✅ Extracted ${articles.length} articles in ${elapsed}s`);
+      sendJSON(res, 200, { success: true, articles, sourceFile: fileName || '', elapsed });
+    } catch (err) {
+      console.error('[PolicyExtract]', err.message);
+      sendJSON(res, 500, { error: err.message || 'Extraction failed.' });
+    }
+    return;
+  }
+
+  // ---- AI Tools: List extracted regulations from DB ----
+  if (url.pathname === '/api/ai-tools/extracted-regulations' && req.method === 'GET') {
+    try {
+      const rows = dbListExtractedRegulations.all();
+      const data = rows.map(r => ({
+        id: r.id,
+        sourceFile: r.source_file || '',
+        articles: (() => { try { return JSON.parse(r.articles || '[]'); } catch { return []; } })(),
+        createdAt: r.created_at,
+      }));
+      sendJSON(res, 200, { success: true, data });
+    } catch (err) {
+      console.error('[ExtractedRegulations] list:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to list.' });
+    }
+    return;
+  }
+
+  // ---- AI Tools: Save extracted regulation to DB ----
+  if (url.pathname === '/api/ai-tools/extracted-regulations' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const articles = Array.isArray(body.articles) ? body.articles : [];
+      if (!articles.length) {
+        sendJSON(res, 400, { error: 'articles array is required and must not be empty.' });
+        return;
+      }
+      const id = 'er-' + crypto.randomUUID();
+      const now = new Date().toISOString();
+      dbInsertExtractedRegulations.run(id, String(body.sourceFile || ''), JSON.stringify(articles), now);
+      sendJSON(res, 201, { success: true, id, count: articles.length });
+    } catch (err) {
+      console.error('[ExtractedRegulations] save:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Save failed.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline Runs: Save ----
+  if (url.pathname === '/api/ai-tools/pipeline-runs' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const result = body.result && typeof body.result === 'object' ? body.result : {};
+      const orgContext = String(body.orgContext || '');
+      const regulationText = String(body.regulationText || '');
+      const policyCount = Number.isFinite(body.policyCount) ? body.policyCount : 0;
+      const stageReached = String(result.stage_reached || body.stageReached || '');
+      const regulationSnippet = regulationText.slice(0, 300).replace(/\s+/g, ' ').trim();
+
+      if (!Object.keys(result).length) {
+        sendJSON(res, 400, { error: 'result object is required.' });
+        return;
+      }
+
+      const id = 'pr-' + crypto.randomUUID();
+      const now = new Date().toISOString();
+      dbInsertPipelineRun.run(
+        id,
+        orgContext,
+        regulationSnippet,
+        regulationText,
+        policyCount,
+        stageReached,
+        JSON.stringify(result),
+        now
+      );
+      console.log(`[PipelineRuns] Saved run ${id} (stage: ${stageReached}, policies: ${policyCount})`);
+      sendJSON(res, 201, { success: true, id });
+    } catch (err) {
+      console.error('[PipelineRuns] save:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Save failed.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline Runs: List ----
+  if (url.pathname === '/api/ai-tools/pipeline-runs' && req.method === 'GET') {
+    try {
+      const rows = dbListPipelineRuns.all();
+      const data = rows.map(r => ({
+        ...r,
+        result: (() => { try { return JSON.parse(r.result || '{}'); } catch { return {}; } })(),
+      }));
+      sendJSON(res, 200, { success: true, data });
+    } catch (err) {
+      console.error('[PipelineRuns] list:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to list.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline Runs: Get by ID ----
+  const pipelineRunMatch = url.pathname.match(/^\/api\/ai-tools\/pipeline-runs\/([^/]+)$/);
+  if (pipelineRunMatch && req.method === 'GET') {
+    try {
+      const row = dbGetPipelineRun.get(pipelineRunMatch[1]);
+      if (!row) { sendJSON(res, 404, { error: 'Run not found.' }); return; }
+      sendJSON(res, 200, {
+        success: true,
+        data: {
+          ...row,
+          result: (() => { try { return JSON.parse(row.result || '{}'); } catch { return {}; } })(),
+        },
+      });
+    } catch (err) {
+      console.error('[PipelineRuns] get:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to get.' });
     }
     return;
   }
@@ -8190,6 +8891,7 @@ server.listen(PORT, () => {
 ║   • GET  /                        - Serve the app         ║
 ║   • POST /api/analyze             - Analyze requirements  ║
 ║   • POST /api/ai-tools/policy-update-pipeline - F1–F4     ║
+║   • GET/POST/PATCH/DELETE /api/legislative-updates/internal-sources ║
 ║   • GET  /api/collections         - List collections      ║
 ║   • POST /api/collections         - Create collection     ║
 ║   • DELETE /api/collections/:id   - Delete collection     ║
