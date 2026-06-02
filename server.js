@@ -225,6 +225,9 @@ function isPublicPath(pathname) {
   if (pathname.endsWith('.woff2') || pathname.endsWith('.woff') || pathname === '/favicon.ico') return true;
   // Policy collections API is public for now
   if (pathname.startsWith('/api/policy-collections')) return true;
+  // Public portal feed for extracted legislative updates (mutations are still
+  // auth-checked inside their route handlers).
+  if (pathname.startsWith('/api/legislative-updates/extracted')) return true;
   return false;
 }
 
@@ -449,6 +452,36 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_legislative_internal_created ON legislative_internal_sources(created_at DESC);
+
+  /* Extracted legislative updates surfaced on the "المستجدات التشريعية" portal page.
+     Status values:  new | under_analysis | completed | archived
+     Impact values:  high | medium | low                                                    */
+  CREATE TABLE IF NOT EXISTS legislative_extracted_updates (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    source_id TEXT,
+    internal_source_id TEXT,
+    external_url TEXT DEFAULT '',
+    published_at TEXT,
+    status TEXT DEFAULT 'new',
+    status_label TEXT DEFAULT '',
+    impact_level TEXT DEFAULT 'medium',
+    impact_label TEXT DEFAULT '',
+    affected_policies_count INTEGER DEFAULT 0,
+    affected_policy_ids TEXT DEFAULT '[]',
+    tags TEXT DEFAULT '[]',
+    language TEXT DEFAULT 'ar',
+    raw_text TEXT DEFAULT '',
+    metadata TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_lu_extracted_published ON legislative_extracted_updates(published_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_lu_extracted_source    ON legislative_extracted_updates(source);
+  CREATE INDEX IF NOT EXISTS idx_lu_extracted_status    ON legislative_extracted_updates(status);
+  CREATE INDEX IF NOT EXISTS idx_lu_extracted_impact    ON legislative_extracted_updates(impact_level);
 `);
 
 // Migrate policy_generation_history: add extraction_data and policy_uuid columns if missing
@@ -653,6 +686,203 @@ const dbUpdateLegislativeInternalMeta = db.prepare(
   `UPDATE legislative_internal_sources SET name = ?, description = ? WHERE id = ?`
 );
 const dbDeleteLegislativeInternal = db.prepare(`DELETE FROM legislative_internal_sources WHERE id = ?`);
+
+// ---- Legislative extracted updates DB helpers ----
+const dbInsertLegislativeExtracted = db.prepare(`
+  INSERT INTO legislative_extracted_updates (
+    id, title, description, source, source_id, internal_source_id, external_url,
+    published_at, status, status_label, impact_level, impact_label,
+    affected_policies_count, affected_policy_ids, tags, language, raw_text, metadata,
+    created_at, updated_at
+  ) VALUES (
+    @id, @title, @description, @source, @source_id, @internal_source_id, @external_url,
+    @published_at, @status, @status_label, @impact_level, @impact_label,
+    @affected_policies_count, @affected_policy_ids, @tags, @language, @raw_text, @metadata,
+    @created_at, @updated_at
+  )
+`);
+const dbGetLegislativeExtracted = db.prepare(
+  `SELECT * FROM legislative_extracted_updates WHERE id = ?`
+);
+const dbDeleteLegislativeExtracted = db.prepare(
+  `DELETE FROM legislative_extracted_updates WHERE id = ?`
+);
+const dbUpdateLegislativeExtracted = db.prepare(`
+  UPDATE legislative_extracted_updates SET
+    title = @title, description = @description, source = @source, source_id = @source_id,
+    internal_source_id = @internal_source_id, external_url = @external_url,
+    published_at = @published_at, status = @status, status_label = @status_label,
+    impact_level = @impact_level, impact_label = @impact_label,
+    affected_policies_count = @affected_policies_count, affected_policy_ids = @affected_policy_ids,
+    tags = @tags, language = @language, raw_text = @raw_text, metadata = @metadata,
+    updated_at = @updated_at
+  WHERE id = @id
+`);
+const dbCountLegislativeExtracted = db.prepare(
+  `SELECT COUNT(*) AS c FROM legislative_extracted_updates`
+);
+
+/** Map common Arabic / English aliases for status & impact onto the canonical enum used by the API. */
+const LU_STATUS_ALIASES = {
+  'new': 'new', 'جديد': 'new',
+  'under_analysis': 'under_analysis', 'analysis': 'under_analysis',
+  'in_progress': 'under_analysis', 'قيد التحليل': 'under_analysis',
+  'completed': 'completed', 'complete': 'completed', 'done': 'completed', 'مكتمل': 'completed',
+  'archived': 'archived', 'مؤرشف': 'archived',
+};
+const LU_IMPACT_ALIASES = {
+  'high': 'high', 'عالي': 'high',
+  'medium': 'medium', 'med': 'medium', 'متوسط': 'medium',
+  'low': 'low', 'منخفض': 'low',
+};
+const LU_DEFAULT_STATUS_LABELS = {
+  new: 'جديد',
+  under_analysis: 'قيد التحليل',
+  completed: 'مكتمل',
+  archived: 'مؤرشف',
+};
+const LU_DEFAULT_IMPACT_LABELS = {
+  high: 'عالي',
+  medium: 'متوسط',
+  low: 'منخفض',
+};
+function luNormalizeStatus(v) {
+  const k = String(v || '').trim().toLowerCase();
+  return LU_STATUS_ALIASES[k] || LU_STATUS_ALIASES[String(v || '').trim()] || null;
+}
+function luNormalizeImpact(v) {
+  const k = String(v || '').trim().toLowerCase();
+  return LU_IMPACT_ALIASES[k] || LU_IMPACT_ALIASES[String(v || '').trim()] || null;
+}
+function luSafeJsonParse(s, fallback) {
+  if (s == null) return fallback;
+  try { const v = JSON.parse(s); return v == null ? fallback : v; } catch (_) { return fallback; }
+}
+function luRowToApi(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description || '',
+    source: row.source || '',
+    source_id: row.source_id || null,
+    internal_source_id: row.internal_source_id || null,
+    external_url: row.external_url || '',
+    published_at: row.published_at || null,
+    status: row.status || 'new',
+    status_label: row.status_label || LU_DEFAULT_STATUS_LABELS[row.status] || row.status || '',
+    impact_level: row.impact_level || 'medium',
+    impact_label: row.impact_label || LU_DEFAULT_IMPACT_LABELS[row.impact_level] || row.impact_level || '',
+    affected_policies_count: row.affected_policies_count || 0,
+    affected_policy_ids: luSafeJsonParse(row.affected_policy_ids, []),
+    tags: luSafeJsonParse(row.tags, []),
+    language: row.language || 'ar',
+    metadata: luSafeJsonParse(row.metadata, {}),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+/**
+ * Seed the extracted updates table with the same five Arabic items shown on the
+ * "المستجدات التشريعية" portal page so the API has demo data on a fresh DB.
+ * Idempotent: only seeds when the table is empty.
+ */
+function seedLegislativeExtractedUpdates() {
+  try {
+    const { c } = dbCountLegislativeExtracted.get();
+    if (c > 0) return;
+    const now = new Date().toISOString();
+    const seed = [
+      {
+        id: 'lu-eng-license-update-2026',
+        title: 'تعديل لائحة مزاولة المهنة الهندسية',
+        description: 'صدرت تعديلات جوهرية على لائحة مزاولة المهنة الهندسية تتضمن تحديث اشتراطات الترخيص وإضافة فئات جديدة للتصنيف المهني.',
+        source: 'أم القرى',
+        published_at: '2026-03-05',
+        status: 'new',
+        impact_level: 'high',
+        affected_policies_count: 5,
+        tags: ['هندسة', 'ترخيص', 'تصنيف مهني'],
+      },
+      {
+        id: 'lu-engineering-safety-2026',
+        title: 'تحديث اشتراطات السلامة للمنشآت الهندسية',
+        description: 'تحديث للاشتراطات الفنية للسلامة في المنشآت الهندسية مع إضافة متطلبات جديدة لفحص المباني.',
+        source: 'وزارة الشؤون البلدية',
+        published_at: '2026-03-04',
+        status: 'under_analysis',
+        impact_level: 'medium',
+        affected_policies_count: 3,
+        tags: ['سلامة', 'منشآت', 'مباني'],
+      },
+      {
+        id: 'lu-cross-border-engineering-2026',
+        title: 'قرار تنظيم الاستشارات الهندسية العابرة للحدود',
+        description: 'قرار جديد ينظم عمل الشركات الهندسية الأجنبية داخل المملكة ويحدد شروط الترخيص والشراكة مع المكاتب المحلية.',
+        source: 'هيئة المهندسين',
+        published_at: '2026-03-04',
+        status: 'under_analysis',
+        impact_level: 'high',
+        affected_policies_count: 5,
+        tags: ['استشارات', 'شراكات أجنبية'],
+      },
+      {
+        id: 'lu-office-classification-2026',
+        title: 'تعميم بشأن تصنيف المكاتب الهندسية',
+        description: 'تعميم يوضح آلية إعادة تصنيف المكاتب الهندسية وفق المعايير الجديدة.',
+        source: 'وزارة التجارة',
+        published_at: '2026-03-05',
+        status: 'completed',
+        impact_level: 'low',
+        affected_policies_count: 1,
+        tags: ['تصنيف', 'مكاتب هندسية'],
+      },
+      {
+        id: 'lu-professional-accreditation-2026',
+        title: 'تحديث معايير الاعتماد المهني للمهندسين',
+        description: 'الهيئة السعودية للمهندسين تُحدِّث معايير الاعتماد المهني ومسارات التطوير المستمر للمهندسين.',
+        source: 'الهيئة السعودية للمهندسين',
+        published_at: '2026-03-03',
+        status: 'completed',
+        impact_level: 'medium',
+        affected_policies_count: 2,
+        tags: ['اعتماد مهني', 'تطوير'],
+      },
+    ];
+    const insertMany = db.transaction((items) => {
+      for (const it of items) {
+        dbInsertLegislativeExtracted.run({
+          id: it.id,
+          title: it.title,
+          description: it.description,
+          source: it.source,
+          source_id: null,
+          internal_source_id: null,
+          external_url: '',
+          published_at: it.published_at,
+          status: it.status,
+          status_label: LU_DEFAULT_STATUS_LABELS[it.status] || '',
+          impact_level: it.impact_level,
+          impact_label: LU_DEFAULT_IMPACT_LABELS[it.impact_level] || '',
+          affected_policies_count: it.affected_policies_count || 0,
+          affected_policy_ids: JSON.stringify([]),
+          tags: JSON.stringify(it.tags || []),
+          language: 'ar',
+          raw_text: '',
+          metadata: JSON.stringify({}),
+          created_at: now,
+          updated_at: now,
+        });
+      }
+    });
+    insertMany(seed);
+    console.log(`[Legislative] Seeded ${seed.length} sample extracted updates.`);
+  } catch (err) {
+    console.warn('[Legislative] seed extracted updates failed:', err.message);
+  }
+}
+seedLegislativeExtractedUpdates();
 
 // ---- CISO Entity Cache DB helpers ----
 const dbGetCachedEntity = db.prepare(`SELECT * FROM ciso_entity_cache WHERE id = ? AND entity_type = ?`);
@@ -5164,6 +5394,221 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ---- Legislative updates: extracted updates (portal feed) ----
+  // GET  /api/legislative-updates/extracted        — list with filters & pagination
+  // GET  /api/legislative-updates/extracted/facets — distinct sources/statuses/impacts (for UI dropdowns)
+  // GET  /api/legislative-updates/extracted/:id    — single update
+  // POST /api/legislative-updates/extracted        — create (auth)
+  // PATCH /api/legislative-updates/extracted/:id   — update (auth)
+  // DELETE /api/legislative-updates/extracted/:id  — delete (auth)
+  if (url.pathname === '/api/legislative-updates/extracted/facets' && req.method === 'GET') {
+    try {
+      const sources = db
+        .prepare(`SELECT DISTINCT source FROM legislative_extracted_updates WHERE source <> '' ORDER BY source`)
+        .all()
+        .map((r) => r.source);
+      const statuses = db
+        .prepare(`SELECT DISTINCT status, status_label FROM legislative_extracted_updates WHERE status <> '' ORDER BY status`)
+        .all()
+        .map((r) => ({ value: r.status, label: r.status_label || LU_DEFAULT_STATUS_LABELS[r.status] || r.status }));
+      const impacts = db
+        .prepare(`SELECT DISTINCT impact_level, impact_label FROM legislative_extracted_updates WHERE impact_level <> '' ORDER BY impact_level`)
+        .all()
+        .map((r) => ({ value: r.impact_level, label: r.impact_label || LU_DEFAULT_IMPACT_LABELS[r.impact_level] || r.impact_level }));
+      sendJSON(res, 200, { success: true, sources, statuses, impacts });
+    } catch (err) {
+      console.error('[Legislative] facets:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to load facets.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/legislative-updates/extracted' && req.method === 'GET') {
+    try {
+      const q = String(url.searchParams.get('q') || '').trim();
+      const sourceFilter = String(url.searchParams.get('source') || '').trim();
+      const statusFilter = luNormalizeStatus(url.searchParams.get('status') || '');
+      const impactFilter = luNormalizeImpact(url.searchParams.get('impact_level') || url.searchParams.get('impact') || '');
+      const dateFrom = String(url.searchParams.get('date_from') || url.searchParams.get('dateFrom') || '').trim();
+      const dateTo = String(url.searchParams.get('date_to') || url.searchParams.get('dateTo') || '').trim();
+      let limit = parseInt(url.searchParams.get('limit') || '50', 10);
+      let offset = parseInt(url.searchParams.get('offset') || '0', 10);
+      if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+      if (limit > 200) limit = 200;
+      if (!Number.isFinite(offset) || offset < 0) offset = 0;
+
+      const where = [];
+      const params = [];
+      if (q) {
+        where.push(`(title LIKE ? OR description LIKE ? OR source LIKE ? OR tags LIKE ?)`);
+        const like = `%${q}%`;
+        params.push(like, like, like, like);
+      }
+      if (sourceFilter) { where.push(`source = ?`); params.push(sourceFilter); }
+      if (statusFilter) { where.push(`status = ?`); params.push(statusFilter); }
+      if (impactFilter) { where.push(`impact_level = ?`); params.push(impactFilter); }
+      if (dateFrom) { where.push(`(published_at IS NULL OR published_at >= ?)`); params.push(dateFrom); }
+      if (dateTo)   { where.push(`(published_at IS NULL OR published_at <= ?)`); params.push(dateTo); }
+
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const total = db
+        .prepare(`SELECT COUNT(*) AS c FROM legislative_extracted_updates ${whereSql}`)
+        .get(...params).c;
+      const rows = db
+        .prepare(
+          `SELECT * FROM legislative_extracted_updates ${whereSql}
+           ORDER BY datetime(COALESCE(published_at, created_at)) DESC, datetime(created_at) DESC
+           LIMIT ? OFFSET ?`
+        )
+        .all(...params, limit, offset);
+
+      sendJSON(res, 200, {
+        success: true,
+        total,
+        limit,
+        offset,
+        count: rows.length,
+        items: rows.map(luRowToApi),
+      });
+    } catch (err) {
+      console.error('[Legislative] extracted list:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to list extracted updates.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/legislative-updates/extracted' && req.method === 'POST') {
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) { sendJSON(res, 401, { error: 'Unauthorized.' }); return; }
+      const body = await parseBody(req);
+      const title = String(body.title || '').trim();
+      if (!title) { sendJSON(res, 400, { error: 'title is required.' }); return; }
+      const status = luNormalizeStatus(body.status) || 'new';
+      const impact = luNormalizeImpact(body.impact_level || body.impact) || 'medium';
+      const id = String(body.id || '').trim() || crypto.randomUUID();
+      const now = new Date().toISOString();
+      const row = {
+        id,
+        title,
+        description: String(body.description || '').trim(),
+        source: String(body.source || '').trim(),
+        source_id: body.source_id ? String(body.source_id) : null,
+        internal_source_id: body.internal_source_id ? String(body.internal_source_id) : null,
+        external_url: String(body.external_url || '').trim(),
+        published_at: body.published_at ? String(body.published_at).trim() : null,
+        status,
+        status_label: String(body.status_label || LU_DEFAULT_STATUS_LABELS[status] || ''),
+        impact_level: impact,
+        impact_label: String(body.impact_label || LU_DEFAULT_IMPACT_LABELS[impact] || ''),
+        affected_policies_count: Number.isFinite(+body.affected_policies_count)
+          ? Math.max(0, parseInt(body.affected_policies_count, 10))
+          : 0,
+        affected_policy_ids: JSON.stringify(Array.isArray(body.affected_policy_ids) ? body.affected_policy_ids : []),
+        tags: JSON.stringify(Array.isArray(body.tags) ? body.tags : []),
+        language: String(body.language || 'ar'),
+        raw_text: String(body.raw_text || ''),
+        metadata: JSON.stringify(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+        created_at: now,
+        updated_at: now,
+      };
+      try {
+        dbInsertLegislativeExtracted.run(row);
+      } catch (insErr) {
+        if (/UNIQUE|PRIMARY KEY/i.test(insErr.message)) {
+          sendJSON(res, 409, { error: 'An update with this id already exists.' });
+          return;
+        }
+        throw insErr;
+      }
+      sendJSON(res, 201, { success: true, item: luRowToApi(dbGetLegislativeExtracted.get(id)) });
+    } catch (err) {
+      console.error('[Legislative] extracted create:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to create extracted update.' });
+    }
+    return;
+  }
+
+  const luExtractedOneMatch = url.pathname.match(
+    /^\/api\/legislative-updates\/extracted\/([^/]+)$/
+  );
+  if (luExtractedOneMatch && req.method === 'GET') {
+    const id = luExtractedOneMatch[1];
+    try {
+      const row = dbGetLegislativeExtracted.get(id);
+      if (!row) { sendJSON(res, 404, { error: 'Update not found.' }); return; }
+      sendJSON(res, 200, { success: true, item: luRowToApi(row) });
+    } catch (err) {
+      console.error('[Legislative] extracted get:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to load update.' });
+    }
+    return;
+  }
+
+  if (luExtractedOneMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
+    const id = luExtractedOneMatch[1];
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) { sendJSON(res, 401, { error: 'Unauthorized.' }); return; }
+      const existing = dbGetLegislativeExtracted.get(id);
+      if (!existing) { sendJSON(res, 404, { error: 'Update not found.' }); return; }
+
+      if (req.method === 'DELETE') {
+        dbDeleteLegislativeExtracted.run(id);
+        sendJSON(res, 200, { success: true, deleted: true, id });
+        return;
+      }
+
+      const body = await parseBody(req);
+      const status = body.status != null ? (luNormalizeStatus(body.status) || existing.status) : existing.status;
+      const impact = (body.impact_level != null || body.impact != null)
+        ? (luNormalizeImpact(body.impact_level || body.impact) || existing.impact_level)
+        : existing.impact_level;
+      const merged = {
+        id,
+        title: body.title != null ? String(body.title).trim() : existing.title,
+        description: body.description != null ? String(body.description).trim() : (existing.description || ''),
+        source: body.source != null ? String(body.source).trim() : (existing.source || ''),
+        source_id: body.source_id !== undefined ? (body.source_id ? String(body.source_id) : null) : existing.source_id,
+        internal_source_id: body.internal_source_id !== undefined
+          ? (body.internal_source_id ? String(body.internal_source_id) : null)
+          : existing.internal_source_id,
+        external_url: body.external_url != null ? String(body.external_url).trim() : (existing.external_url || ''),
+        published_at: body.published_at !== undefined
+          ? (body.published_at ? String(body.published_at).trim() : null)
+          : existing.published_at,
+        status,
+        status_label: body.status_label != null
+          ? String(body.status_label)
+          : (status !== existing.status ? (LU_DEFAULT_STATUS_LABELS[status] || '') : (existing.status_label || '')),
+        impact_level: impact,
+        impact_label: body.impact_label != null
+          ? String(body.impact_label)
+          : (impact !== existing.impact_level ? (LU_DEFAULT_IMPACT_LABELS[impact] || '') : (existing.impact_label || '')),
+        affected_policies_count: body.affected_policies_count != null && Number.isFinite(+body.affected_policies_count)
+          ? Math.max(0, parseInt(body.affected_policies_count, 10))
+          : existing.affected_policies_count,
+        affected_policy_ids: Array.isArray(body.affected_policy_ids)
+          ? JSON.stringify(body.affected_policy_ids)
+          : existing.affected_policy_ids,
+        tags: Array.isArray(body.tags) ? JSON.stringify(body.tags) : existing.tags,
+        language: body.language != null ? String(body.language) : existing.language,
+        raw_text: body.raw_text != null ? String(body.raw_text) : existing.raw_text,
+        metadata: body.metadata && typeof body.metadata === 'object'
+          ? JSON.stringify(body.metadata)
+          : existing.metadata,
+        updated_at: new Date().toISOString(),
+      };
+      if (!merged.title) { sendJSON(res, 400, { error: 'title cannot be empty.' }); return; }
+      dbUpdateLegislativeExtracted.run(merged);
+      sendJSON(res, 200, { success: true, item: luRowToApi(dbGetLegislativeExtracted.get(id)) });
+    } catch (err) {
+      console.error('[Legislative] extracted patch/delete:', err);
+      sendJSON(res, 500, { error: err.message || 'Operation failed.' });
+    }
+    return;
+  }
+
   // ---- AI Tools: Policy update pipeline (F1–F4, Gemini) ----
   if (url.pathname === '/api/ai-tools/policy-update-pipeline' && req.method === 'POST') {
     try {
@@ -8892,6 +9337,8 @@ server.listen(PORT, () => {
 ║   • POST /api/analyze             - Analyze requirements  ║
 ║   • POST /api/ai-tools/policy-update-pipeline - F1–F4     ║
 ║   • GET/POST/PATCH/DELETE /api/legislative-updates/internal-sources ║
+║   • GET/POST/PATCH/DELETE /api/legislative-updates/extracted        ║
+║   • GET  /api/legislative-updates/extracted/facets                  ║
 ║   • GET  /api/collections         - List collections      ║
 ║   • POST /api/collections         - Create collection     ║
 ║   • DELETE /api/collections/:id   - Delete collection     ║
