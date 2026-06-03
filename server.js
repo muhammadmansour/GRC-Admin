@@ -897,7 +897,16 @@ function pipelineRunToLegislativeUpdate(row, opts = {}) {
     }
   }
 
+  // Tag set: prefer F1.document_tags when present, then merge in F2 categories.
+  // F1 tags are usually 1–3 word topical strings; F2 categories are taxonomy
+  // labels — together they cover both "what is this about" and "what compliance
+  // domain does each rule sit in".
   const tagSet = new Set();
+  const f1Tags = (f1 && Array.isArray(f1.document_tags)) ? f1.document_tags : [];
+  for (const t of f1Tags) {
+    const s = String(t || '').trim();
+    if (s) tagSet.add(s);
+  }
   for (const pt of f2Points) {
     const c = String(pt.category || '').trim();
     if (c) tagSet.add(c);
@@ -905,19 +914,31 @@ function pipelineRunToLegislativeUpdate(row, opts = {}) {
 
   const regulationText = String(row.regulation_text || '');
   const fallbackTitle = `Pipeline run · ${row.id}`;
-  const title = pipelineDeriveTitle(regulationText, fallbackTitle);
-  const description = (f1 && typeof f1.reasoning === 'string' && f1.reasoning.trim())
-    ? f1.reasoning.trim()
-    : (row.regulation_snippet || regulationText.slice(0, 300));
+  // Prefer F1.document_title → heuristic first-line → static fallback. F1 may
+  // legitimately return null when the excerpt has no clear heading.
+  const f1Title = (f1 && typeof f1.document_title === 'string') ? f1.document_title.trim() : '';
+  const title = f1Title || pipelineDeriveTitle(regulationText, fallbackTitle);
+  // Prefer F1.document_summary (document-level) → F1.reasoning (relevance, but
+  // still a useful blurb) → regulation_snippet.
+  const f1Summary = (f1 && typeof f1.document_summary === 'string') ? f1.document_summary.trim() : '';
+  const description = f1Summary
+    || (f1 && typeof f1.reasoning === 'string' && f1.reasoning.trim() ? f1.reasoning.trim() : '')
+    || row.regulation_snippet
+    || regulationText.slice(0, 300);
 
   const createdAt = row.created_at || new Date().toISOString();
-  const publishedAt = createdAt ? String(createdAt).slice(0, 10) : null;
+  // Prefer F1.document_published_at (the actual regulation publication date)
+  // over created_at (when the pipeline ran). Accept only well-formed YYYY-MM-DD
+  // to avoid leaking model hallucinations into a typed date field.
+  const f1Published = (f1 && typeof f1.document_published_at === 'string') ? f1.document_published_at.trim() : '';
+  const publishedAt = /^\d{4}-\d{2}-\d{2}$/.test(f1Published) ? f1Published : (createdAt ? String(createdAt).slice(0, 10) : null);
+  const f1Source = (f1 && typeof f1.document_source === 'string') ? f1.document_source.trim() : '';
 
   const out = {
     id: row.id,
     title,
     description,
-    source: '',
+    source: f1Source,
     source_id: null,
     internal_source_id: null,
     external_url: '',
@@ -937,6 +958,15 @@ function pipelineRunToLegislativeUpdate(row, opts = {}) {
       f1_confidence: f1 && typeof f1.confidence === 'number' ? f1.confidence : null,
       f1_relevant: f1 && typeof f1.is_relevant === 'boolean' ? f1.is_relevant : null,
       regulation_chars: regulationText.length,
+      // Which sources actually populated the card-shaped fields. Useful for the
+      // portal to render a "verified by AI" badge vs. a "derived" footnote.
+      derived_from: {
+        title: f1Title ? 'f1' : 'heuristic',
+        description: f1Summary ? 'f1_summary' : (f1 && f1.reasoning ? 'f1_reasoning' : 'snippet'),
+        source: f1Source ? 'f1' : 'unknown',
+        published_at: /^\d{4}-\d{2}-\d{2}$/.test(f1Published) ? 'f1' : 'pipeline_run_date',
+        tags: f1Tags.length ? (f2Points.length ? 'f1+f2' : 'f1') : (f2Points.length ? 'f2' : 'none'),
+      },
     },
     created_at: createdAt,
     updated_at: createdAt,
