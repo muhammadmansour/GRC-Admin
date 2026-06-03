@@ -13,8 +13,14 @@ const DEFAULTS = {
   reasoningModel: 'gemini-2.5-pro',
   fastModel: 'gemini-2.5-flash',
   embeddingModel: 'gemini-embedding-001',
-  /** F1 needs room for bilingual JSON — outputs that hit MAX_TOKENS truncate mid-string and break strict JSON.parse. */
-  f1MaxOutputTokens: 16384,
+  /**
+   * F1 needs room for bilingual JSON — outputs that hit MAX_TOKENS truncate
+   * mid-string and break strict JSON.parse. Bumped from 16384 to 20480 to give
+   * the document_* card-metadata fields some headroom on top of the relevance
+   * verdict. salvageF1PartialJson still recovers the boolean + confidence on
+   * truncation, in which case the card fields fall back to derived values.
+   */
+  f1MaxOutputTokens: 20480,
   f1ExcerptLimit: 10000,
   f2ChunkSize: 24000,
   f2ChunkOverlap: 1000,
@@ -55,19 +61,33 @@ You will receive:
 - ORGANISATION CONTEXT: industry, jurisdiction, activities, compliance scope.
 - DOCUMENT EXCERPT: the beginning of a GRC-related document. It MAY be an external regulation, a regulatory circular, a standard, a framework, an internal policy, a procedure, or a guideline — judge each on its content, not its type.
 
-Task: determine whether the TOPICS / SUBJECT MATTER of this document are relevant to the organisation's compliance scope, sector, activities, regulatory mandates, or governance.
+Tasks:
+1. Determine whether the TOPICS / SUBJECT MATTER of this document are relevant to the organisation's compliance scope, sector, activities, regulatory mandates, or governance.
+2. Extract a small set of "card-style" metadata fields about the document itself — purely from what is visible in the excerpt. Use null / empty array when a field is not stated or you are not confident. NEVER fabricate publishers, dates, or titles.
 
 Decision rules:
 - "is_relevant" should be true whenever the document's subject matter clearly overlaps the org's industry / mandates / activities (e.g. a vendor management policy is relevant to a bank with SAMA outsourcing obligations even if the document is the bank's own internal policy).
 - "is_relevant" should be false ONLY when the document is unambiguously outside the org's domain (e.g. a medical device labelling regulation for a pure software fintech, or a marketing brochure with no compliance content).
 - Do NOT reject on the basis of "this is an internal policy, not an external regulation" — internal policies still flow through the pipeline so we can map them to existing controls.
 
+Card-metadata rules:
+- "document_title": the official title as it appears at the top of the document (≤140 chars). If the top has only a generic header (e.g. "الفصل الأول"), prefer the regulation/standard name as written in the body.
+- "document_summary": ≤2 short sentences (≤280 chars total) describing what the document is and the key change it introduces, in the source language. This is a document-level summary, NOT the relevance reasoning.
+- "document_source": the publisher / gazette / authority as named in the document (e.g. "أم القرى", "وزارة التجارة", "SAMA"). null if not explicitly stated.
+- "document_published_at": ISO date "YYYY-MM-DD" if a publication / issuance date is explicit in the excerpt (Hijri OK to Gregorian-convert when unambiguous). null otherwise.
+- "document_tags": up to 5 short topical tags in the source language (each ≤24 chars). Empty array if you are unsure.
+
 Respond with ONLY a JSON object (keep "reasoning" brief — ≤400 characters — so JSON is not truncated):
 {
   "is_relevant": true | false,
   "confidence": 0.0-1.0,
   "reasoning": "≤2 short sentences in the document's language",
-  "relevant_aspects": ["specific topics / mandates / activities that match, empty array if none"]
+  "relevant_aspects": ["specific topics / mandates / activities that match, empty array if none"],
+  "document_title": "string ≤140 chars, source language",
+  "document_summary": "string ≤280 chars, source language, document-level (not relevance)",
+  "document_source": "string or null",
+  "document_published_at": "YYYY-MM-DD or null",
+  "document_tags": ["≤5 short topical tags, source language, ≤24 chars each"]
 }`;
 
 const F2_SYSTEM = `You are a GRC policy analyst. You work fluently in both Arabic (العربية) and English.
