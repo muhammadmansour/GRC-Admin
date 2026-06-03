@@ -14904,9 +14904,20 @@ async function runPipelineInBackground(regulationText, sourceFile) {
       result:  payload,
     });
 
+    // Mirror the foreground PUP flow: auto-surface the result modal when the
+    // background pipeline finishes, so the user gets the same end-of-run UX
+    // regardless of which entry point started the run.
+    try {
+      openPolicyPipelineResultModal(payload);
+    } catch (modalErr) {
+      console.warn('[BgPipeline] Failed to auto-open result modal:', modalErr && modalErr.message);
+    }
+    toast('success', 'Pipeline finished', `Stage: ${pupStageLabel(payload.stage_reached)} · ${sourceFile}`);
+
   } catch (e) {
     console.error('[BgPipeline]', e);
     updateNotif(runId, { status: 'error', message: e.message || 'Pipeline failed' });
+    toast('error', 'Pipeline failed', e.message || `Background pipeline failed for ${sourceFile}.`);
   }
 }
 
