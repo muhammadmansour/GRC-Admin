@@ -783,6 +783,182 @@ function luRowToApi(row) {
   };
 }
 
+// ───────────────────────────────────────────────────────────────
+// Pipeline runs → legislative-update projection
+//
+// The portal renders legislative updates with luRowToApi-shaped objects (title,
+// description, source, status_label, impact_label, key changes, etc.). The
+// project surfaces the F1–F4 pipeline result for the same UI by deriving those
+// fields from a `pipeline_runs` row.
+//
+// Caveats — pipeline_runs has no curated title/source columns, so we infer:
+//   • title           → first non-empty line of regulationText (or fallback id)
+//   • description     → F1 reasoning (or a stage-based fallback)
+//   • source          → metadata.sourceFile if persisted by the caller, else ''
+//   • status          → derived from stage_reached (f1 not-relevant → archived,
+//                       f4 → completed, anything in between → under_analysis)
+//   • impact_level    → max F4 severity across all impacts, else 'medium'
+//   • tags            → unique F2 policy_point.category values
+//   • affected_policies_count / ids → unique F4 policy_id set (or F3 fallback)
+// ───────────────────────────────────────────────────────────────
+
+const PIPELINE_STAGE_STATUS = {
+  f1: 'under_analysis',
+  f2: 'under_analysis',
+  f3: 'under_analysis',
+  f4: 'completed',
+};
+
+const PIPELINE_SEVERITY_TO_IMPACT = {
+  critical: 'high',
+  high: 'high',
+  medium: 'medium',
+  low: 'low',
+  none: 'low',
+};
+
+/** Crude language sniff: Arabic if any Arabic codepoint appears in the first 1k chars. */
+function pipelineDetectLanguage(text) {
+  const s = String(text || '').slice(0, 1024);
+  return /[\u0600-\u06FF]/.test(s) ? 'ar' : 'en';
+}
+
+/** Best-effort title from raw regulation text. Trims to 160 chars and strips dashes/colons. */
+function pipelineDeriveTitle(regulationText, fallback) {
+  const t = String(regulationText || '').trim();
+  if (!t) return fallback;
+  for (const rawLine of t.split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^[\-—•·*]+\s*/, '');
+    if (line.length < 4) continue;
+    if (line.length <= 160) return line;
+    return line.slice(0, 157) + '…';
+  }
+  return fallback;
+}
+
+/** Reduce F4 severities → the strongest impact level. Returns 'medium' when no impacts exist. */
+function pipelineDeriveImpactLevel(f4Impacts) {
+  if (!Array.isArray(f4Impacts) || !f4Impacts.length) return 'medium';
+  const order = ['high', 'medium', 'low'];
+  let best = null;
+  for (const group of f4Impacts) {
+    for (const imp of (group.impacts || [])) {
+      const sev = String(imp.severity || '').toLowerCase();
+      const mapped = PIPELINE_SEVERITY_TO_IMPACT[sev];
+      if (!mapped) continue;
+      if (best == null || order.indexOf(mapped) < order.indexOf(best)) best = mapped;
+      if (best === 'high') return 'high';
+    }
+  }
+  return best || 'medium';
+}
+
+/**
+ * @param {{ id:string, org_context:string, regulation_snippet:string, regulation_text:string,
+ *           policy_count:number, stage_reached:string, result:string|object, created_at:string }} row
+ * @param {{ includePipeline?: boolean }} [opts]
+ * @returns {object|null} luRowToApi-shaped object + optional `pipeline` extension
+ */
+function pipelineRunToLegislativeUpdate(row, opts = {}) {
+  if (!row) return null;
+  const result = typeof row.result === 'string'
+    ? (() => { try { return JSON.parse(row.result || '{}'); } catch { return {}; } })()
+    : (row.result && typeof row.result === 'object' ? row.result : {});
+
+  const stage = String(row.stage_reached || result.stage_reached || '').toLowerCase();
+  const f1 = result.f1_relevance || null;
+  const f2Points = Array.isArray(result.f2_summary?.policy_points) ? result.f2_summary.policy_points : [];
+  const f3Matches = Array.isArray(result.f3_matches) ? result.f3_matches : [];
+  const f4Impacts = Array.isArray(result.f4_impacts) ? result.f4_impacts : [];
+
+  // F1 short-circuit (not relevant): archive it; everything else maps via PIPELINE_STAGE_STATUS.
+  const status = (stage === 'f1' && f1 && f1.is_relevant === false)
+    ? 'archived'
+    : (PIPELINE_STAGE_STATUS[stage] || 'new');
+  const impactLevel = pipelineDeriveImpactLevel(f4Impacts);
+
+  const affectedIds = new Set();
+  for (const group of f4Impacts) {
+    for (const imp of (group.impacts || [])) {
+      if (imp.policy_id != null) affectedIds.add(String(imp.policy_id));
+    }
+  }
+  if (!affectedIds.size) {
+    for (const m of f3Matches) {
+      for (const x of (m.matches || [])) {
+        if (x.policy_id != null) affectedIds.add(String(x.policy_id));
+      }
+    }
+  }
+
+  const tagSet = new Set();
+  for (const pt of f2Points) {
+    const c = String(pt.category || '').trim();
+    if (c) tagSet.add(c);
+  }
+
+  const regulationText = String(row.regulation_text || '');
+  const fallbackTitle = `Pipeline run · ${row.id}`;
+  const title = pipelineDeriveTitle(regulationText, fallbackTitle);
+  const description = (f1 && typeof f1.reasoning === 'string' && f1.reasoning.trim())
+    ? f1.reasoning.trim()
+    : (row.regulation_snippet || regulationText.slice(0, 300));
+
+  const createdAt = row.created_at || new Date().toISOString();
+  const publishedAt = createdAt ? String(createdAt).slice(0, 10) : null;
+
+  const out = {
+    id: row.id,
+    title,
+    description,
+    source: '',
+    source_id: null,
+    internal_source_id: null,
+    external_url: '',
+    published_at: publishedAt,
+    status,
+    status_label: LU_DEFAULT_STATUS_LABELS[status] || status,
+    impact_level: impactLevel,
+    impact_label: LU_DEFAULT_IMPACT_LABELS[impactLevel] || impactLevel,
+    affected_policies_count: affectedIds.size,
+    affected_policy_ids: Array.from(affectedIds),
+    tags: Array.from(tagSet),
+    language: pipelineDetectLanguage(regulationText),
+    metadata: {
+      stage_reached: stage || null,
+      policy_count_indexed: result.policy_count_indexed ?? null,
+      policy_count_input: row.policy_count ?? null,
+      f1_confidence: f1 && typeof f1.confidence === 'number' ? f1.confidence : null,
+      f1_relevant: f1 && typeof f1.is_relevant === 'boolean' ? f1.is_relevant : null,
+      regulation_chars: regulationText.length,
+    },
+    created_at: createdAt,
+    updated_at: createdAt,
+  };
+
+  if (opts.includePipeline) {
+    out.pipeline = {
+      stage_reached: stage || null,
+      f1_relevance: f1,
+      key_changes: f2Points.map((pt) => ({
+        id: pt.id || null,
+        point: pt.point || '',
+        source_reference: pt.source_reference || null,
+        category: pt.category || null,
+      })),
+      f3_matches: f3Matches,
+      impact_analysis: f4Impacts.map((group) => ({
+        point_id: group.point_id || null,
+        point_text: group.point_text || '',
+        impacts: Array.isArray(group.impacts) ? group.impacts : [],
+      })),
+      policy_count_indexed: result.policy_count_indexed ?? null,
+    };
+  }
+
+  return out;
+}
+
 /**
  * Seed the extracted updates table with the same five Arabic items shown on the
  * "المستجدات التشريعية" portal page so the API has demo data on a fresh DB.
@@ -5868,6 +6044,67 @@ Return a JSON array where each element has "article", "title", and "text" fields
     return;
   }
 
+  // ---- Pipeline-derived Legislative Updates: list ----
+  // Projects rows from `pipeline_runs` into the same luRowToApi-shape consumed
+  // by the portal's legislative-update list/detail screens, with a `pipeline`
+  // extension on the detail endpoint carrying F2 key-changes & F4 impacts.
+  //
+  // Query params (all optional): q, status, impact_level/impact, limit, offset.
+  if (url.pathname === '/api/ai-tools/pipeline-legislative-updates' && req.method === 'GET') {
+    try {
+      const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
+      const statusFilter = luNormalizeStatus(url.searchParams.get('status') || '');
+      const impactFilter = luNormalizeImpact(url.searchParams.get('impact_level') || url.searchParams.get('impact') || '');
+      let limit = parseInt(url.searchParams.get('limit') || '50', 10);
+      let offset = parseInt(url.searchParams.get('offset') || '0', 10);
+      if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+      if (limit > 200) limit = 200;
+      if (!Number.isFinite(offset) || offset < 0) offset = 0;
+
+      const rows = dbListPipelineRuns.all();
+      const projected = rows.map((r) => pipelineRunToLegislativeUpdate(r, { includePipeline: false }));
+      const filtered = projected.filter((it) => {
+        if (statusFilter && it.status !== statusFilter) return false;
+        if (impactFilter && it.impact_level !== impactFilter) return false;
+        if (q) {
+          const hay = `${it.title}\n${it.description}\n${(it.tags || []).join(' ')}`.toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+      const total = filtered.length;
+      const items = filtered.slice(offset, offset + limit);
+
+      sendJSON(res, 200, {
+        success: true,
+        total,
+        limit,
+        offset,
+        count: items.length,
+        items,
+      });
+    } catch (err) {
+      console.error('[PipelineLegislative] list:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to list.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline-derived Legislative Updates: get by id ----
+  const pipelineLuMatch = url.pathname.match(/^\/api\/ai-tools\/pipeline-legislative-updates\/([^/]+)$/);
+  if (pipelineLuMatch && req.method === 'GET') {
+    try {
+      const row = dbGetPipelineRun.get(pipelineLuMatch[1]);
+      if (!row) { sendJSON(res, 404, { error: 'Pipeline run not found.' }); return; }
+      const item = pipelineRunToLegislativeUpdate(row, { includePipeline: true });
+      sendJSON(res, 200, { success: true, item });
+    } catch (err) {
+      console.error('[PipelineLegislative] get:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to get.' });
+    }
+    return;
+  }
+
   // ---- Analyze API ----
   if (url.pathname === '/api/analyze' && req.method === 'POST') {
     try {
@@ -9339,6 +9576,8 @@ server.listen(PORT, () => {
 ║   • GET/POST/PATCH/DELETE /api/legislative-updates/internal-sources ║
 ║   • GET/POST/PATCH/DELETE /api/legislative-updates/extracted        ║
 ║   • GET  /api/legislative-updates/extracted/facets                  ║
+║   • GET  /api/ai-tools/pipeline-legislative-updates       (list)    ║
+║   • GET  /api/ai-tools/pipeline-legislative-updates/:id   (detail)  ║
 ║   • GET  /api/collections         - List collections      ║
 ║   • POST /api/collections         - Create collection     ║
 ║   • DELETE /api/collections/:id   - Delete collection     ║
