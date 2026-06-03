@@ -228,6 +228,12 @@ function isPublicPath(pathname) {
   // Public portal feed for extracted legislative updates (mutations are still
   // auth-checked inside their route handlers).
   if (pathname.startsWith('/api/legislative-updates/extracted')) return true;
+  // Public read access to pipeline-run history and the portal-shaped
+  // projection over it. The POST /api/ai-tools/pipeline-runs write endpoint
+  // re-checks auth inside its handler, so the prefix bypass is read-only in
+  // practice.
+  if (pathname.startsWith('/api/ai-tools/pipeline-runs')) return true;
+  if (pathname.startsWith('/api/ai-tools/pipeline-legislative-updates')) return true;
   return false;
 }
 
@@ -5974,6 +5980,11 @@ Return a JSON array where each element has "article", "title", and "text" fields
   // ---- Pipeline Runs: Save ----
   if (url.pathname === '/api/ai-tools/pipeline-runs' && req.method === 'POST') {
     try {
+      // The /api/ai-tools/pipeline-runs prefix is whitelisted in isPublicPath
+      // for read access (portal feed), so we must re-check auth here for writes
+      // to prevent unauthenticated inserts into pipeline_runs.
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) { sendJSON(res, 401, { error: 'Unauthorized.' }); return; }
       const body = await parseBody(req);
       const result = body.result && typeof body.result === 'object' ? body.result : {};
       const orgContext = String(body.orgContext || '');
