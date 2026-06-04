@@ -883,18 +883,51 @@ function pipelineRunToLegislativeUpdate(row, opts = {}) {
     : (PIPELINE_STAGE_STATUS[stage] || 'new');
   const impactLevel = pipelineDeriveImpactLevel(f4Impacts);
 
+  // "Affected by this source" semantics:
+  //   F4 analyses every (regulation_point × similar_policy) pair returned by F3,
+  //   including pairs the model decides do NOT meaningfully affect the policy
+  //   (severity="none" + requires_amendment=false). Counting all of those was
+  //   misleading — the card needs the number of policies the regulation actually
+  //   impacts, not the number F4 happened to inspect.
+  //
+  //   A policy is considered actually affected when ANY of its F4 impact entries
+  //   satisfies either:
+  //     - requires_amendment === true, OR
+  //     - severity ∈ { critical, high, medium, low }   (i.e. not "none" / missing).
+  //
+  //   We dedupe across regulation points so one policy counts once even when
+  //   multiple regulation points hit it.
+  const NON_AFFECTING_SEVERITIES = new Set(['none', '', null, undefined]);
+  const analyzedIds = new Set();
   const affectedIds = new Set();
+  let countingSource = 'none';
   for (const group of f4Impacts) {
     for (const imp of (group.impacts || [])) {
-      if (imp.policy_id != null) affectedIds.add(String(imp.policy_id));
+      if (imp.policy_id == null) continue;
+      const pid = String(imp.policy_id);
+      analyzedIds.add(pid);
+      const sev = typeof imp.severity === 'string' ? imp.severity.trim().toLowerCase() : imp.severity;
+      const requires = imp.requires_amendment === true;
+      const meaningful = requires || !NON_AFFECTING_SEVERITIES.has(sev);
+      if (meaningful) affectedIds.add(pid);
     }
   }
-  if (!affectedIds.size) {
+  if (analyzedIds.size) {
+    countingSource = 'f4_impacts';
+  } else {
+    // Fallback: pipeline never ran F4 (e.g. stopped at F3 due to no matches or
+    // an error). F3 only tells us semantic overlap, not impact — so we count
+    // F3 candidates as a best-effort proxy and flag the source as 'f3_matches'
+    // so the portal can render a softer label if it wants to.
     for (const m of f3Matches) {
       for (const x of (m.matches || [])) {
-        if (x.policy_id != null) affectedIds.add(String(x.policy_id));
+        if (x.policy_id == null) continue;
+        const pid = String(x.policy_id);
+        analyzedIds.add(pid);
+        affectedIds.add(pid);
       }
     }
+    if (analyzedIds.size) countingSource = 'f3_matches';
   }
 
   // Tag set: prefer F1.document_tags when present, then merge in F2 categories.
@@ -947,8 +980,15 @@ function pipelineRunToLegislativeUpdate(row, opts = {}) {
     status_label: LU_DEFAULT_STATUS_LABELS[status] || status,
     impact_level: impactLevel,
     impact_label: LU_DEFAULT_IMPACT_LABELS[impactLevel] || impactLevel,
+    // Policies the regulation actually impacts (F4: requires_amendment OR
+    // severity != "none"). This is the number the card should show.
     affected_policies_count: affectedIds.size,
     affected_policy_ids: Array.from(affectedIds),
+    // Sibling diagnostics: how many policies F4 inspected in total (or, when F4
+    // never ran, how many F3 candidates were considered). Useful for tooltips
+    // like "Analysed 7 policies · 4 actually affected".
+    analyzed_policies_count: analyzedIds.size,
+    analyzed_policy_ids: Array.from(analyzedIds),
     tags: Array.from(tagSet),
     language: pipelineDetectLanguage(regulationText),
     metadata: {
@@ -966,6 +1006,10 @@ function pipelineRunToLegislativeUpdate(row, opts = {}) {
         source: f1Source ? 'f1' : 'unknown',
         published_at: /^\d{4}-\d{2}-\d{2}$/.test(f1Published) ? 'f1' : 'pipeline_run_date',
         tags: f1Tags.length ? (f2Points.length ? 'f1+f2' : 'f1') : (f2Points.length ? 'f2' : 'none'),
+        // 'f4_impacts' = filtered by requires_amendment / severity != "none"
+        // 'f3_matches' = fallback when F4 never ran (count is candidates, not confirmed impacts)
+        // 'none'       = neither stage produced any candidate policies
+        affected_policies_count: countingSource,
       },
     },
     created_at: createdAt,
