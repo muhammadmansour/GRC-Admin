@@ -842,6 +842,141 @@ function pipelineDeriveTitle(regulationText, fallback) {
   return fallback;
 }
 
+/** Worst → best ordering for F4's "severity" enum (used for sort + reduce). */
+const PIPELINE_SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, none: 4 };
+const PIPELINE_SEVERITY_LABELS = {
+  critical: 'Critical',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+  none: 'None',
+};
+
+/** Normalise an F4 impact entry's severity to a known enum value (default 'none'). */
+function pipelineNormalizeSeverity(sev) {
+  const s = (typeof sev === 'string' ? sev : '').trim().toLowerCase();
+  return PIPELINE_SEVERITY_RANK[s] != null ? s : 'none';
+}
+
+/**
+ * Re-shape F4's regulation-point-first impact tree into a policy-first tree so the
+ * portal can render an "Affected policies" group-by view (each policy expands to
+ * show every regulation point that touched it).
+ *
+ * Returned shape:
+ *   [
+ *     {
+ *       policy_id, policy_title,
+ *       is_affected, impact_level, impact_label, requires_amendment,
+ *       matched_points_count, affected_points_count,
+ *       matched_points: [
+ *         { point_id, point_text, impact_summary, severity, severity_label,
+ *           severity_reasoning, requires_amendment, similarity_score,
+ *           amendments, compliance_gap, is_affected }
+ *       ]
+ *     },
+ *   ]
+ *
+ * Sort order:
+ *   - Top-level: meaningfully-affected policies first, then by worst severity,
+ *     then by matched_points_count desc, then by policy_title.
+ *   - Inside each policy: regulation points by worst severity, then similarity desc.
+ */
+function pipelineGroupImpactsByPolicy(f4Impacts) {
+  if (!Array.isArray(f4Impacts) || !f4Impacts.length) return [];
+  const byPolicy = new Map();
+  for (const group of f4Impacts) {
+    const pointId = group && group.point_id != null ? group.point_id : null;
+    const pointText = group && typeof group.point_text === 'string' ? group.point_text : '';
+    const impacts = Array.isArray(group && group.impacts) ? group.impacts : [];
+    for (const imp of impacts) {
+      if (!imp || imp.policy_id == null) continue;
+      const pid = String(imp.policy_id);
+      const sev = pipelineNormalizeSeverity(imp.severity);
+      const requires = imp.requires_amendment === true;
+      const meaningful = requires || sev !== 'none';
+      const entry = {
+        point_id: pointId,
+        point_text: pointText,
+        impact_summary: typeof imp.impact_summary === 'string' ? imp.impact_summary : '',
+        severity: sev,
+        severity_label: PIPELINE_SEVERITY_LABELS[sev],
+        severity_reasoning: typeof imp.severity_reasoning === 'string' ? imp.severity_reasoning : '',
+        requires_amendment: requires,
+        similarity_score: typeof imp.similarity_score === 'number' ? imp.similarity_score : null,
+        amendments: Array.isArray(imp.amendments) ? imp.amendments : [],
+        compliance_gap: typeof imp.compliance_gap === 'string' ? imp.compliance_gap : '',
+        is_affected: meaningful,
+      };
+      const existing = byPolicy.get(pid);
+      if (existing) {
+        existing.matched_points.push(entry);
+        existing.policy_title = existing.policy_title || imp.policy_title || '';
+      } else {
+        byPolicy.set(pid, {
+          policy_id: pid,
+          policy_title: typeof imp.policy_title === 'string' ? imp.policy_title : '',
+          matched_points: [entry],
+        });
+      }
+    }
+  }
+
+  const policyImpactLevel = (sev) => PIPELINE_SEVERITY_TO_IMPACT[sev] || 'low';
+
+  const out = [];
+  for (const group of byPolicy.values()) {
+    group.matched_points.sort((a, b) => {
+      const da = PIPELINE_SEVERITY_RANK[a.severity] - PIPELINE_SEVERITY_RANK[b.severity];
+      if (da !== 0) return da;
+      const sa = a.similarity_score == null ? -1 : a.similarity_score;
+      const sb = b.similarity_score == null ? -1 : b.similarity_score;
+      return sb - sa;
+    });
+    let worstRank = PIPELINE_SEVERITY_RANK.none;
+    let isAffected = false;
+    let requiresAmendment = false;
+    let affectedPoints = 0;
+    for (const ent of group.matched_points) {
+      const r = PIPELINE_SEVERITY_RANK[ent.severity];
+      if (r < worstRank) worstRank = r;
+      if (ent.is_affected) {
+        isAffected = true;
+        affectedPoints += 1;
+      }
+      if (ent.requires_amendment) requiresAmendment = true;
+    }
+    // Worst rank → severity string (the one with this rank value).
+    const worstSev = Object.keys(PIPELINE_SEVERITY_RANK).find((k) => PIPELINE_SEVERITY_RANK[k] === worstRank) || 'none';
+    const impactLevel = policyImpactLevel(worstSev);
+    out.push({
+      policy_id: group.policy_id,
+      policy_title: group.policy_title || `Policy ${group.policy_id}`,
+      is_affected: isAffected,
+      impact_level: impactLevel,
+      impact_label: LU_DEFAULT_IMPACT_LABELS[impactLevel] || impactLevel,
+      // Carry the raw worst F4 severity too — the portal may want to show
+      // "Critical" rather than collapsing it to "High" via impact_level.
+      worst_severity: worstSev,
+      worst_severity_label: PIPELINE_SEVERITY_LABELS[worstSev],
+      requires_amendment: requiresAmendment,
+      matched_points_count: group.matched_points.length,
+      affected_points_count: affectedPoints,
+      matched_points: group.matched_points,
+    });
+  }
+
+  out.sort((a, b) => {
+    if (a.is_affected !== b.is_affected) return a.is_affected ? -1 : 1;
+    const da = PIPELINE_SEVERITY_RANK[a.worst_severity] - PIPELINE_SEVERITY_RANK[b.worst_severity];
+    if (da !== 0) return da;
+    if (b.matched_points_count !== a.matched_points_count) return b.matched_points_count - a.matched_points_count;
+    return String(a.policy_title).localeCompare(String(b.policy_title));
+  });
+
+  return out;
+}
+
 /** Reduce F4 severities → the strongest impact level. Returns 'medium' when no impacts exist. */
 function pipelineDeriveImpactLevel(f4Impacts) {
   if (!Array.isArray(f4Impacts) || !f4Impacts.length) return 'medium';
@@ -1032,6 +1167,11 @@ function pipelineRunToLegislativeUpdate(row, opts = {}) {
         point_text: group.point_text || '',
         impacts: Array.isArray(group.impacts) ? group.impacts : [],
       })),
+      // Same F4 data re-grouped by POLICY (each entry = one policy with the
+      // regulation points that touched it underneath). The portal renders the
+      // "Affected policies" group-by view from this, while `impact_analysis`
+      // above keeps the regulation-point-first view available.
+      impacts_by_policy: pipelineGroupImpactsByPolicy(f4Impacts),
       policy_count_indexed: result.policy_count_indexed ?? null,
     };
   }
