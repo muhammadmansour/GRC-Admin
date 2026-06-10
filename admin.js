@@ -13,7 +13,9 @@ function _notifRender() {
   if (!list) return;
 
   const running = _notifs.filter(n => n.status === 'running').length;
-  const unseen  = _notifs.filter(n => n.status !== 'info' || n.unseen).length;
+  // Count items the user hasn't acknowledged yet (panel open clears n.unseen).
+  // Running items aren't counted here because they get their own pulsing badge above.
+  const unseen  = _notifs.filter(n => n.unseen === true && n.status !== 'running').length;
 
   if (badge) {
     if (running > 0) {
@@ -71,14 +73,23 @@ function addNotif(id, title, message, status = 'running', result = null) {
 function updateNotif(id, updates) {
   const idx = _notifs.findIndex(n => n.id === id);
   if (idx < 0) return;
+  // When a notification transitions to a terminal state and the panel is
+  // closed, re-mark it as unseen so the badge counts it (user hasn't seen the
+  // final result yet). If the panel is open, leave unseen=false because the
+  // updated row is already visible.
+  const becameTerminal = updates.status === 'success' || updates.status === 'error';
+  if (becameTerminal) {
+    const panel = document.getElementById('notif-panel');
+    const panelClosed = !panel || panel.hidden;
+    if (panelClosed) updates = { ...updates, unseen: true };
+  }
   _notifs[idx] = { ..._notifs[idx], ...updates };
   _notifRender();
-  if (updates.status === 'success' || updates.status === 'error') {
-    const panel = document.getElementById('notif-panel');
-    if (panel && panel.hidden) {
-      const badge = document.getElementById('notif-badge');
-      if (badge) { badge.hidden = false; badge.className = 'notif-badge notif-badge--pulse'; }
-    }
+  // _notifRender adds the pulse class via the badge state — apply the
+  // attention-grabbing variant only when a fresh terminal update arrived.
+  if (becameTerminal) {
+    const badge = document.getElementById('notif-badge');
+    if (badge && !badge.hidden) badge.classList.add('notif-badge--pulse');
   }
 }
 
