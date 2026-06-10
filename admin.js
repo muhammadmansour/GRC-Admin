@@ -14724,88 +14724,462 @@ function openPolicyPipelineResultModal(data, opts = {}) {
   document.body.style.overflow = 'hidden';
 }
 
-function buildPolicyPipelineReportDocumentHtml(data, meta = {}) {
+/** Print/PDF stylesheet — Cairo, coloured section headers, card layout. */
+const PUP_REPORT_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&display=swap');
+* { box-sizing: border-box; }
+.rpt-root {
+  font-family: 'Cairo', system-ui, sans-serif;
+  color: #0f172a;
+  background: #fff;
+  font-size: 13px;
+  line-height: 1.55;
+  width: 794px;
+  padding: 0;
+}
+.rpt-cover {
+  background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 55%, #3b82f6 100%);
+  color: #fff;
+  padding: 28px 32px 24px;
+  border-radius: 0;
+}
+.rpt-cover-title {
+  margin: 0 0 8px;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.rpt-cover-sub {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.92;
+  font-weight: 500;
+}
+.rpt-cover-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.rpt-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(255,255,255,0.18);
+  border: 1px solid rgba(255,255,255,0.28);
+}
+.rpt-body { padding: 24px 28px 32px; }
+.rpt-kpi-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.rpt-kpi {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #f8fafc;
+}
+.rpt-kpi-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+.rpt-kpi-value { font-size: 20px; font-weight: 700; color: #0f172a; }
+.rpt-section {
+  margin-bottom: 22px;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+.rpt-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+}
+.rpt-section-head--relevance { background: #047857; }
+.rpt-section-head--points { background: #4f46e5; }
+.rpt-section-head--matching { background: #0d9488; }
+.rpt-section-head--impact { background: #c2410c; }
+.rpt-section-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.22);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+.rpt-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  background: #fff;
+}
+.rpt-card:last-child { margin-bottom: 0; }
+.rpt-badge-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.rpt-badge {
+  display: inline-flex;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.rpt-badge--yes { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+.rpt-badge--no { background: #fffbeb; color: #b45309; border: 1px solid #fcd34d; }
+.rpt-badge--confidence { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+.rpt-prose { margin: 0 0 10px; white-space: pre-wrap; }
+.rpt-prose[dir="auto"], .rpt-list[dir="auto"] { unicode-bidi: plaintext; }
+.rpt-list { margin: 0; padding-left: 18px; }
+.rpt-list li { margin-bottom: 4px; }
+.rpt-point-id {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  background: #312e81;
+  padding: 3px 8px;
+  border-radius: 5px;
+  margin-bottom: 6px;
+}
+.rpt-point-meta { font-size: 11px; color: #64748b; margin-bottom: 6px; }
+.rpt-policy-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.rpt-policy-head {
+  padding: 12px 14px;
+  background: #f1f5f9;
+  border-bottom: 1px solid #e2e8f0;
+}
+.rpt-policy-title { margin: 0 0 6px; font-size: 14px; font-weight: 700; }
+.rpt-sev { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
+.rpt-sev--critical { background: #fef2f2; color: #b91c1c; }
+.rpt-sev--high { background: #fff7ed; color: #c2410c; }
+.rpt-sev--medium { background: #fffbeb; color: #b45309; }
+.rpt-sev--low { background: #ecfdf5; color: #047857; }
+.rpt-sev--none { background: #f1f5f9; color: #64748b; }
+.rpt-impact-point {
+  padding: 12px 14px;
+  border-bottom: 1px solid #eef2f7;
+}
+.rpt-impact-point:last-child { border-bottom: none; }
+.rpt-impact-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  margin: 10px 0 4px;
+}
+.rpt-impact-label:first-child { margin-top: 0; }
+.rpt-amend {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  background: #fafafa;
+}
+.rpt-amend-type {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: #ecfdf5;
+  color: #047857;
+  margin-right: 6px;
+}
+.rpt-note {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border-left: 3px solid #94a3b8;
+  font-size: 12px;
+  color: #475569;
+  margin-bottom: 14px;
+}
+`;
+
+function pupReportSeverityClass(sev) {
+  const s = pupNormalizeSeverity(sev);
+  return `rpt-sev--${s}`;
+}
+
+function pupReportFileName(meta) {
+  const base = meta && meta.sourceName ? String(meta.sourceName) : 'pipeline-report';
+  const safe = base.replace(/[^\w\u0600-\u06FF\s-]/g, '').trim().replace(/\s+/g, '-');
+  return (safe || 'pipeline-report') + '-report.pdf';
+}
+
+/** PDF-optimised body (not the modal HTML). */
+function renderPolicyPipelineReportPdfBody(data) {
+  const parts = [];
+  const f1 = data.f1_relevance;
+  const f2 = data.f2_summary;
+  const f3 = data.f3_matches;
+  const f4 = data.f4_impacts;
+
+  if (typeof data.policy_count_indexed === 'number') {
+    parts.push('<div class="rpt-kpi-row">');
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Stage reached</div><div class="rpt-kpi-value" style="font-size:15px">' +
+        esc(pupStageLabel(data.stage_reached)) + '</div></div>'
+    );
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Indexed policies</div><div class="rpt-kpi-value">' +
+        esc(String(data.policy_count_indexed)) + '</div></div>'
+    );
+    const policies = Array.isArray(f4) ? pupGroupImpactsByPolicy(f4) : [];
+    const affected = policies.filter((p) => p.is_affected).length;
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Affected policies</div><div class="rpt-kpi-value">' +
+        esc(String(affected)) + '</div></div>'
+    );
+    parts.push('</div>');
+  }
+
+  const skip = pupSkippedStagesNote(data);
+  if (skip) parts.push('<p class="rpt-note">' + esc(skip) + '</p>');
+
+  if (f1 && typeof f1 === 'object') {
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--relevance"><span class="rpt-section-icon">1</span> Relevance assessment</h2>');
+    if (typeof f1.is_relevant === 'boolean') {
+      parts.push('<div class="rpt-card">');
+      parts.push('<div class="rpt-badge-row">');
+      parts.push(
+        '<span class="rpt-badge ' + (f1.is_relevant ? 'rpt-badge--yes' : 'rpt-badge--no') + '">' +
+          esc(f1.is_relevant ? 'Relevant to organisation' : 'Not relevant') + '</span>'
+      );
+      if (typeof f1.confidence === 'number') {
+        const pct = Math.round(Math.min(1, Math.max(0, f1.confidence)) * 100);
+        parts.push('<span class="rpt-badge rpt-badge--confidence">Model confidence · ' + esc(String(pct)) + '%</span>');
+      }
+      parts.push('</div>');
+      if (f1.reasoning) parts.push('<p class="rpt-prose" dir="auto">' + esc(f1.reasoning) + '</p>');
+      const aspects = Array.isArray(f1.relevant_aspects) ? f1.relevant_aspects.filter(Boolean) : [];
+      if (aspects.length) {
+        parts.push('<ul class="rpt-list" dir="auto">');
+        for (const a of aspects) parts.push('<li>' + esc(a) + '</li>');
+        parts.push('</ul>');
+      }
+      parts.push('</div>');
+    } else {
+      parts.push('<div class="rpt-card"><p class="rpt-prose">Relevance step did not return a valid verdict.</p></div>');
+    }
+    parts.push('</section>');
+  }
+
+  if (f2 && typeof f2 === 'object') {
+    const pts = Array.isArray(f2.policy_points) ? f2.policy_points : [];
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--points"><span class="rpt-section-icon">2</span> Regulation points extracted</h2>');
+    if (!pts.length) {
+      parts.push('<div class="rpt-card"><p class="rpt-prose">No policy points returned.</p></div>');
+    } else {
+      for (const pt of pts) {
+        parts.push('<div class="rpt-card">');
+        parts.push('<span class="rpt-point-id">' + esc(pt.id || 'Point') + '</span>');
+        const metaBits = [];
+        if (pt.source_reference) metaBits.push('Reference: ' + pt.source_reference);
+        if (pt.category) metaBits.push(pt.category);
+        if (metaBits.length) parts.push('<div class="rpt-point-meta">' + esc(metaBits.join(' · ')) + '</div>');
+        parts.push('<p class="rpt-prose" dir="auto" style="margin:0">' + esc(pt.point || '') + '</p>');
+        parts.push('</div>');
+      }
+    }
+    parts.push('</section>');
+  }
+
+  if (Array.isArray(f3) && f3.length) {
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--matching"><span class="rpt-section-icon">3</span> Policy matching</h2>');
+    for (const row of f3) {
+      const matches = Array.isArray(row.matches) ? row.matches : [];
+      parts.push('<div class="rpt-card">');
+      parts.push('<span class="rpt-point-id">' + esc(row.point_id || 'Point') + '</span>');
+      parts.push('<p class="rpt-prose" dir="auto" style="margin:8px 0 10px">' + esc(row.point_text || '') + '</p>');
+      if (!matches.length) {
+        parts.push('<p class="rpt-point-meta">No policy matches above threshold.</p>');
+      } else {
+        for (const m of matches) {
+          parts.push('<div style="border-top:1px dashed #e2e8f0;padding-top:8px;margin-top:8px">');
+          parts.push('<strong>' + esc(m.policy_title || m.policy_id || 'Policy') + '</strong>');
+          if (typeof m.similarity_score === 'number') {
+            parts.push(' <span class="rpt-point-meta">· Similarity ' + esc(String(m.similarity_score)) + '</span>');
+          }
+          if (m.content_excerpt) {
+            parts.push('<p class="rpt-prose" dir="auto" style="font-size:12px;margin:6px 0 0">' + esc(m.content_excerpt) + '</p>');
+          }
+          parts.push('</div>');
+        }
+      }
+      parts.push('</div>');
+    }
+    parts.push('</section>');
+  }
+
+  if (Array.isArray(f4) && f4.length) {
+    const policies = pupGroupImpactsByPolicy(f4);
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--impact"><span class="rpt-section-icon">4</span> Impact analysis</h2>');
+    for (const policy of policies) {
+      parts.push('<div class="rpt-policy-card">');
+      parts.push('<div class="rpt-policy-head">');
+      parts.push('<h3 class="rpt-policy-title">' + esc(policy.policy_title) + '</h3>');
+      parts.push(
+        '<span class="rpt-sev ' + pupReportSeverityClass(policy.worst_severity) + '">' +
+          esc(policy.worst_severity_label) + '</span>'
+      );
+      if (policy.requires_amendment) {
+        parts.push(' <span class="rpt-sev rpt-sev--high" style="margin-left:6px">Requires amendment</span>');
+      }
+      parts.push('</div>');
+      for (const pt of policy.matched_points) {
+        parts.push('<div class="rpt-impact-point">');
+        parts.push('<span class="rpt-point-id">' + esc(pt.point_id || 'Point') + '</span>');
+        parts.push('<p class="rpt-prose" dir="auto" style="margin:8px 0">' + esc(pt.point_text || '') + '</p>');
+        if (pt.impact_summary) {
+          parts.push('<div class="rpt-impact-label">Impact analysis</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + esc(pt.impact_summary) + '</p>');
+        }
+        if (pt.severity_reasoning) {
+          parts.push('<div class="rpt-impact-label">Severity</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + esc(pt.severity_reasoning) + '</p>');
+        }
+        if (pt.compliance_gap) {
+          parts.push('<div class="rpt-impact-label">Compliance gap</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + esc(pt.compliance_gap) + '</p>');
+        }
+        const amds = Array.isArray(pt.amendments) ? pt.amendments : [];
+        if (amds.length) {
+          parts.push('<div class="rpt-impact-label">Proposed amendments (' + esc(String(amds.length)) + ')</div>');
+          for (const a of amds) {
+            parts.push('<div class="rpt-amend">');
+            if (a.change_type) {
+              parts.push('<span class="rpt-amend-type">' + esc(pupChangeTypeLabel(a.change_type)) + '</span>');
+            }
+            if (a.policy_section) parts.push('<strong>' + esc(a.policy_section) + '</strong>');
+            if (a.current_text_summary) {
+              parts.push('<div class="rpt-impact-label">Current</div>');
+              parts.push('<p class="rpt-prose" dir="auto">' + esc(a.current_text_summary) + '</p>');
+            }
+            if (a.required_change) {
+              parts.push('<div class="rpt-impact-label">Required change</div>');
+              parts.push('<p class="rpt-prose" dir="auto">' + esc(a.required_change) + '</p>');
+            }
+            parts.push('</div>');
+          }
+        }
+        parts.push('</div>');
+      }
+      parts.push('</div>');
+    }
+    parts.push('</section>');
+  }
+
+  return parts.join('');
+}
+
+function buildPolicyPipelineReportExportRoot(data, meta = {}) {
   const sourceName = meta.sourceName ? String(meta.sourceName) : 'Policy update pipeline';
   const generatedAt = meta.generatedAt
     ? new Date(meta.generatedAt).toLocaleString()
     : new Date().toLocaleString();
   const stage = data && data.stage_reached ? pupStageLabel(data.stage_reached) : '—';
-  const bodyHtml = renderPolicyPipelineResultHtml(data, { view: 'full' });
-  const safeTitle = esc(sourceName);
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>${safeTitle} — Pipeline report</title>
-  <style>
-    * { box-sizing: border-box; }
-    body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; color: #0f172a; margin: 0; padding: 32px 40px 48px; line-height: 1.5; }
-    .report-header { border-bottom: 2px solid #e2e8f0; padding-bottom: 18px; margin-bottom: 24px; }
-    .report-title { margin: 0 0 6px; font-size: 24px; font-weight: 700; }
-    .report-meta { margin: 0; font-size: 13px; color: #64748b; }
-    .report-meta span { margin-right: 16px; }
-    .pup-result-top, .pup-result-panel, .pup-impact-policy-card, .pup-impact-point, .pup-impact-amend-card { break-inside: avoid; page-break-inside: avoid; }
-    .pup-result-raw-details { display: none !important; }
-    .pup-impact-point { border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 8px; }
-    .pup-impact-point-body { display: block !important; padding: 12px 14px; border-top: 1px solid #eef2f7; }
-    .pup-impact-point-summary { display: none; }
-    .pup-impact-point::before { content: attr(data-point-label); display: block; font-weight: 700; font-size: 12px; padding: 10px 14px; background: #f8fafc; border-bottom: 1px solid #eef2f7; }
-    @media print {
-      body { padding: 16px 20px 24px; }
-      .report-no-print { display: none !important; }
-    }
-  </style>
-</head>
-<body>
-  <header class="report-header">
-    <h1 class="report-title">${safeTitle}</h1>
-    <p class="report-meta">
-      <span><strong>Generated:</strong> ${esc(generatedAt)}</span>
-      <span><strong>Stage:</strong> ${esc(stage)}</span>
-      ${meta.runId ? `<span><strong>Run:</strong> ${esc(String(meta.runId))}</span>` : ''}
-    </p>
-  </header>
-  <main>${bodyHtml}</main>
-  <p class="report-no-print" style="margin-top:24px;font-size:12px;color:#64748b">Use your browser’s print dialog and choose “Save as PDF”.</p>
-</body>
-</html>`;
+  const root = document.createElement('div');
+  root.className = 'rpt-export-root';
+  root.style.cssText = 'position:fixed;left:-10000px;top:0;z-index:-1;';
+  root.innerHTML =
+    '<style>' + PUP_REPORT_CSS + '</style>' +
+    '<div class="rpt-root">' +
+      '<header class="rpt-cover">' +
+        '<h1 class="rpt-cover-title">' + esc(sourceName) + '</h1>' +
+        '<p class="rpt-cover-sub">Policy update pipeline · impact report</p>' +
+        '<div class="rpt-cover-meta">' +
+          '<span class="rpt-chip">Generated: ' + esc(generatedAt) + '</span>' +
+          '<span class="rpt-chip">Stage: ' + esc(stage) + '</span>' +
+          (meta.runId ? '<span class="rpt-chip">Run: ' + esc(String(meta.runId)) + '</span>' : '') +
+        '</div>' +
+      '</header>' +
+      '<div class="rpt-body">' + renderPolicyPipelineReportPdfBody(data) + '</div>' +
+    '</div>';
+  return root;
 }
 
-function downloadPolicyPipelineReportPdf() {
+async function downloadPolicyPipelineReportPdf() {
   const data = policyUpdatePipelineLastRaw;
   if (!data || typeof data !== 'object') {
     toast('error', 'Nothing to export', 'Run the pipeline first.');
     return;
   }
-  const html = buildPolicyPipelineReportDocumentHtml(data, policyUpdatePipelineLastMeta || {});
-  const win = window.open('', '_blank');
-  if (!win) {
-    toast('error', 'Popup blocked', 'Allow pop-ups for this site to download the PDF report.');
+  if (typeof window.html2pdf !== 'function') {
+    toast('error', 'PDF library unavailable', 'Reload the page and try again.');
     return;
   }
-  win.document.open();
-  win.document.write(html);
-  win.document.close();
-  // Expand <details> blocks into static sections for print
+
+  const pdfBtn = document.getElementById('pup-result-modal-download-pdf');
+  const meta = policyUpdatePipelineLastMeta || {};
+  const filename = pupReportFileName(meta);
+  const root = buildPolicyPipelineReportExportRoot(data, meta);
+  document.body.appendChild(root);
+
+  if (pdfBtn) pdfBtn.disabled = true;
+  toast('info', 'Generating PDF', 'Preparing your report…');
+
   try {
-    win.document.querySelectorAll('.pup-impact-point').forEach((el, idx) => {
-      const idEl = el.querySelector('.pup-impact-point-id');
-      const textEl = el.querySelector('.pup-impact-point-text');
-      const label = [idEl ? idEl.textContent : '', textEl ? textEl.textContent : '']
-        .filter(Boolean)
-        .join(' — ')
-        .slice(0, 180);
-      if (label) el.setAttribute('data-point-label', label);
-      el.open = true;
-    });
-  } catch (_) { /* ignore */ }
-  win.focus();
-  setTimeout(() => {
-    try { win.print(); } catch (e) {
-      toast('error', 'Print failed', e.message || String(e));
+    if (document.fonts && document.fonts.ready) {
+      await document.fonts.ready;
     }
-  }, 400);
-  toast('success', 'Report ready', 'Choose “Save as PDF” in the print dialog.');
+    await new Promise((r) => setTimeout(r, 350));
+
+    const target = root.querySelector('.rpt-root');
+    await window.html2pdf()
+      .set({
+        margin: [8, 8, 8, 8],
+        filename,
+        image: { type: 'jpeg', quality: 0.95 },
+        html2canvas: {
+          scale: 2,
+          useCORS: true,
+          letterRendering: true,
+          logging: false,
+          width: 794,
+          windowWidth: 794,
+        },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'], avoid: ['.rpt-section', '.rpt-policy-card', '.rpt-card'] },
+      })
+      .from(target)
+      .save();
+
+    toast('success', 'Downloaded', filename);
+  } catch (e) {
+    console.error('[PDF]', e);
+    toast('error', 'PDF failed', e.message || String(e));
+  } finally {
+    root.remove();
+    if (pdfBtn) pdfBtn.disabled = false;
+  }
 }
 
 function initPolicyPipelineResultModalListeners() {
