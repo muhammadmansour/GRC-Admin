@@ -8914,7 +8914,7 @@ body.pup-pipeline-overlay-open {
 
 /* ——— Legislative sources (modern UI) ——— */
 .lu-page .lu-page-container {
-  max-width: 1100px;
+  max-width: 1280px;
 }
 .lu-page-header {
   margin-bottom: 24px;
@@ -9010,9 +9010,12 @@ body.pup-pipeline-overlay-open {
 }
 .lu-table-internal th.lu-col-actions,
 .lu-table-internal td.lu-col-actions {
-  width: 152px;
+  width: 220px;
+  min-width: 220px;
   text-align: right;
   vertical-align: middle;
+  padding-right: 18px;
+  white-space: nowrap;
 }
 .lu-table-internal .lu-col-name {
   width: 22%;
