@@ -45,6 +45,12 @@ const GCS_LEGISLATIVE_BUCKET_NAME = String(
   process.env.GCS_LEGISLATIVE_BUCKET || 'local-legislative-updates-docs'
 ).replace(/\/+$/, '');
 
+/** GCS bucket for Policy Update Pipeline (PUP) artifacts — generated report PDFs.
+ *  Override with GCS_PUP_BUCKET. Bucket must exist; create with `gsutil mb -p <project> gs://<bucket>` or in the GCS console. */
+const GCS_PUP_BUCKET_NAME = String(
+  process.env.GCS_PUP_BUCKET || 'pup-data'
+).replace(/\/+$/, '');
+
 /** Lazy-init GCS client for legislative uploads (optional dependency at runtime). */
 let _legislativeGcsCache = null;
 function getLegislativeGcsClient() {
@@ -573,6 +579,19 @@ try {
   `);
 } catch (migErr) { console.warn('pipeline_runs table migration:', migErr.message); }
 
+// Migrate pipeline_runs: add report-PDF columns if missing (older rows stay null →
+// 'unavailable' to the client, per design — only new runs get PDFs generated).
+try {
+  const cols = db.pragma('table_info(pipeline_runs)').map(c => c.name);
+  const addCol = (name, def) => { if (!cols.includes(name)) db.exec(`ALTER TABLE pipeline_runs ADD COLUMN ${name} ${def}`); };
+  addCol('report_pdf_status',       "TEXT DEFAULT NULL"); // 'pending' | 'ready' | 'failed' | null (unavailable)
+  addCol('report_pdf_object_path',  "TEXT DEFAULT NULL"); // GCS object key inside the pup bucket
+  addCol('report_pdf_bucket',       "TEXT DEFAULT NULL"); // bucket name at generation time
+  addCol('report_pdf_size_bytes',   "INTEGER DEFAULT NULL");
+  addCol('report_pdf_generated_at', "TEXT DEFAULT NULL");
+  addCol('report_pdf_error',        "TEXT DEFAULT NULL");
+} catch (migErr) { console.warn('pipeline_runs report-pdf migration:', migErr.message); }
+
 // Migrate org_contexts: add new profile columns if missing
 try {
   const cols = db.pragma('table_info(org_contexts)').map(c => c.name);
@@ -645,6 +664,19 @@ const dbGetPipelineRun = db.prepare(`SELECT * FROM pipeline_runs WHERE id = ?`);
 const dbListPipelineRuns = db.prepare(`
   SELECT id, org_context, regulation_snippet, regulation_text, policy_count, stage_reached, result, created_at
   FROM pipeline_runs ORDER BY created_at DESC LIMIT 100
+`);
+const dbSetPipelineRunReportPdfStatus = db.prepare(`
+  UPDATE pipeline_runs SET report_pdf_status = ?, report_pdf_error = ? WHERE id = ?
+`);
+const dbSetPipelineRunReportPdfReady = db.prepare(`
+  UPDATE pipeline_runs
+     SET report_pdf_status = 'ready',
+         report_pdf_object_path = ?,
+         report_pdf_bucket = ?,
+         report_pdf_size_bytes = ?,
+         report_pdf_generated_at = ?,
+         report_pdf_error = NULL
+   WHERE id = ?
 `);
 
 // Local prompts DB helpers
@@ -975,6 +1007,420 @@ function pipelineGroupImpactsByPolicy(f4Impacts) {
   });
 
   return out;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Policy Update Pipeline · Server-side PDF report generation
+//
+// The same report the user used to render client-side (admin.js) is now
+// produced on the server right after a pipeline run is saved, then uploaded
+// to GCS (GCS_PUP_BUCKET_NAME). The download endpoint just returns a fresh
+// signed URL — the user no longer waits for the browser to render the PDF.
+//
+// Engine: Puppeteer (headless Chrome) — perfect Arabic/RTL fidelity, reuses
+// the existing report HTML/CSS verbatim.
+// ───────────────────────────────────────────────────────────────────────────
+
+const PIPELINE_STAGE_LABELS = {
+  f1_relevance: 'Stage 1 · Relevance assessment',
+  f2_summary: 'Stage 2 · Regulation points extracted',
+  f3_matches: 'Stage 3 · Policy matching',
+  f4_impacts: 'Stage 4 · Impact analysis',
+};
+
+function pipelineStageLabel(stage) {
+  return PIPELINE_STAGE_LABELS[String(stage || '').toLowerCase()] || stage || '—';
+}
+
+function pipelineChangeTypeLabel(type) {
+  const t = String(type || '').toLowerCase();
+  if (t === 'add') return 'Add';
+  if (t === 'modify' || t === 'update') return 'Modify';
+  if (t === 'remove' || t === 'delete') return 'Remove';
+  return type || 'Change';
+}
+
+function pipelineReportSeverityClass(sev) {
+  const s = String(sev || '').toLowerCase();
+  if (s === 'critical' || s === 'high') return 'rpt-sev--high';
+  if (s === 'medium') return 'rpt-sev--med';
+  if (s === 'low') return 'rpt-sev--low';
+  return 'rpt-sev--none';
+}
+
+function pipelineSkippedStagesNote(data) {
+  const stage = String(data.stage_reached || '').toLowerCase();
+  if (stage === 'f4_impacts') return '';
+  if (stage === 'f1_relevance') return 'Stages 2–4 were skipped because the regulation was judged not relevant.';
+  if (stage === 'f2_summary') return 'Stage 3 (policy matching) and Stage 4 (impact analysis) were skipped.';
+  if (stage === 'f3_matches') return 'Stage 4 (impact analysis) was skipped.';
+  return '';
+}
+
+function htmlEscape(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** PDF report CSS — mirrored from admin.js PUP_REPORT_CSS (kept in sync intentionally). */
+const PIPELINE_REPORT_CSS = `
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Cairo',system-ui,-apple-system,'Segoe UI',sans-serif;color:#0f172a;background:#fff;font-size:13px;line-height:1.55;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .rpt-root{padding:24px 28px 36px;max-width:780px;margin:0 auto}
+  .rpt-cover{padding:28px 26px;border-radius:14px;margin-bottom:22px;page-break-inside:avoid}
+  .rpt-cover-title{margin:0 0 6px;font-size:24px;font-weight:800;letter-spacing:-0.01em}
+  .rpt-cover-sub{margin:0;font-size:13px;opacity:0.95}
+  .rpt-cover-meta{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px}
+  .rpt-chip{display:inline-flex;align-items:center;padding:5px 11px;border-radius:999px;background:rgba(255,255,255,0.22);font-size:11px;font-weight:600;letter-spacing:0.02em}
+  .rpt-kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:8px 0 22px}
+  .rpt-kpi{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px}
+  .rpt-kpi-label{font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#64748b;margin-bottom:6px}
+  .rpt-kpi-value{font-size:22px;font-weight:700;color:#0f172a;line-height:1.1}
+  .rpt-section{margin:0 0 22px;page-break-inside:auto}
+  .rpt-section-head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;font-size:14px;font-weight:700;margin:0 0 12px}
+  .rpt-section-icon{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,0.25);font-size:12px;font-weight:800}
+  .rpt-card{border:1px solid #e2e8f0;background:#fff;border-radius:10px;padding:12px 14px;margin:0 0 10px;page-break-inside:avoid}
+  .rpt-badge-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+  .rpt-badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:0.02em;border:1px solid transparent}
+  .rpt-badge--yes{background:#dcfce7;color:#166534;border-color:#bbf7d0}
+  .rpt-badge--no{background:#fee2e2;color:#991b1b;border-color:#fecaca}
+  .rpt-badge--confidence{background:#eef2ff;color:#3730a3;border-color:#c7d2fe}
+  .rpt-prose{margin:6px 0;color:#1e293b;font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-wrap:break-word}
+  .rpt-list{margin:6px 0 0;padding-left:18px;color:#334155;font-size:12.5px}
+  .rpt-list li{margin-bottom:4px}
+  .rpt-note{margin:8px 0 16px;padding:10px 14px;background:#fef3c7;border:1px solid #fde68a;border-radius:8px;color:#854d0e;font-size:12px}
+  .rpt-point-id{display:inline-flex;align-items:center;padding:2px 9px;border-radius:6px;background:#f1f5f9;color:#334155;font-size:11px;font-weight:700;font-family:'JetBrains Mono','Fira Code',Consolas,monospace;letter-spacing:0.01em}
+  .rpt-point-meta{font-size:11px;color:#64748b;margin:4px 0 8px}
+  .rpt-policy-card{border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin:0 0 14px;background:#fafbfc;page-break-inside:avoid}
+  .rpt-policy-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+  .rpt-policy-title{margin:0;font-size:14px;font-weight:700;color:#0f172a}
+  .rpt-sev{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600}
+  .rpt-sev--high{background:#fee2e2;color:#991b1b}
+  .rpt-sev--med{background:#fef3c7;color:#854d0e}
+  .rpt-sev--low{background:#e0f2fe;color:#075985}
+  .rpt-sev--none{background:#f1f5f9;color:#475569}
+  .rpt-impact-point{border-top:1px dashed #e2e8f0;padding-top:10px;margin-top:10px;page-break-inside:avoid}
+  .rpt-impact-point:first-child{border-top:none;padding-top:0;margin-top:0}
+  .rpt-impact-label{font-size:10.5px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#475569;margin:8px 0 4px}
+  .rpt-amend{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 11px;margin:6px 0}
+  .rpt-amend-type{display:inline-block;padding:1px 8px;border-radius:6px;background:#eef2ff;color:#3730a3;font-size:10.5px;font-weight:700;letter-spacing:0.04em;margin-right:6px}
+`;
+
+function renderPipelineReportSectionsHtml(data) {
+  const parts = [];
+  const f1 = data.f1_relevance;
+  const f2 = data.f2_summary;
+  const f3 = Array.isArray(data.f3_matches) ? data.f3_matches : null;
+  const f4 = Array.isArray(data.f4_impacts) ? data.f4_impacts : null;
+
+  if (typeof data.policy_count_indexed === 'number') {
+    const policies = f4 ? pipelineGroupImpactsByPolicy(f4) : [];
+    const affected = policies.filter((p) => p.is_affected).length;
+    parts.push('<div class="rpt-kpi-row">');
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Stage reached</div><div class="rpt-kpi-value" style="font-size:15px">' +
+        htmlEscape(pipelineStageLabel(data.stage_reached)) + '</div></div>'
+    );
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Indexed policies</div><div class="rpt-kpi-value">' +
+        htmlEscape(String(data.policy_count_indexed)) + '</div></div>'
+    );
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Affected policies</div><div class="rpt-kpi-value">' +
+        htmlEscape(String(affected)) + '</div></div>'
+    );
+    parts.push('</div>');
+  }
+
+  const skip = pipelineSkippedStagesNote(data);
+  if (skip) parts.push('<p class="rpt-note">' + htmlEscape(skip) + '</p>');
+
+  if (f1 && typeof f1 === 'object') {
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head" style="background:#047857;color:#fff"><span class="rpt-section-icon">1</span> Relevance assessment</h2>');
+    parts.push('<div class="rpt-card">');
+    if (typeof f1.is_relevant === 'boolean') {
+      parts.push('<div class="rpt-badge-row">');
+      parts.push(
+        '<span class="rpt-badge ' + (f1.is_relevant ? 'rpt-badge--yes' : 'rpt-badge--no') + '">' +
+          htmlEscape(f1.is_relevant ? 'Relevant to organisation' : 'Not relevant') +
+        '</span>'
+      );
+      if (typeof f1.confidence === 'number') {
+        const pct = Math.round(Math.min(1, Math.max(0, f1.confidence)) * 100);
+        parts.push('<span class="rpt-badge rpt-badge--confidence">Model confidence · ' + htmlEscape(String(pct)) + '%</span>');
+      }
+      parts.push('</div>');
+      if (f1.reasoning) parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(f1.reasoning) + '</p>');
+      const aspects = Array.isArray(f1.relevant_aspects) ? f1.relevant_aspects.filter(Boolean) : [];
+      if (aspects.length) {
+        parts.push('<ul class="rpt-list" dir="auto">');
+        for (const a of aspects) parts.push('<li>' + htmlEscape(a) + '</li>');
+        parts.push('</ul>');
+      }
+    } else {
+      parts.push('<p class="rpt-prose">Relevance step did not return a valid verdict.</p>');
+    }
+    parts.push('</div>');
+    parts.push('</section>');
+  }
+
+  if (f2 && typeof f2 === 'object') {
+    const pts = Array.isArray(f2.policy_points) ? f2.policy_points : [];
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head" style="background:#4f46e5;color:#fff"><span class="rpt-section-icon">2</span> Regulation points extracted</h2>');
+    if (!pts.length) {
+      parts.push('<div class="rpt-card"><p class="rpt-prose">No policy points returned.</p></div>');
+    } else {
+      for (const pt of pts) {
+        parts.push('<div class="rpt-card">');
+        parts.push('<span class="rpt-point-id">' + htmlEscape(pt.id || 'Point') + '</span>');
+        const metaBits = [];
+        if (pt.source_reference) metaBits.push('Reference: ' + pt.source_reference);
+        if (pt.category) metaBits.push(pt.category);
+        if (metaBits.length) parts.push('<div class="rpt-point-meta">' + htmlEscape(metaBits.join(' · ')) + '</div>');
+        parts.push('<p class="rpt-prose" dir="auto" style="margin:0">' + htmlEscape(pt.point || '') + '</p>');
+        parts.push('</div>');
+      }
+    }
+    parts.push('</section>');
+  }
+
+  if (f3 && f3.length) {
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head" style="background:#0d9488;color:#fff"><span class="rpt-section-icon">3</span> Policy matching</h2>');
+    for (const row of f3) {
+      const matches = Array.isArray(row.matches) ? row.matches : [];
+      parts.push('<div class="rpt-card">');
+      parts.push('<span class="rpt-point-id">' + htmlEscape(row.point_id || 'Point') + '</span>');
+      parts.push('<p class="rpt-prose" dir="auto" style="margin:8px 0 10px">' + htmlEscape(row.point_text || '') + '</p>');
+      if (!matches.length) {
+        parts.push('<p class="rpt-point-meta">No policy matches above threshold.</p>');
+      } else {
+        for (const m of matches) {
+          parts.push('<div style="border-top:1px dashed #e2e8f0;padding-top:8px;margin-top:8px">');
+          parts.push('<strong>' + htmlEscape(m.policy_title || m.policy_id || 'Policy') + '</strong>');
+          if (typeof m.similarity_score === 'number') {
+            parts.push(' <span class="rpt-point-meta">· Similarity ' + htmlEscape(String(m.similarity_score)) + '</span>');
+          }
+          if (m.content_excerpt) {
+            parts.push('<p class="rpt-prose" dir="auto" style="font-size:12px;margin:6px 0 0">' + htmlEscape(m.content_excerpt) + '</p>');
+          }
+          parts.push('</div>');
+        }
+      }
+      parts.push('</div>');
+    }
+    parts.push('</section>');
+  }
+
+  if (f4 && f4.length) {
+    const policies = pipelineGroupImpactsByPolicy(f4);
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head" style="background:#c2410c;color:#fff"><span class="rpt-section-icon">4</span> Impact analysis</h2>');
+    for (const policy of policies) {
+      parts.push('<div class="rpt-policy-card">');
+      parts.push('<div class="rpt-policy-head">');
+      parts.push('<h3 class="rpt-policy-title">' + htmlEscape(policy.policy_title) + '</h3>');
+      parts.push(
+        '<span class="rpt-sev ' + pipelineReportSeverityClass(policy.worst_severity) + '">' +
+          htmlEscape(policy.worst_severity_label) + '</span>'
+      );
+      if (policy.requires_amendment) {
+        parts.push(' <span class="rpt-sev rpt-sev--high" style="margin-left:6px">Requires amendment</span>');
+      }
+      parts.push('</div>');
+      for (const pt of policy.matched_points) {
+        parts.push('<div class="rpt-impact-point">');
+        parts.push('<span class="rpt-point-id">' + htmlEscape(pt.point_id || 'Point') + '</span>');
+        parts.push('<p class="rpt-prose" dir="auto" style="margin:8px 0">' + htmlEscape(pt.point_text || '') + '</p>');
+        if (pt.impact_summary) {
+          parts.push('<div class="rpt-impact-label">Impact analysis</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(pt.impact_summary) + '</p>');
+        }
+        if (pt.severity_reasoning) {
+          parts.push('<div class="rpt-impact-label">Severity</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(pt.severity_reasoning) + '</p>');
+        }
+        if (pt.compliance_gap) {
+          parts.push('<div class="rpt-impact-label">Compliance gap</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(pt.compliance_gap) + '</p>');
+        }
+        const amds = Array.isArray(pt.amendments) ? pt.amendments : [];
+        if (amds.length) {
+          parts.push('<div class="rpt-impact-label">Proposed amendments (' + htmlEscape(String(amds.length)) + ')</div>');
+          for (const a of amds) {
+            parts.push('<div class="rpt-amend">');
+            if (a.change_type) {
+              parts.push('<span class="rpt-amend-type">' + htmlEscape(pipelineChangeTypeLabel(a.change_type)) + '</span>');
+            }
+            if (a.policy_section) parts.push('<strong>' + htmlEscape(a.policy_section) + '</strong>');
+            if (a.current_text_summary) {
+              parts.push('<div class="rpt-impact-label">Current</div>');
+              parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(a.current_text_summary) + '</p>');
+            }
+            if (a.required_change) {
+              parts.push('<div class="rpt-impact-label">Required change</div>');
+              parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(a.required_change) + '</p>');
+            }
+            parts.push('</div>');
+          }
+        }
+        parts.push('</div>');
+      }
+      parts.push('</div>');
+    }
+    parts.push('</section>');
+  }
+
+  return parts.join('');
+}
+
+function buildPipelineReportFullHtml(data, meta) {
+  const sourceName = meta && meta.sourceName ? String(meta.sourceName) : 'Policy update pipeline';
+  const generatedAt = meta && meta.generatedAt ? new Date(meta.generatedAt).toLocaleString() : new Date().toLocaleString();
+  const stage = data && data.stage_reached ? pipelineStageLabel(data.stage_reached) : '—';
+  const runId = meta && meta.runId ? String(meta.runId) : '';
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${htmlEscape(sourceName)} — Policy update pipeline report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap">
+<style>${PIPELINE_REPORT_CSS}</style>
+</head>
+<body>
+<div class="rpt-root">
+  <header class="rpt-cover" style="background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 55%,#3b82f6 100%);color:#fff">
+    <h1 class="rpt-cover-title" style="color:#fff">${htmlEscape(sourceName)}</h1>
+    <p class="rpt-cover-sub">Policy update pipeline · impact report</p>
+    <div class="rpt-cover-meta">
+      <span class="rpt-chip">Generated: ${htmlEscape(generatedAt)}</span>
+      <span class="rpt-chip">Stage: ${htmlEscape(stage)}</span>
+      ${runId ? `<span class="rpt-chip">Run: ${htmlEscape(runId)}</span>` : ''}
+    </div>
+  </header>
+  <div class="rpt-body">${renderPipelineReportSectionsHtml(data || {})}</div>
+</div>
+</body>
+</html>`;
+}
+
+/** Lazy puppeteer import — keep the dep optional so the rest of the server still
+ *  boots in environments where the Chrome binary failed to install. */
+let _puppeteerCache = null;
+function getPuppeteer() {
+  if (_puppeteerCache && _puppeteerCache.err) return { ok: false, error: _puppeteerCache.err };
+  if (_puppeteerCache && _puppeteerCache.mod) return { ok: true, mod: _puppeteerCache.mod };
+  try {
+    const mod = require('puppeteer');
+    _puppeteerCache = { mod };
+    return { ok: true, mod };
+  } catch (e) {
+    const err = e && e.message ? e.message : String(e);
+    _puppeteerCache = { err };
+    return { ok: false, error: `puppeteer missing: ${err}` };
+  }
+}
+
+/** Cache a single browser process across requests — Chrome cold-start is ~1.5s. */
+let _puppeteerBrowserPromise = null;
+async function getSharedPuppeteerBrowser() {
+  const p = getPuppeteer();
+  if (!p.ok) throw new Error(p.error);
+  if (_puppeteerBrowserPromise) {
+    try {
+      const b = await _puppeteerBrowserPromise;
+      if (b && b.connected !== false && b.process && b.process()) return b;
+    } catch (_) { /* fall-through, relaunch */ }
+    _puppeteerBrowserPromise = null;
+  }
+  _puppeteerBrowserPromise = p.mod.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none'],
+  });
+  const b = await _puppeteerBrowserPromise;
+  b.on('disconnected', () => { if (_puppeteerBrowserPromise) _puppeteerBrowserPromise = null; });
+  return b;
+}
+
+/** Render an HTML string into a PDF buffer using a shared headless Chrome. */
+async function renderHtmlToPdfBuffer(html) {
+  const browser = await getSharedPuppeteerBrowser();
+  const page = await browser.newPage();
+  try {
+    await page.setContent(html, { waitUntil: ['load', 'networkidle0'], timeout: 60000 });
+    // Wait for Cairo to finish loading so glyphs match the live report.
+    await page.evaluateHandle('document.fonts.ready');
+    const pdf = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      preferCSSPageSize: false,
+      margin: { top: '10mm', right: '10mm', bottom: '12mm', left: '10mm' },
+    });
+    return pdf;
+  } finally {
+    try { await page.close({ runBeforeUnload: false }); } catch (_) { /* ignore */ }
+  }
+}
+
+function pipelinePdfObjectPath(runId) {
+  const safe = String(runId || 'run').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  return `pipeline-reports/${safe}/policy-update-report-${safe}-${ts}.pdf`;
+}
+
+function pipelinePdfDownloadFilename(runId, sourceName) {
+  const base = sourceName ? String(sourceName).replace(/[^\w\s.-]/g, '').trim().slice(0, 60) : '';
+  const stamp = new Date().toISOString().slice(0, 10);
+  const id = String(runId || 'run').slice(0, 80);
+  return (base ? `${base} — ` : '') + `Policy update report (${id}) ${stamp}.pdf`;
+}
+
+/** Background generator: PDF render + GCS upload + DB status update. Fire-and-forget. */
+async function kickPipelineReportPdfGeneration(runId, data, meta = {}) {
+  if (!runId || !data || typeof data !== 'object') return;
+  try {
+    dbSetPipelineRunReportPdfStatus.run('pending', null, runId);
+  } catch (_) { /* table may not have columns in legacy installs */ }
+
+  setImmediate(async () => {
+    const startedAt = Date.now();
+    try {
+      const html = buildPipelineReportFullHtml(data, { ...meta, runId });
+      const buf = await renderHtmlToPdfBuffer(html);
+      const gcs = getLegislativeGcsClient();
+      if (!gcs.ok) throw new Error(gcs.error || 'GCS unavailable');
+      const objectPath = pipelinePdfObjectPath(runId);
+      await legislativeUploadBuffer(
+        gcs.storage,
+        GCS_PUP_BUCKET_NAME,
+        objectPath,
+        buf,
+        'application/pdf',
+        { runId, generatedAt: new Date().toISOString(), source: meta.sourceName || '' }
+      );
+      const generatedAt = new Date().toISOString();
+      try {
+        dbSetPipelineRunReportPdfReady.run(objectPath, GCS_PUP_BUCKET_NAME, buf.length, generatedAt, runId);
+      } catch (e) { console.warn('[PupPdf] db update failed:', e.message); }
+      console.log(`[PupPdf] Run ${runId} report PDF ready (${buf.length} bytes, ${Date.now() - startedAt}ms) → gs://${GCS_PUP_BUCKET_NAME}/${objectPath}`);
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      try {
+        dbSetPipelineRunReportPdfStatus.run('failed', msg.slice(0, 500), runId);
+      } catch (_) { /* ignore */ }
+      console.error(`[PupPdf] Run ${runId} report PDF generation failed:`, msg);
+    }
+  });
 }
 
 /** Reduce F4 severities → the strongest impact level. Returns 'medium' when no impacts exist. */
@@ -6225,7 +6671,16 @@ Return a JSON array where each element has "article", "title", and "text" fields
         now
       );
       console.log(`[PipelineRuns] Saved run ${id} (stage: ${stageReached}, policies: ${policyCount})`);
-      sendJSON(res, 201, { success: true, id });
+
+      // Fire-and-forget: render the report HTML → PDF (puppeteer) → upload to
+      // pup-data bucket → update report_pdf_* columns. The client gets the
+      // run id back immediately and asks GET /report-pdf later.
+      kickPipelineReportPdfGeneration(id, result, {
+        sourceName: body.sourceName || body.sourceFile || '',
+        generatedAt: now,
+      });
+
+      sendJSON(res, 201, { success: true, id, reportPdfStatus: 'pending' });
     } catch (err) {
       console.error('[PipelineRuns] save:', err.message);
       sendJSON(res, 500, { error: err.message || 'Save failed.' });
@@ -6265,6 +6720,67 @@ Return a JSON array where each element has "article", "title", and "text" fields
     } catch (err) {
       console.error('[PipelineRuns] get:', err.message);
       sendJSON(res, 500, { error: err.message || 'Failed to get.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline Runs: Report PDF download URL ----
+  // Returns the current PDF status for a run. When ready, includes a fresh
+  // 1-hour signed download URL pointing at the file in pup-data bucket.
+  //   { status: 'ready',  url, filename, generatedAt, sizeBytes }
+  //   { status: 'pending' }
+  //   { status: 'failed', error }
+  //   { status: 'unavailable' }       ← old run, never generated
+  const pipelinePdfMatch = url.pathname.match(/^\/api\/ai-tools\/pipeline-runs\/([^/]+)\/report-pdf$/);
+  if (pipelinePdfMatch && req.method === 'GET') {
+    try {
+      const row = dbGetPipelineRun.get(pipelinePdfMatch[1]);
+      if (!row) { sendJSON(res, 404, { error: 'Run not found.' }); return; }
+      const status = row.report_pdf_status || null;
+      if (!status) {
+        sendJSON(res, 200, { success: true, status: 'unavailable', runId: row.id });
+        return;
+      }
+      if (status === 'pending') {
+        sendJSON(res, 200, { success: true, status: 'pending', runId: row.id });
+        return;
+      }
+      if (status === 'failed') {
+        sendJSON(res, 200, { success: true, status: 'failed', runId: row.id, error: row.report_pdf_error || 'unknown error' });
+        return;
+      }
+      if (status === 'ready') {
+        const bucket = row.report_pdf_bucket || GCS_PUP_BUCKET_NAME;
+        const objectPath = row.report_pdf_object_path;
+        if (!bucket || !objectPath) {
+          sendJSON(res, 500, { error: 'Report PDF marked ready but object path missing.' });
+          return;
+        }
+        const gcs = getLegislativeGcsClient();
+        if (!gcs.ok) { sendJSON(res, 500, { error: gcs.error || 'GCS unavailable' }); return; }
+        const filename = pipelinePdfDownloadFilename(row.id, row.regulation_snippet);
+        const [signedUrl] = await gcs.storage.bucket(bucket).file(objectPath).getSignedUrl({
+          version: 'v4',
+          action: 'read',
+          expires: Date.now() + 60 * 60 * 1000,
+          responseDisposition: `attachment; filename="${filename.replace(/"/g, '')}"`,
+          responseType: 'application/pdf',
+        });
+        sendJSON(res, 200, {
+          success: true,
+          status: 'ready',
+          runId: row.id,
+          url: signedUrl,
+          filename,
+          generatedAt: row.report_pdf_generated_at,
+          sizeBytes: row.report_pdf_size_bytes,
+        });
+        return;
+      }
+      sendJSON(res, 200, { success: true, status: String(status), runId: row.id });
+    } catch (err) {
+      console.error('[PipelineRuns] report-pdf:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to resolve report PDF.' });
     }
     return;
   }
