@@ -14725,8 +14725,9 @@ function openPolicyPipelineResultModal(data, opts = {}) {
 }
 
 /** Print/PDF stylesheet — Cairo, coloured section headers, card layout. */
+const PUP_REPORT_FONT_LINK =
+  'https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&display=swap';
 const PUP_REPORT_CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&display=swap');
 * { box-sizing: border-box; }
 .rpt-root {
   font-family: 'Cairo', system-ui, sans-serif;
@@ -14962,7 +14963,7 @@ function renderPolicyPipelineReportPdfBody(data) {
 
   if (f1 && typeof f1 === 'object') {
     parts.push('<section class="rpt-section">');
-    parts.push('<h2 class="rpt-section-head rpt-section-head--relevance"><span class="rpt-section-icon">1</span> Relevance assessment</h2>');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--relevance" style="background:#047857;color:#fff"><span class="rpt-section-icon">1</span> Relevance assessment</h2>');
     if (typeof f1.is_relevant === 'boolean') {
       parts.push('<div class="rpt-card">');
       parts.push('<div class="rpt-badge-row">');
@@ -14992,7 +14993,7 @@ function renderPolicyPipelineReportPdfBody(data) {
   if (f2 && typeof f2 === 'object') {
     const pts = Array.isArray(f2.policy_points) ? f2.policy_points : [];
     parts.push('<section class="rpt-section">');
-    parts.push('<h2 class="rpt-section-head rpt-section-head--points"><span class="rpt-section-icon">2</span> Regulation points extracted</h2>');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--points" style="background:#4f46e5;color:#fff"><span class="rpt-section-icon">2</span> Regulation points extracted</h2>');
     if (!pts.length) {
       parts.push('<div class="rpt-card"><p class="rpt-prose">No policy points returned.</p></div>');
     } else {
@@ -15012,7 +15013,7 @@ function renderPolicyPipelineReportPdfBody(data) {
 
   if (Array.isArray(f3) && f3.length) {
     parts.push('<section class="rpt-section">');
-    parts.push('<h2 class="rpt-section-head rpt-section-head--matching"><span class="rpt-section-icon">3</span> Policy matching</h2>');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--matching" style="background:#0d9488;color:#fff"><span class="rpt-section-icon">3</span> Policy matching</h2>');
     for (const row of f3) {
       const matches = Array.isArray(row.matches) ? row.matches : [];
       parts.push('<div class="rpt-card">');
@@ -15041,7 +15042,7 @@ function renderPolicyPipelineReportPdfBody(data) {
   if (Array.isArray(f4) && f4.length) {
     const policies = pupGroupImpactsByPolicy(f4);
     parts.push('<section class="rpt-section">');
-    parts.push('<h2 class="rpt-section-head rpt-section-head--impact"><span class="rpt-section-icon">4</span> Impact analysis</h2>');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--impact" style="background:#c2410c;color:#fff"><span class="rpt-section-icon">4</span> Impact analysis</h2>');
     for (const policy of policies) {
       parts.push('<div class="rpt-policy-card">');
       parts.push('<div class="rpt-policy-head">');
@@ -15100,6 +15101,38 @@ function renderPolicyPipelineReportPdfBody(data) {
   return parts.join('');
 }
 
+function ensureHtml2PdfLoaded() {
+  if (typeof window.html2pdf === 'function') return Promise.resolve(window.html2pdf);
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-pup-html2pdf]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve(window.html2pdf));
+      existing.addEventListener('error', () => reject(new Error('PDF library failed to load')));
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js';
+    s.crossOrigin = 'anonymous';
+    s.dataset.pupHtml2pdf = '1';
+    s.onload = () => {
+      if (typeof window.html2pdf === 'function') resolve(window.html2pdf);
+      else reject(new Error('PDF library loaded but html2pdf is missing'));
+    };
+    s.onerror = () => reject(new Error('Could not load PDF library (CDN blocked?)'));
+    document.head.appendChild(s);
+  });
+}
+
+async function preloadCairoForReport() {
+  try {
+    if (document.fonts && document.fonts.load) {
+      await document.fonts.load('400 14px Cairo');
+      await document.fonts.load('700 26px Cairo');
+      await document.fonts.ready;
+    }
+  } catch (_) { /* non-fatal */ }
+}
+
 function buildPolicyPipelineReportExportRoot(data, meta = {}) {
   const sourceName = meta.sourceName ? String(meta.sourceName) : 'Policy update pipeline';
   const generatedAt = meta.generatedAt
@@ -15108,12 +15141,13 @@ function buildPolicyPipelineReportExportRoot(data, meta = {}) {
   const stage = data && data.stage_reached ? pupStageLabel(data.stage_reached) : '—';
   const root = document.createElement('div');
   root.className = 'rpt-export-root';
-  root.style.cssText = 'position:fixed;left:-10000px;top:0;z-index:-1;';
+  root.style.cssText = 'position:fixed;left:-10000px;top:0;z-index:-1;opacity:0;pointer-events:none;';
   root.innerHTML =
+    '<link rel="stylesheet" href="' + PUP_REPORT_FONT_LINK + '">' +
     '<style>' + PUP_REPORT_CSS + '</style>' +
-    '<div class="rpt-root">' +
-      '<header class="rpt-cover">' +
-        '<h1 class="rpt-cover-title">' + esc(sourceName) + '</h1>' +
+    '<div class="rpt-root" style="font-family:Cairo,system-ui,sans-serif">' +
+      '<header class="rpt-cover" style="background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 55%,#3b82f6 100%);color:#fff">' +
+        '<h1 class="rpt-cover-title" style="color:#fff;font-family:Cairo,system-ui,sans-serif">' + esc(sourceName) + '</h1>' +
         '<p class="rpt-cover-sub">Policy update pipeline · impact report</p>' +
         '<div class="rpt-cover-meta">' +
           '<span class="rpt-chip">Generated: ' + esc(generatedAt) + '</span>' +
@@ -15132,10 +15166,6 @@ async function downloadPolicyPipelineReportPdf() {
     toast('error', 'Nothing to export', 'Run the pipeline first.');
     return;
   }
-  if (typeof window.html2pdf !== 'function') {
-    toast('error', 'PDF library unavailable', 'Reload the page and try again.');
-    return;
-  }
 
   const pdfBtn = document.getElementById('pup-result-modal-download-pdf');
   const meta = policyUpdatePipelineLastMeta || {};
@@ -15147,10 +15177,9 @@ async function downloadPolicyPipelineReportPdf() {
   toast('info', 'Generating PDF', 'Preparing your report…');
 
   try {
-    if (document.fonts && document.fonts.ready) {
-      await document.fonts.ready;
-    }
-    await new Promise((r) => setTimeout(r, 350));
+    await ensureHtml2PdfLoaded();
+    await preloadCairoForReport();
+    await new Promise((r) => setTimeout(r, 600));
 
     const target = root.querySelector('.rpt-root');
     await window.html2pdf()
