@@ -7,7 +7,8 @@
     "start": "node server.js",
     "dev": "node server.js",
     "generate:policy-import-template": "node scripts/generate-data-studio-policy-template.js",
-    "generate:risk-scenario-import-template": "node scripts/generate-data-studio-risk-scenario-template.js"
+    "generate:risk-scenario-import-template": "node scripts/generate-data-studio-risk-scenario-template.js",
+    "generate:applied-controls-import-template": "node scripts/generate-data-studio-applied-controls-template.js"
   },
   "keywords": [
     "framework",
