@@ -15141,11 +15141,19 @@ function buildPolicyPipelineReportExportRoot(data, meta = {}) {
   const stage = data && data.stage_reached ? pupStageLabel(data.stage_reached) : '—';
   const root = document.createElement('div');
   root.className = 'rpt-export-root';
-  root.style.cssText = 'position:fixed;left:-10000px;top:0;z-index:-1;opacity:0;pointer-events:none;';
+  // html2canvas captures whatever it can compute layout for. Hiding via
+  // opacity:0 / display:none / off-screen-fixed all produce blank pages,
+  // because the element either has no painted pixels or no layout box.
+  // Solution: keep it in normal flow but visually masked above the page —
+  // the user briefly sees a 0×0 wrapper, html2canvas sees a real layout.
+  root.style.cssText =
+    'position:absolute;left:0;top:0;width:794px;background:#fff;' +
+    'visibility:visible;z-index:2147483646;' +
+    'transform:translateY(-200vh);';
   root.innerHTML =
     '<link rel="stylesheet" href="' + PUP_REPORT_FONT_LINK + '">' +
     '<style>' + PUP_REPORT_CSS + '</style>' +
-    '<div class="rpt-root" style="font-family:Cairo,system-ui,sans-serif">' +
+    '<div class="rpt-root" style="font-family:Cairo,system-ui,sans-serif;width:794px">' +
       '<header class="rpt-cover" style="background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 55%,#3b82f6 100%);color:#fff">' +
         '<h1 class="rpt-cover-title" style="color:#fff;font-family:Cairo,system-ui,sans-serif">' + esc(sourceName) + '</h1>' +
         '<p class="rpt-cover-sub">Policy update pipeline · impact report</p>' +
@@ -15182,21 +15190,32 @@ async function downloadPolicyPipelineReportPdf() {
     await new Promise((r) => setTimeout(r, 600));
 
     const target = root.querySelector('.rpt-root');
+    // Force layout flush so html2canvas measures non-zero dimensions.
+    void target.offsetHeight;
+
+    const rect = target.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      throw new Error('Report layout is empty — nothing to render.');
+    }
+
     await window.html2pdf()
       .set({
-        margin: [8, 8, 8, 8],
+        margin: 10,
         filename,
         image: { type: 'jpeg', quality: 0.95 },
         html2canvas: {
           scale: 2,
           useCORS: true,
+          allowTaint: true,
           letterRendering: true,
           logging: false,
-          width: 794,
+          backgroundColor: '#ffffff',
+          scrollX: 0,
+          scrollY: 0,
           windowWidth: 794,
         },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-        pagebreak: { mode: ['css', 'legacy'], avoid: ['.rpt-section', '.rpt-policy-card', '.rpt-card'] },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
+        pagebreak: { mode: ['avoid-all', 'css', 'legacy'] },
       })
       .from(target)
       .save();
