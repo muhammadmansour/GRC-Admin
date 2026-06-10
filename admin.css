@@ -4163,6 +4163,11 @@
   color: #4b5563;
   border-left: 3px solid #9ca3af;
 }
+.pup-result-note--summary {
+  background: #eff6ff;
+  border-left-color: #3b82f6;
+  color: #1e40af;
+}
 .pup-result-point-card {
   background: #fff;
   border: 1px solid #e5e7eb;
@@ -9094,6 +9099,7 @@ body.pup-pipeline-overlay-open {
   justify-content: flex-end;
   gap: 6px;
 }
+.lu-row-actions .lu-doc-open.lu-doc-open--preview.lu-action-doc,
 .lu-row-actions .lu-doc-open.lu-doc-open--preview.lu-action-preview {
   width: 36px;
   height: 36px;
@@ -9102,7 +9108,9 @@ body.pup-pipeline-overlay-open {
   flex-shrink: 0;
   box-sizing: border-box;
 }
-.lu-row-actions .lu-doc-open.lu-action-preview .lu-preview-svg {
+.lu-row-actions .lu-doc-open.lu-action-doc .lu-doc-svg,
+.lu-row-actions .lu-doc-open.lu-action-preview .lu-preview-svg,
+.lu-row-actions .lu-doc-open.lu-action-doc .lu-preview-svg {
   width: 18px;
   height: 18px;
 }
@@ -9142,6 +9150,10 @@ body.pup-pipeline-overlay-open {
 }
 .lu-icon-btn:active {
   transform: scale(0.96);
+}
+.lu-icon-btn--report:hover {
+  color: #1d4ed8;
+  background: #eff6ff;
 }
 .lu-icon-btn--danger:hover {
   background: #fee2e2;

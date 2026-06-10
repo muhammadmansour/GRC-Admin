@@ -9459,8 +9459,10 @@ let legislativeInternalPageWired = false;
 /** @type {Array<Record<string, unknown>>} */
 let luInternalSourcesCache = [];
 
-const LU_ICON_PREVIEW =
-  '<svg class="lu-preview-svg" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 12s4.2-7 10-7 10 7 10 7-4.2 7-10 7S2 12 2 12z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/></svg>';
+const LU_ICON_DOC =
+  '<svg class="lu-doc-svg" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M14 2v6h6M8 13h8M8 17h5M8 9h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const LU_ICON_REPORT =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M8 17V11M12 17V7M16 17v-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 const LU_ICON_EDIT =
   '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8.84058 2.85709L13.1432 7.15979L4.45285 15.8501H0.150146V11.5474L8.84058 2.85709Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M11.25 1.75L14.25 4.75" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
 const LU_ICON_TRASH =
@@ -9468,10 +9470,10 @@ const LU_ICON_TRASH =
 
 function luBuildDocPreviewCell(href, fileName) {
   if (!href)
-    return '<span class="lu-action-preview-placeholder" title="No preview available">—</span>';
+    return '<span class="lu-action-preview-placeholder" title="No document available">—</span>';
   const safeName = fileName ? String(fileName).replace(/"/g, '') : '';
-  const t = safeName ? `Preview “${safeName}” in new tab` : 'Preview document in new tab';
-  return `<a class="lu-doc-open lu-doc-open--preview lu-action-preview" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(t)}">${LU_ICON_PREVIEW}<span class="visually-hidden">Preview document</span></a>`;
+  const t = safeName ? `Open “${safeName}” in new tab` : 'Open document in new tab';
+  return `<a class="lu-doc-open lu-doc-open--preview lu-action-doc" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(t)}">${LU_ICON_DOC}<span class="visually-hidden">Open document</span></a>`;
 }
 
 function openLuAddModal() {
@@ -9574,6 +9576,86 @@ async function luDeleteInternalSource(id) {
   }
 }
 
+/** Best-effort match of an internal source → its pipeline run (no DB schema change). */
+async function findPipelineRunForLuSource(sourceRow) {
+  if (!sourceRow) return null;
+  const fileName = String(sourceRow.original_file_name || sourceRow.name || '').trim();
+  const sourceName = String(sourceRow.name || '').trim().toLowerCase();
+
+  const runsRes = await fetch('/api/ai-tools/pipeline-runs');
+  const runsJson = await runsRes.json().catch(() => ({}));
+  if (!runsRes.ok) throw new Error(runsJson.error || runsRes.statusText || 'Could not load pipeline runs');
+  const runs = runsJson.data || [];
+  if (!runs.length) return null;
+
+  let prefix = '';
+  try {
+    const extRes = await fetch('/api/ai-tools/extracted-regulations');
+    const extJson = await extRes.json().catch(() => ({}));
+    if (extRes.ok) {
+      const records = extJson.data || [];
+      const ext = records.find((r) => {
+        const sf = String(r.sourceFile || '').trim().toLowerCase();
+        return fileName && sf && sf === fileName.toLowerCase();
+      });
+      if (ext && Array.isArray(ext.articles) && ext.articles.length) {
+        const first = ext.articles.find((a) => a && String(a.text || '').trim());
+        if (first) prefix = String(first.text).slice(0, 120).trim();
+      }
+    }
+  } catch (_) { /* non-fatal */ }
+
+  if (prefix) {
+    const byText = runs.find((r) => String(r.regulation_text || '').includes(prefix));
+    if (byText) return byText;
+  }
+
+  if (sourceName) {
+    const byName = runs.find((r) => String(r.regulation_snippet || '').toLowerCase().includes(sourceName));
+    if (byName) return byName;
+  }
+
+  if (fileName) {
+    const base = fileName.replace(/\.[^.]+$/, '').toLowerCase();
+    const byFile = runs.find((r) => String(r.regulation_snippet || '').toLowerCase().includes(base));
+    if (byFile) return byFile;
+  }
+
+  return runs[0] || null;
+}
+
+async function openLuPipelineSummaryReport(sourceId) {
+  const row = luInternalSourcesCache.find((s) => String(s.id) === String(sourceId));
+  if (!row) {
+    toast('error', 'Source not found', 'Reload the page and try again.');
+    return;
+  }
+  try {
+    const run = await findPipelineRunForLuSource(row);
+    if (!run) {
+      toast('info', 'No pipeline run yet', 'Upload and process this source first to generate a report.');
+      return;
+    }
+    const detailRes = await fetch(`/api/ai-tools/pipeline-runs/${encodeURIComponent(run.id)}`);
+    const detailJson = await detailRes.json().catch(() => ({}));
+    if (!detailRes.ok) throw new Error(detailJson.error || detailRes.statusText || 'Could not load pipeline run');
+    const payload = detailJson.data && detailJson.data.result ? detailJson.data.result : null;
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Pipeline run has no result payload.');
+    }
+    openPolicyPipelineResultModal(payload, {
+      view: 'summary',
+      meta: {
+        sourceName: row.name || row.original_file_name || 'Internal source',
+        runId: run.id,
+        generatedAt: run.created_at || new Date().toISOString(),
+      },
+    });
+  } catch (e) {
+    toast('error', 'Report unavailable', e.message || String(e));
+  }
+}
+
 function initLegislativeInternalPageListeners() {
   const addBtn = document.getElementById('lu-add-source-btn');
   const overlay = document.getElementById('lu-add-modal-overlay');
@@ -9610,7 +9692,14 @@ function initLegislativeInternalPageListeners() {
         return;
       }
       const delBtn = e.target.closest('[data-lu-delete]');
-      if (delBtn) luDeleteInternalSource(delBtn.getAttribute('data-lu-delete'));
+      if (delBtn) {
+        luDeleteInternalSource(delBtn.getAttribute('data-lu-delete'));
+        return;
+      }
+      const reportBtn = e.target.closest('[data-lu-report]');
+      if (reportBtn) {
+        openLuPipelineSummaryReport(reportBtn.getAttribute('data-lu-report'));
+      }
     });
   }
   if (editSubmit) {
@@ -9926,6 +10015,7 @@ async function loadLegislativeInternalSourcesList() {
         <td class="lu-col-actions"><div class="lu-row-actions">
           <button type="button" class="lu-icon-btn" data-lu-edit="${sid}" aria-label="Edit source">${LU_ICON_EDIT}</button>
           <button type="button" class="lu-icon-btn lu-icon-btn--danger" data-lu-delete="${sid}" aria-label="Delete source">${LU_ICON_TRASH}</button>
+          <button type="button" class="lu-icon-btn lu-icon-btn--report" data-lu-report="${sid}" aria-label="View relevance report" title="Relevance report">${LU_ICON_REPORT}</button>
           ${luBuildDocPreviewCell(href, fname)}
         </div></td>
       </tr>`;
@@ -12279,6 +12369,8 @@ let policyUpdatePipelineWired = false;
 /** Cached list for Policy update pipeline org dropdown (from GET /api/org-contexts) */
 let pupOrgContextsCache = [];
 let policyUpdatePipelineLastRaw = null;
+/** @type {{ sourceName?: string, runId?: string, generatedAt?: string }|null} */
+let policyUpdatePipelineLastMeta = null;
 let policyUpdatePipelineResultModalWired = false;
 /** Active fetch: abort to cancel in-flight policy pipeline run from the UI */
 let pupPipelineAbortController = null;
@@ -14432,10 +14524,11 @@ function pupRenderImpactByPolicyHtml(f4Impacts, data) {
   return parts.join('');
 }
 
-function renderPolicyPipelineResultHtml(data) {
+function renderPolicyPipelineResultHtml(data, opts = {}) {
   if (!data || typeof data !== 'object') {
     return '<p class="pup-result-prose">' + esc(String(data)) + '</p>';
   }
+  const view = opts.view === 'summary' ? 'summary' : 'full';
 
   const parts = [];
   parts.push('<div class="pup-result-top">');
@@ -14497,6 +14590,13 @@ function renderPolicyPipelineResultHtml(data) {
       }
     }
     parts.push('</div>');
+  }
+
+  if (view === 'summary') {
+    parts.push(
+      '<p class="pup-result-note pup-result-note--summary">Relevance summary only. Use <strong>Download PDF</strong> below for the complete organised report.</p>'
+    );
+    return parts.join('');
   }
 
   const f2 = data.f2_summary;
@@ -14589,7 +14689,7 @@ function closePolicyPipelineResultModal() {
   }
 }
 
-function openPolicyPipelineResultModal(data) {
+function openPolicyPipelineResultModal(data, opts = {}) {
   const overlay = document.getElementById('pup-result-modal-overlay');
   const bodyEl = document.getElementById('pup-result-modal-body');
   const titleEl = document.getElementById('pup-result-modal-title');
@@ -14603,18 +14703,109 @@ function openPolicyPipelineResultModal(data) {
     expandBtn.setAttribute('aria-label', 'Expand result');
     expandBtn.title = 'Expand';
   }
+  const view = opts.view === 'summary' ? 'summary' : 'full';
   policyUpdatePipelineLastRaw = data;
+  policyUpdatePipelineLastMeta = opts.meta && typeof opts.meta === 'object' ? opts.meta : null;
   if (titleEl) {
-    titleEl.textContent =
+    const stage =
       data && typeof data === 'object' && data.stage_reached != null
-        ? 'Pipeline result · ' + pupStageLabel(data.stage_reached)
-        : 'Pipeline result';
+        ? pupStageLabel(data.stage_reached)
+        : null;
+    if (view === 'summary') {
+      titleEl.textContent = stage ? `Relevance report · ${stage}` : 'Relevance report';
+    } else {
+      titleEl.textContent = stage ? `Pipeline result · ${stage}` : 'Pipeline result';
+    }
   }
-  bodyEl.innerHTML = renderPolicyPipelineResultHtml(data);
+  bodyEl.innerHTML = renderPolicyPipelineResultHtml(data, { view });
   bodyEl.scrollTop = 0;
   overlay.classList.add('active');
   overlay.setAttribute('aria-hidden', 'false');
   document.body.style.overflow = 'hidden';
+}
+
+function buildPolicyPipelineReportDocumentHtml(data, meta = {}) {
+  const sourceName = meta.sourceName ? String(meta.sourceName) : 'Policy update pipeline';
+  const generatedAt = meta.generatedAt
+    ? new Date(meta.generatedAt).toLocaleString()
+    : new Date().toLocaleString();
+  const stage = data && data.stage_reached ? pupStageLabel(data.stage_reached) : '—';
+  const bodyHtml = renderPolicyPipelineResultHtml(data, { view: 'full' });
+  const safeTitle = esc(sourceName);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>${safeTitle} — Pipeline report</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; color: #0f172a; margin: 0; padding: 32px 40px 48px; line-height: 1.5; }
+    .report-header { border-bottom: 2px solid #e2e8f0; padding-bottom: 18px; margin-bottom: 24px; }
+    .report-title { margin: 0 0 6px; font-size: 24px; font-weight: 700; }
+    .report-meta { margin: 0; font-size: 13px; color: #64748b; }
+    .report-meta span { margin-right: 16px; }
+    .pup-result-top, .pup-result-panel, .pup-impact-policy-card, .pup-impact-point, .pup-impact-amend-card { break-inside: avoid; page-break-inside: avoid; }
+    .pup-result-raw-details { display: none !important; }
+    .pup-impact-point { border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 8px; }
+    .pup-impact-point-body { display: block !important; padding: 12px 14px; border-top: 1px solid #eef2f7; }
+    .pup-impact-point-summary { display: none; }
+    .pup-impact-point::before { content: attr(data-point-label); display: block; font-weight: 700; font-size: 12px; padding: 10px 14px; background: #f8fafc; border-bottom: 1px solid #eef2f7; }
+    @media print {
+      body { padding: 16px 20px 24px; }
+      .report-no-print { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="report-header">
+    <h1 class="report-title">${safeTitle}</h1>
+    <p class="report-meta">
+      <span><strong>Generated:</strong> ${esc(generatedAt)}</span>
+      <span><strong>Stage:</strong> ${esc(stage)}</span>
+      ${meta.runId ? `<span><strong>Run:</strong> ${esc(String(meta.runId))}</span>` : ''}
+    </p>
+  </header>
+  <main>${bodyHtml}</main>
+  <p class="report-no-print" style="margin-top:24px;font-size:12px;color:#64748b">Use your browser’s print dialog and choose “Save as PDF”.</p>
+</body>
+</html>`;
+}
+
+function downloadPolicyPipelineReportPdf() {
+  const data = policyUpdatePipelineLastRaw;
+  if (!data || typeof data !== 'object') {
+    toast('error', 'Nothing to export', 'Run the pipeline first.');
+    return;
+  }
+  const html = buildPolicyPipelineReportDocumentHtml(data, policyUpdatePipelineLastMeta || {});
+  const win = window.open('', '_blank');
+  if (!win) {
+    toast('error', 'Popup blocked', 'Allow pop-ups for this site to download the PDF report.');
+    return;
+  }
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  // Expand <details> blocks into static sections for print
+  try {
+    win.document.querySelectorAll('.pup-impact-point').forEach((el, idx) => {
+      const idEl = el.querySelector('.pup-impact-point-id');
+      const textEl = el.querySelector('.pup-impact-point-text');
+      const label = [idEl ? idEl.textContent : '', textEl ? textEl.textContent : '']
+        .filter(Boolean)
+        .join(' — ')
+        .slice(0, 180);
+      if (label) el.setAttribute('data-point-label', label);
+      el.open = true;
+    });
+  } catch (_) { /* ignore */ }
+  win.focus();
+  setTimeout(() => {
+    try { win.print(); } catch (e) {
+      toast('error', 'Print failed', e.message || String(e));
+    }
+  }, 400);
+  toast('success', 'Report ready', 'Choose “Save as PDF” in the print dialog.');
 }
 
 function initPolicyPipelineResultModalListeners() {
@@ -14623,7 +14814,7 @@ function initPolicyPipelineResultModalListeners() {
   const closeBtn = document.getElementById('pup-result-modal-close');
   const closeBtnFooter = document.getElementById('pup-result-modal-close-btn');
   const confirmBtn = document.getElementById('pup-result-modal-confirm-btn');
-  const copyBtn = document.getElementById('pup-result-modal-copy-json');
+  const pdfBtn = document.getElementById('pup-result-modal-download-pdf');
   if (!overlay || !document.body) return;
   policyUpdatePipelineResultModalWired = true;
   const close = () => closePolicyPipelineResultModal();
@@ -14636,19 +14827,8 @@ function initPolicyPipelineResultModalListeners() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && overlay.classList.contains('active')) close();
   });
-  if (copyBtn) {
-    copyBtn.addEventListener('click', async () => {
-      if (!policyUpdatePipelineLastRaw) {
-        toast('error', 'Nothing to copy', 'Run the pipeline first.');
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(JSON.stringify(policyUpdatePipelineLastRaw, null, 2));
-        toast('success', 'Copied', 'Full pipeline JSON copied to clipboard.');
-      } catch (err) {
-        toast('error', 'Copy failed', err.message || String(err));
-      }
-    });
+  if (pdfBtn) {
+    pdfBtn.addEventListener('click', () => downloadPolicyPipelineReportPdf());
   }
   const expandBtn = document.getElementById('pup-result-modal-expand');
   const shell = document.querySelector('#pup-result-modal-overlay .pup-result-modal-shell');
@@ -15146,7 +15326,9 @@ async function runPipelineInBackground(regulationText, sourceFile) {
     // background pipeline finishes, so the user gets the same end-of-run UX
     // regardless of which entry point started the run.
     try {
-      openPolicyPipelineResultModal(payload);
+      openPolicyPipelineResultModal(payload, {
+        meta: { sourceName: sourceFile, generatedAt: new Date().toISOString() },
+      });
     } catch (modalErr) {
       console.warn('[BgPipeline] Failed to auto-open result modal:', modalErr && modalErr.message);
     }
@@ -15227,7 +15409,15 @@ async function openPhRunDetail(id) {
     const res  = await fetch(`/api/ai-tools/pipeline-runs/${encodeURIComponent(id)}`);
     const json = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(json.error || res.statusText);
-    openPolicyPipelineResultModal(json.data.result);
+    openPolicyPipelineResultModal(json.data.result, {
+      meta: {
+        runId: json.data.id,
+        generatedAt: json.data.created_at,
+        sourceName: json.data.regulation_snippet
+          ? String(json.data.regulation_snippet).slice(0, 80)
+          : 'Pipeline run',
+      },
+    });
   } catch (e) {
     toast('error', 'Could not load run', e.message || String(e));
   }
