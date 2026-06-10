@@ -15101,29 +15101,46 @@ function renderPolicyPipelineReportPdfBody(data) {
   return parts.join('');
 }
 
-function ensureHtml2PdfLoaded() {
-  if (typeof window.html2pdf === 'function') return Promise.resolve(window.html2pdf);
+function loadScriptOnce(src, dataKey) {
   return new Promise((resolve, reject) => {
-    const existing = document.querySelector('script[data-pup-html2pdf]');
+    const existing = document.querySelector('script[data-' + dataKey + ']');
     if (existing) {
-      existing.addEventListener('load', () => resolve(window.html2pdf));
-      existing.addEventListener('error', () => reject(new Error('PDF library failed to load')));
+      if (existing.dataset.loaded === '1') return resolve();
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () => reject(new Error(src + ' failed to load')));
       return;
     }
     const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js';
+    s.src = src;
     s.crossOrigin = 'anonymous';
-    s.dataset.pupHtml2pdf = '1';
-    s.onload = () => {
-      if (typeof window.html2pdf === 'function') resolve(window.html2pdf);
-      else reject(new Error('PDF library loaded but html2pdf is missing'));
-    };
-    s.onerror = () => reject(new Error('Could not load PDF library (CDN blocked?)'));
+    s.dataset[dataKey] = '1';
+    s.onload = () => { s.dataset.loaded = '1'; resolve(); };
+    s.onerror = () => reject(new Error(src + ' failed to load (CDN blocked?)'));
     document.head.appendChild(s);
   });
 }
 
-/** Pull the jsPDF constructor that ships inside html2pdf.bundle. */
+async function ensurePdfStackLoaded() {
+  if (typeof window.html2canvas !== 'function') {
+    await loadScriptOnce(
+      'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
+      'pupHtml2canvas'
+    );
+  }
+  if (!getJsPdfCtor()) {
+    await loadScriptOnce(
+      'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js',
+      'pupJspdf'
+    );
+  }
+  if (typeof window.html2canvas !== 'function') {
+    throw new Error('html2canvas not available after load');
+  }
+  if (!getJsPdfCtor()) {
+    throw new Error('jsPDF not available after load');
+  }
+}
+
 function getJsPdfCtor() {
   if (window.jspdf && window.jspdf.jsPDF) return window.jspdf.jsPDF;
   if (typeof window.jsPDF === 'function') return window.jsPDF;
@@ -15197,67 +15214,119 @@ function setPdfOverlayStep(overlay, msg) {
 }
 
 /**
- * Render a tall element into a multi-page PDF by slicing the rasterised
- * canvas in chunks ≤ MAX_CANVAS_H to stay under the browser limit (~32,767px),
- * then drawing each chunk on its own A4 page.
+ * Render a tall element into a multi-page PDF.
+ *
+ * Strategy: capture the FULL element once at a moderate scale into one canvas
+ * (within the 32,767px browser limit), then slice that canvas in JS using
+ * drawImage onto smaller canvases. Each slice becomes one A4 page.
+ *
+ * For content tall enough that even scale=0.5 exceeds the canvas limit, we
+ * fall back to per-slice html2canvas captures using element x/y/height crops.
  */
 async function renderTargetToPdfSliced(target, jsPDFCtor, onProgress) {
   const html2canvas = window.html2canvas;
   if (typeof html2canvas !== 'function') {
-    throw new Error('html2canvas missing from html2pdf bundle');
+    throw new Error('html2canvas not loaded');
   }
+
   const A4_W_MM = 210;
   const A4_H_MM = 297;
   const MARGIN_MM = 10;
   const usableW_mm = A4_W_MM - MARGIN_MM * 2;
   const usableH_mm = A4_H_MM - MARGIN_MM * 2;
+  const MAX_CANVAS_H = 14000; // safe under Chrome's ~32,767 limit
 
-  const targetW_px = target.scrollWidth || target.getBoundingClientRect().width;
-  const targetH_px = target.scrollHeight || target.getBoundingClientRect().height;
-  if (!targetW_px || !targetH_px) {
-    throw new Error('Report layout is empty — nothing to render.');
-  }
+  void target.offsetHeight;
+  const rect = target.getBoundingClientRect();
+  const targetW_px = Math.ceil(target.scrollWidth || rect.width);
+  const targetH_px = Math.ceil(target.scrollHeight || rect.height);
 
-  // px → mm conversion for the rasterised canvas
-  const pxPerMm = targetW_px / usableW_mm;
-  const sliceH_px = Math.floor(usableH_mm * pxPerMm);
+  console.log('[PDF] target dims', { targetW_px, targetH_px, rect });
+  if (!targetW_px || !targetH_px) throw new Error('Report layout is empty — nothing to render.');
 
-  // Choose a render scale that keeps each slice canvas safely under browser limits.
-  // Chrome max canvas height ≈ 32,767px. We want sliceH_px * scale ≤ 16,000 to be safe.
-  const scale = Math.min(1.6, Math.max(0.8, 16000 / sliceH_px));
+  const pxPerMm_source = targetW_px / usableW_mm;
+  const sliceSourceH_px = Math.floor(usableH_mm * pxPerMm_source);
 
   const pdf = new jsPDFCtor({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
-  const totalSlices = Math.ceil(targetH_px / sliceH_px);
+  const totalSlices = Math.ceil(targetH_px / sliceSourceH_px);
+  console.log('[PDF] plan', { sliceSourceH_px, totalSlices, MAX_CANVAS_H });
 
-  for (let i = 0; i < totalSlices; i++) {
-    if (onProgress) onProgress(i + 1, totalSlices);
-    const yOffset_px = i * sliceH_px;
-    const thisSliceH_px = Math.min(sliceH_px, targetH_px - yOffset_px);
+  // Try a single full-element capture if it fits. Each slice canvas (sliceSourceH_px * scale)
+  // must stay under MAX_CANVAS_H, AND total canvas height (targetH_px * scale) too.
+  const fullScale = Math.min(1.5, MAX_CANVAS_H / Math.max(targetH_px, 1));
+  const canSingleCapture = fullScale >= 0.6;
 
-    // html2canvas captures (x, y, width, height) of the target. Use offset & cap.
-    const canvas = await html2canvas(target, {
-      scale,
+  if (canSingleCapture) {
+    console.log('[PDF] single-capture mode, scale=', fullScale);
+    if (onProgress) onProgress(1, totalSlices, 'capturing');
+    const fullCanvas = await html2canvas(target, {
+      scale: fullScale,
       useCORS: true,
       allowTaint: true,
       letterRendering: true,
       logging: false,
       backgroundColor: '#ffffff',
-      scrollX: 0,
-      scrollY: 0,
+      windowWidth: targetW_px,
+      width: targetW_px,
+      height: targetH_px,
+    });
+    console.log('[PDF] full canvas', { w: fullCanvas.width, h: fullCanvas.height });
+
+    const sliceCanvasH_px = Math.floor(sliceSourceH_px * fullScale);
+    let cursor_px = 0;
+    let pageIdx = 0;
+    while (cursor_px < fullCanvas.height) {
+      const thisH = Math.min(sliceCanvasH_px, fullCanvas.height - cursor_px);
+      const slice = document.createElement('canvas');
+      slice.width = fullCanvas.width;
+      slice.height = thisH;
+      const ctx = slice.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, slice.width, slice.height);
+      ctx.drawImage(
+        fullCanvas,
+        0, cursor_px, fullCanvas.width, thisH,
+        0, 0, fullCanvas.width, thisH
+      );
+      const imgData = slice.toDataURL('image/jpeg', 0.9);
+      const sliceMm_h = (thisH / fullScale) / pxPerMm_source;
+      if (pageIdx > 0) pdf.addPage('a4', 'portrait');
+      pdf.addImage(imgData, 'JPEG', MARGIN_MM, MARGIN_MM, usableW_mm, sliceMm_h, undefined, 'FAST');
+      pageIdx++;
+      if (onProgress) onProgress(pageIdx, totalSlices, 'paginating');
+      cursor_px += thisH;
+    }
+    return pdf;
+  }
+
+  // Fallback: capture each page individually using element-crop (for very tall reports).
+  console.log('[PDF] per-slice mode');
+  const perSliceScale = Math.min(1.4, Math.max(0.7, MAX_CANVAS_H / sliceSourceH_px));
+  console.log('[PDF] perSliceScale=', perSliceScale);
+
+  for (let i = 0; i < totalSlices; i++) {
+    if (onProgress) onProgress(i + 1, totalSlices, 'capturing');
+    const yOffset_px = i * sliceSourceH_px;
+    const thisSliceH_px = Math.min(sliceSourceH_px, targetH_px - yOffset_px);
+    const canvas = await html2canvas(target, {
+      scale: perSliceScale,
+      useCORS: true,
+      allowTaint: true,
+      letterRendering: true,
+      logging: false,
+      backgroundColor: '#ffffff',
       windowWidth: targetW_px,
       width: targetW_px,
       height: thisSliceH_px,
       x: 0,
       y: yOffset_px,
     });
-
-    const imgData = canvas.toDataURL('image/jpeg', 0.92);
-    const sliceH_mm = thisSliceH_px / pxPerMm;
-
+    console.log('[PDF] slice', i + 1, '/', totalSlices, { w: canvas.width, h: canvas.height });
+    const imgData = canvas.toDataURL('image/jpeg', 0.9);
+    const sliceMm_h = thisSliceH_px / pxPerMm_source;
     if (i > 0) pdf.addPage('a4', 'portrait');
-    pdf.addImage(imgData, 'JPEG', MARGIN_MM, MARGIN_MM, usableW_mm, sliceH_mm, undefined, 'FAST');
+    pdf.addImage(imgData, 'JPEG', MARGIN_MM, MARGIN_MM, usableW_mm, sliceMm_h, undefined, 'FAST');
   }
-
   return pdf;
 }
 
@@ -15271,11 +15340,16 @@ async function downloadPolicyPipelineReportPdf() {
   const pdfBtn = document.getElementById('pup-result-modal-download-pdf');
   const meta = policyUpdatePipelineLastMeta || {};
   const filename = pupReportFileName(meta);
+
+  // Build the report and attach it absolutely off-screen. This keeps it in
+  // the layout tree (so it has real dimensions for html2canvas) but the user
+  // never sees it.
   const root = buildPolicyPipelineReportExportRoot(data, meta);
+  root.style.cssText =
+    'position:absolute;left:-10000px;top:0;width:794px;background:#fff;' +
+    'pointer-events:none;opacity:1;visibility:visible;';
   document.body.appendChild(root);
 
-  // Fullscreen overlay hides the visible export root from the user; the
-  // overlay sits above it so html2canvas still sees the real export pixels.
   const overlay = buildPdfLoadingOverlay();
   document.body.appendChild(overlay);
 
@@ -15285,28 +15359,30 @@ async function downloadPolicyPipelineReportPdf() {
 
   try {
     setPdfOverlayStep(overlay, 'Loading PDF engine…');
-    await ensureHtml2PdfLoaded();
+    await ensurePdfStackLoaded();
     const jsPDFCtor = getJsPdfCtor();
-    if (!jsPDFCtor) throw new Error('jsPDF unavailable inside html2pdf bundle');
 
     setPdfOverlayStep(overlay, 'Loading fonts…');
     await preloadCairoForReport();
     await new Promise((r) => setTimeout(r, 400));
 
     const target = root.querySelector('.rpt-root');
+    if (!target) throw new Error('Report root not found');
     void target.offsetHeight;
     const rect = target.getBoundingClientRect();
-    if (!rect.width || !rect.height) {
+    console.log('[PDF] start', { filename, rect: { w: rect.width, h: rect.height, scrollH: target.scrollHeight } });
+    if (!rect.width || !target.scrollHeight) {
       throw new Error('Report layout is empty — nothing to render.');
     }
 
-    setPdfOverlayStep(overlay, `Rendering report (${Math.round(rect.height)}px)…`);
-    const pdf = await renderTargetToPdfSliced(target, jsPDFCtor, (i, total) => {
-      setPdfOverlayStep(overlay, `Rendering page ${i} of ${total}…`);
+    setPdfOverlayStep(overlay, `Rendering ${Math.round(target.scrollHeight)}px of report…`);
+    const pdf = await renderTargetToPdfSliced(target, jsPDFCtor, (i, total, stage) => {
+      setPdfOverlayStep(overlay, (stage === 'paginating' ? 'Paginating' : 'Rendering') + ' page ' + i + ' of ' + total + '…');
     });
 
     setPdfOverlayStep(overlay, 'Saving PDF…');
     pdf.save(filename);
+    console.log('[PDF] saved', filename);
     toast('success', 'Downloaded', filename);
   } catch (e) {
     console.error('[PDF]', e);
