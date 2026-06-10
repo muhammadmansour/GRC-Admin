@@ -15141,14 +15141,11 @@ function buildPolicyPipelineReportExportRoot(data, meta = {}) {
   const stage = data && data.stage_reached ? pupStageLabel(data.stage_reached) : '—';
   const root = document.createElement('div');
   root.className = 'rpt-export-root';
-  // html2canvas needs a real layout box with painted pixels. opacity:0,
-  // display:none, or off-screen position all yield blank canvases.
-  // clip-path masks pixels without disturbing layout or transforms, so
-  // html2canvas sees the element correctly and the user sees nothing.
+  // Render fully visible in the page so html2canvas captures real pixels.
+  // A fullscreen overlay (added separately) hides it from the user.
   root.style.cssText =
     'position:fixed;left:0;top:0;width:794px;background:#fff;' +
-    'visibility:visible;z-index:2147483646;' +
-    'clip-path:inset(100%);';
+    'visibility:visible;z-index:2147483646;';
   root.innerHTML =
     '<link rel="stylesheet" href="' + PUP_REPORT_FONT_LINK + '">' +
     '<style>' + PUP_REPORT_CSS + '</style>' +
@@ -15167,6 +15164,31 @@ function buildPolicyPipelineReportExportRoot(data, meta = {}) {
   return root;
 }
 
+function buildPdfLoadingOverlay() {
+  const ov = document.createElement('div');
+  ov.className = 'rpt-pdf-overlay';
+  ov.style.cssText =
+    'position:fixed;inset:0;background:rgba(15,23,42,0.78);' +
+    'z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
+    'backdrop-filter:blur(4px);';
+  ov.innerHTML =
+    '<div style="background:#fff;border-radius:16px;padding:28px 36px;text-align:center;' +
+    'box-shadow:0 25px 50px rgba(0,0,0,0.35);font-family:Cairo,system-ui,sans-serif;min-width:280px">' +
+      '<div style="width:42px;height:42px;border:4px solid #e2e8f0;border-top-color:#2563eb;' +
+      'border-radius:50%;animation:rptSpin 0.9s linear infinite;margin:0 auto 14px"></div>' +
+      '<div style="font-size:15px;font-weight:600;color:#0f172a;margin-bottom:4px">Generating PDF</div>' +
+      '<div class="rpt-pdf-step" style="font-size:12px;color:#64748b">Preparing your report…</div>' +
+    '</div>' +
+    '<style>@keyframes rptSpin{to{transform:rotate(360deg)}}</style>';
+  return ov;
+}
+
+function setPdfOverlayStep(overlay, msg) {
+  if (!overlay) return;
+  const step = overlay.querySelector('.rpt-pdf-step');
+  if (step) step.textContent = msg;
+}
+
 async function downloadPolicyPipelineReportPdf() {
   const data = policyUpdatePipelineLastRaw;
   if (!data || typeof data !== 'object') {
@@ -15180,27 +15202,34 @@ async function downloadPolicyPipelineReportPdf() {
   const root = buildPolicyPipelineReportExportRoot(data, meta);
   document.body.appendChild(root);
 
+  // Fullscreen overlay hides the visible export root from the user; the
+  // overlay sits above it so html2canvas still sees the real export pixels.
+  const overlay = buildPdfLoadingOverlay();
+  document.body.appendChild(overlay);
+
   if (pdfBtn) pdfBtn.disabled = true;
-  toast('info', 'Generating PDF', 'Preparing your report…');
+  const previousBodyOverflow = document.body.style.overflow;
+  document.body.style.overflow = 'hidden';
 
   try {
+    setPdfOverlayStep(overlay, 'Loading PDF engine…');
     await ensureHtml2PdfLoaded();
+
+    setPdfOverlayStep(overlay, 'Loading fonts…');
     await preloadCairoForReport();
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 500));
 
     const target = root.querySelector('.rpt-root');
-    // Force layout flush so html2canvas measures non-zero dimensions.
     void target.offsetHeight;
-
     const rect = target.getBoundingClientRect();
     if (!rect.width || !rect.height) {
       throw new Error('Report layout is empty — nothing to render.');
     }
 
-    // For long reports (many regulation points), keep scale modest so the
-    // intermediate canvas stays well under Chrome's ~32,767px max height.
+    setPdfOverlayStep(overlay, `Rendering ${Math.round(rect.height)}px of report…`);
+    // Cap canvas scale based on content height so we stay under browser limits.
     const heightPx = rect.height;
-    const scale = heightPx > 8000 ? 1.25 : heightPx > 4000 ? 1.5 : 2;
+    const scale = heightPx > 8000 ? 1.1 : heightPx > 4000 ? 1.3 : 1.6;
 
     await window.html2pdf()
       .set({
@@ -15217,23 +15246,8 @@ async function downloadPolicyPipelineReportPdf() {
           scrollX: 0,
           scrollY: 0,
           windowWidth: 794,
-          // ignoreElements skips the clip-path mask so html2canvas paints
-          // the real layout box, not a clipped zero-pixel box.
-          ignoreElements: (el) => el.classList && el.classList.contains('rpt-export-root'),
-          onclone: (clonedDoc) => {
-            // In the clone, drop the clip-path mask so html2canvas renders pixels.
-            const cloneRoot = clonedDoc.querySelector('.rpt-export-root');
-            if (cloneRoot) {
-              cloneRoot.style.clipPath = 'none';
-              cloneRoot.style.transform = 'none';
-              cloneRoot.style.visibility = 'visible';
-            }
-          },
         },
         jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
-        // 'css' respects page-break-* hints from our stylesheet; 'legacy'
-        // fills page seams when no CSS hint is nearby. NEVER use 'avoid-all'
-        // for long content — it produces blank pages when sections overflow.
         pagebreak: {
           mode: ['css', 'legacy'],
           avoid: ['.rpt-card', '.rpt-policy-card', '.rpt-amend', '.rpt-impact-point'],
@@ -15248,6 +15262,8 @@ async function downloadPolicyPipelineReportPdf() {
     toast('error', 'PDF failed', e.message || String(e));
   } finally {
     root.remove();
+    overlay.remove();
+    document.body.style.overflow = previousBodyOverflow;
     if (pdfBtn) pdfBtn.disabled = false;
   }
 }
