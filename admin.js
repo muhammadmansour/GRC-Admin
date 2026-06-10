@@ -15141,15 +15141,14 @@ function buildPolicyPipelineReportExportRoot(data, meta = {}) {
   const stage = data && data.stage_reached ? pupStageLabel(data.stage_reached) : '—';
   const root = document.createElement('div');
   root.className = 'rpt-export-root';
-  // html2canvas captures whatever it can compute layout for. Hiding via
-  // opacity:0 / display:none / off-screen-fixed all produce blank pages,
-  // because the element either has no painted pixels or no layout box.
-  // Solution: keep it in normal flow but visually masked above the page —
-  // the user briefly sees a 0×0 wrapper, html2canvas sees a real layout.
+  // html2canvas needs a real layout box with painted pixels. opacity:0,
+  // display:none, or off-screen position all yield blank canvases.
+  // clip-path masks pixels without disturbing layout or transforms, so
+  // html2canvas sees the element correctly and the user sees nothing.
   root.style.cssText =
-    'position:absolute;left:0;top:0;width:794px;background:#fff;' +
+    'position:fixed;left:0;top:0;width:794px;background:#fff;' +
     'visibility:visible;z-index:2147483646;' +
-    'transform:translateY(-200vh);';
+    'clip-path:inset(100%);';
   root.innerHTML =
     '<link rel="stylesheet" href="' + PUP_REPORT_FONT_LINK + '">' +
     '<style>' + PUP_REPORT_CSS + '</style>' +
@@ -15198,13 +15197,18 @@ async function downloadPolicyPipelineReportPdf() {
       throw new Error('Report layout is empty — nothing to render.');
     }
 
+    // For long reports (many regulation points), keep scale modest so the
+    // intermediate canvas stays well under Chrome's ~32,767px max height.
+    const heightPx = rect.height;
+    const scale = heightPx > 8000 ? 1.25 : heightPx > 4000 ? 1.5 : 2;
+
     await window.html2pdf()
       .set({
-        margin: 10,
+        margin: [10, 10, 12, 10],
         filename,
         image: { type: 'jpeg', quality: 0.95 },
         html2canvas: {
-          scale: 2,
+          scale,
           useCORS: true,
           allowTaint: true,
           letterRendering: true,
@@ -15213,9 +15217,27 @@ async function downloadPolicyPipelineReportPdf() {
           scrollX: 0,
           scrollY: 0,
           windowWidth: 794,
+          // ignoreElements skips the clip-path mask so html2canvas paints
+          // the real layout box, not a clipped zero-pixel box.
+          ignoreElements: (el) => el.classList && el.classList.contains('rpt-export-root'),
+          onclone: (clonedDoc) => {
+            // In the clone, drop the clip-path mask so html2canvas renders pixels.
+            const cloneRoot = clonedDoc.querySelector('.rpt-export-root');
+            if (cloneRoot) {
+              cloneRoot.style.clipPath = 'none';
+              cloneRoot.style.transform = 'none';
+              cloneRoot.style.visibility = 'visible';
+            }
+          },
         },
         jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
-        pagebreak: { mode: ['avoid-all', 'css', 'legacy'] },
+        // 'css' respects page-break-* hints from our stylesheet; 'legacy'
+        // fills page seams when no CSS hint is nearby. NEVER use 'avoid-all'
+        // for long content — it produces blank pages when sections overflow.
+        pagebreak: {
+          mode: ['css', 'legacy'],
+          avoid: ['.rpt-card', '.rpt-policy-card', '.rpt-amend', '.rpt-impact-point'],
+        },
       })
       .from(target)
       .save();
