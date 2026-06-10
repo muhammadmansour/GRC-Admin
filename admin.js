@@ -15330,68 +15330,105 @@ async function renderTargetToPdfSliced(target, jsPDFCtor, onProgress) {
   return pdf;
 }
 
+/**
+ * Trigger a browser download for a URL without opening a tab. We use an <a>
+ * anchor with `download` so Chrome saves the file via the server-supplied
+ * Content-Disposition (the signed URL is already 'attachment; filename=...').
+ */
+function triggerBrowserDownload(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  if (filename) a.download = filename;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { try { a.remove(); } catch (_) { /* ignore */ } }, 0);
+}
+
+/**
+ * Server-side PDF flow. The pipeline already rendered the report into
+ * pup-data bucket when the run finished — we just ask for a signed URL.
+ *
+ *   status === 'ready'       → instant download via the signed URL
+ *   status === 'pending'     → poll briefly (PDF is still rendering server-side)
+ *   status === 'failed'      → show the upstream error
+ *   status === 'unavailable' → run pre-dates the server-side PDF feature
+ */
 async function downloadPolicyPipelineReportPdf() {
   const data = policyUpdatePipelineLastRaw;
   if (!data || typeof data !== 'object') {
     toast('error', 'Nothing to export', 'Run the pipeline first.');
     return;
   }
+  const meta = policyUpdatePipelineLastMeta || {};
+  const runId = meta && meta.runId ? String(meta.runId) : '';
+  if (!runId) {
+    toast(
+      'error',
+      'No saved run',
+      'This run was not persisted to history yet, so the server-side PDF is unavailable. Re-run the pipeline to enable downloads.'
+    );
+    return;
+  }
 
   const pdfBtn = document.getElementById('pup-result-modal-download-pdf');
-  const meta = policyUpdatePipelineLastMeta || {};
-  const filename = pupReportFileName(meta);
-
-  // Build the report and attach it absolutely off-screen. This keeps it in
-  // the layout tree (so it has real dimensions for html2canvas) but the user
-  // never sees it.
-  const root = buildPolicyPipelineReportExportRoot(data, meta);
-  root.style.cssText =
-    'position:absolute;left:-10000px;top:0;width:794px;background:#fff;' +
-    'pointer-events:none;opacity:1;visibility:visible;';
-  document.body.appendChild(root);
-
-  const overlay = buildPdfLoadingOverlay();
-  document.body.appendChild(overlay);
-
   if (pdfBtn) pdfBtn.disabled = true;
-  const previousBodyOverflow = document.body.style.overflow;
-  document.body.style.overflow = 'hidden';
+  const originalBtnText = pdfBtn ? pdfBtn.textContent : '';
+
+  const setBtnText = (txt) => {
+    if (!pdfBtn) return;
+    // Preserve the existing SVG icon if present
+    const svg = pdfBtn.querySelector('svg');
+    pdfBtn.textContent = '';
+    if (svg) pdfBtn.appendChild(svg);
+    pdfBtn.appendChild(document.createTextNode(' ' + txt));
+  };
+
+  const endpoint = `/api/ai-tools/pipeline-runs/${encodeURIComponent(runId)}/report-pdf`;
+  const POLL_INTERVAL_MS = 1500;
+  const POLL_MAX_MS = 90000; // 90s ceiling — PDF gen of large reports can take 30-60s
 
   try {
-    setPdfOverlayStep(overlay, 'Loading PDF engine…');
-    await ensurePdfStackLoaded();
-    const jsPDFCtor = getJsPdfCtor();
-
-    setPdfOverlayStep(overlay, 'Loading fonts…');
-    await preloadCairoForReport();
-    await new Promise((r) => setTimeout(r, 400));
-
-    const target = root.querySelector('.rpt-root');
-    if (!target) throw new Error('Report root not found');
-    void target.offsetHeight;
-    const rect = target.getBoundingClientRect();
-    console.log('[PDF] start', { filename, rect: { w: rect.width, h: rect.height, scrollH: target.scrollHeight } });
-    if (!rect.width || !target.scrollHeight) {
-      throw new Error('Report layout is empty — nothing to render.');
+    setBtnText('Checking…');
+    const startedAt = Date.now();
+    let resp = null;
+    while (true) {
+      const r = await fetch(endpoint, { credentials: 'same-origin' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || r.statusText || 'Failed to query PDF status');
+      resp = j;
+      if (j.status === 'ready') break;
+      if (j.status === 'failed') throw new Error(j.error || 'Server-side PDF generation failed.');
+      if (j.status === 'unavailable') {
+        toast('warning', 'PDF unavailable', 'This run was created before server-side PDF generation was enabled.');
+        return;
+      }
+      if (j.status === 'pending') {
+        if (Date.now() - startedAt > POLL_MAX_MS) {
+          throw new Error('PDF still generating. Please try again in a moment.');
+        }
+        setBtnText(`Generating… (${Math.round((Date.now() - startedAt) / 1000)}s)`);
+        await new Promise((res) => setTimeout(res, POLL_INTERVAL_MS));
+        continue;
+      }
+      throw new Error(`Unexpected status: ${j.status || '(none)'}`);
     }
 
-    setPdfOverlayStep(overlay, `Rendering ${Math.round(target.scrollHeight)}px of report…`);
-    const pdf = await renderTargetToPdfSliced(target, jsPDFCtor, (i, total, stage) => {
-      setPdfOverlayStep(overlay, (stage === 'paginating' ? 'Paginating' : 'Rendering') + ' page ' + i + ' of ' + total + '…');
-    });
-
-    setPdfOverlayStep(overlay, 'Saving PDF…');
-    pdf.save(filename);
-    console.log('[PDF] saved', filename);
-    toast('success', 'Downloaded', filename);
+    setBtnText('Downloading…');
+    triggerBrowserDownload(resp.url, resp.filename);
+    toast('success', 'Downloaded', resp.filename || 'report.pdf');
   } catch (e) {
     console.error('[PDF]', e);
     toast('error', 'PDF failed', e.message || String(e));
   } finally {
-    root.remove();
-    overlay.remove();
-    document.body.style.overflow = previousBodyOverflow;
-    if (pdfBtn) pdfBtn.disabled = false;
+    if (pdfBtn) {
+      pdfBtn.disabled = false;
+      if (originalBtnText) {
+        // Restore label (icon + " Download PDF")
+        setBtnText('Download PDF');
+      }
+    }
   }
 }
 
@@ -15791,11 +15828,16 @@ async function runPolicyUpdatePipeline() {
       outEl.style.display = 'none';
       outEl.textContent = '';
     }
-    openPolicyPipelineResultModal(payload);
+    const fgSourceName = (regulationText || '').slice(0, 60).replace(/\s+/g, ' ').trim() || 'Manual regulation entry';
+    openPolicyPipelineResultModal(payload, {
+      meta: { sourceName: fgSourceName, generatedAt: new Date().toISOString() },
+    });
     toast('success', 'Pipeline finished', `Stage: ${payload.stage_reached || 'done'}`);
     addNotif(`pup-fg-${Date.now()}`, 'Pipeline complete', `Stage reached: ${pupStageLabel(payload.stage_reached)}`, 'success', payload);
 
-    // Persist result to DB (non-blocking, non-fatal)
+    // Persist result to DB (non-blocking, non-fatal). Server kicks off PDF
+    // generation in the background; capture the run id so the Download PDF
+    // button can ask the server for the signed URL when it's ready.
     fetch('/api/ai-tools/pipeline-runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -15804,9 +15846,13 @@ async function runPolicyUpdatePipeline() {
         regulationText,
         policyCount: policies.length,
         result: payload,
+        sourceName: fgSourceName,
       }),
     }).then(r => r.json()).then(saved => {
-      if (saved && saved.id) console.log('[PipelineRuns] Saved run:', saved.id);
+      if (saved && saved.id) {
+        console.log('[PipelineRuns] Saved run:', saved.id, 'PDF:', saved.reportPdfStatus || 'unknown');
+        if (policyUpdatePipelineLastMeta) policyUpdatePipelineLastMeta.runId = saved.id;
+      }
     }).catch(e => console.warn('[PipelineRuns] Save failed (non-fatal):', e.message));
   } catch (e) {
     if (e && e.name === 'AbortError') {
@@ -15897,11 +15943,25 @@ async function runPipelineInBackground(regulationText, sourceFile) {
     const payload = j.data != null ? j.data : j;
 
     // ── 4. Persist to DB ───────────────────────────────────────
-    fetch('/api/ai-tools/pipeline-runs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ orgContext: orgContextText, regulationText, policyCount: policies.length, result: payload }),
-    }).catch(() => {});
+    // Server kicks off PDF generation in the background after this insert and
+    // uploads it to the pup-data bucket. We capture the new run id so the
+    // result modal's Download PDF button asks the server for it.
+    let savedRunId = null;
+    try {
+      const saveRes = await fetch('/api/ai-tools/pipeline-runs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orgContext: orgContextText,
+          regulationText,
+          policyCount: policies.length,
+          result: payload,
+          sourceName: sourceFile,
+        }),
+      });
+      const saved = await saveRes.json().catch(() => ({}));
+      if (saved && saved.id) savedRunId = saved.id;
+    } catch (_) { /* non-fatal */ }
 
     updateNotif(runId, {
       status:  'success',
@@ -15914,7 +15974,11 @@ async function runPipelineInBackground(regulationText, sourceFile) {
     // regardless of which entry point started the run.
     try {
       openPolicyPipelineResultModal(payload, {
-        meta: { sourceName: sourceFile, generatedAt: new Date().toISOString() },
+        meta: {
+          sourceName: sourceFile,
+          generatedAt: new Date().toISOString(),
+          ...(savedRunId ? { runId: savedRunId } : {}),
+        },
       });
     } catch (modalErr) {
       console.warn('[BgPipeline] Failed to auto-open result modal:', modalErr && modalErr.message);
