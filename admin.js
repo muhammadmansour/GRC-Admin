@@ -15123,6 +15123,13 @@ function ensureHtml2PdfLoaded() {
   });
 }
 
+/** Pull the jsPDF constructor that ships inside html2pdf.bundle. */
+function getJsPdfCtor() {
+  if (window.jspdf && window.jspdf.jsPDF) return window.jspdf.jsPDF;
+  if (typeof window.jsPDF === 'function') return window.jsPDF;
+  return null;
+}
+
 async function preloadCairoForReport() {
   try {
     if (document.fonts && document.fonts.load) {
@@ -15189,6 +15196,71 @@ function setPdfOverlayStep(overlay, msg) {
   if (step) step.textContent = msg;
 }
 
+/**
+ * Render a tall element into a multi-page PDF by slicing the rasterised
+ * canvas in chunks ≤ MAX_CANVAS_H to stay under the browser limit (~32,767px),
+ * then drawing each chunk on its own A4 page.
+ */
+async function renderTargetToPdfSliced(target, jsPDFCtor, onProgress) {
+  const html2canvas = window.html2canvas;
+  if (typeof html2canvas !== 'function') {
+    throw new Error('html2canvas missing from html2pdf bundle');
+  }
+  const A4_W_MM = 210;
+  const A4_H_MM = 297;
+  const MARGIN_MM = 10;
+  const usableW_mm = A4_W_MM - MARGIN_MM * 2;
+  const usableH_mm = A4_H_MM - MARGIN_MM * 2;
+
+  const targetW_px = target.scrollWidth || target.getBoundingClientRect().width;
+  const targetH_px = target.scrollHeight || target.getBoundingClientRect().height;
+  if (!targetW_px || !targetH_px) {
+    throw new Error('Report layout is empty — nothing to render.');
+  }
+
+  // px → mm conversion for the rasterised canvas
+  const pxPerMm = targetW_px / usableW_mm;
+  const sliceH_px = Math.floor(usableH_mm * pxPerMm);
+
+  // Choose a render scale that keeps each slice canvas safely under browser limits.
+  // Chrome max canvas height ≈ 32,767px. We want sliceH_px * scale ≤ 16,000 to be safe.
+  const scale = Math.min(1.6, Math.max(0.8, 16000 / sliceH_px));
+
+  const pdf = new jsPDFCtor({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
+  const totalSlices = Math.ceil(targetH_px / sliceH_px);
+
+  for (let i = 0; i < totalSlices; i++) {
+    if (onProgress) onProgress(i + 1, totalSlices);
+    const yOffset_px = i * sliceH_px;
+    const thisSliceH_px = Math.min(sliceH_px, targetH_px - yOffset_px);
+
+    // html2canvas captures (x, y, width, height) of the target. Use offset & cap.
+    const canvas = await html2canvas(target, {
+      scale,
+      useCORS: true,
+      allowTaint: true,
+      letterRendering: true,
+      logging: false,
+      backgroundColor: '#ffffff',
+      scrollX: 0,
+      scrollY: 0,
+      windowWidth: targetW_px,
+      width: targetW_px,
+      height: thisSliceH_px,
+      x: 0,
+      y: yOffset_px,
+    });
+
+    const imgData = canvas.toDataURL('image/jpeg', 0.92);
+    const sliceH_mm = thisSliceH_px / pxPerMm;
+
+    if (i > 0) pdf.addPage('a4', 'portrait');
+    pdf.addImage(imgData, 'JPEG', MARGIN_MM, MARGIN_MM, usableW_mm, sliceH_mm, undefined, 'FAST');
+  }
+
+  return pdf;
+}
+
 async function downloadPolicyPipelineReportPdf() {
   const data = policyUpdatePipelineLastRaw;
   if (!data || typeof data !== 'object') {
@@ -15214,10 +15286,12 @@ async function downloadPolicyPipelineReportPdf() {
   try {
     setPdfOverlayStep(overlay, 'Loading PDF engine…');
     await ensureHtml2PdfLoaded();
+    const jsPDFCtor = getJsPdfCtor();
+    if (!jsPDFCtor) throw new Error('jsPDF unavailable inside html2pdf bundle');
 
     setPdfOverlayStep(overlay, 'Loading fonts…');
     await preloadCairoForReport();
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 400));
 
     const target = root.querySelector('.rpt-root');
     void target.offsetHeight;
@@ -15226,36 +15300,13 @@ async function downloadPolicyPipelineReportPdf() {
       throw new Error('Report layout is empty — nothing to render.');
     }
 
-    setPdfOverlayStep(overlay, `Rendering ${Math.round(rect.height)}px of report…`);
-    // Cap canvas scale based on content height so we stay under browser limits.
-    const heightPx = rect.height;
-    const scale = heightPx > 8000 ? 1.1 : heightPx > 4000 ? 1.3 : 1.6;
+    setPdfOverlayStep(overlay, `Rendering report (${Math.round(rect.height)}px)…`);
+    const pdf = await renderTargetToPdfSliced(target, jsPDFCtor, (i, total) => {
+      setPdfOverlayStep(overlay, `Rendering page ${i} of ${total}…`);
+    });
 
-    await window.html2pdf()
-      .set({
-        margin: [10, 10, 12, 10],
-        filename,
-        image: { type: 'jpeg', quality: 0.95 },
-        html2canvas: {
-          scale,
-          useCORS: true,
-          allowTaint: true,
-          letterRendering: true,
-          logging: false,
-          backgroundColor: '#ffffff',
-          scrollX: 0,
-          scrollY: 0,
-          windowWidth: 794,
-        },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
-        pagebreak: {
-          mode: ['css', 'legacy'],
-          avoid: ['.rpt-card', '.rpt-policy-card', '.rpt-amend', '.rpt-impact-point'],
-        },
-      })
-      .from(target)
-      .save();
-
+    setPdfOverlayStep(overlay, 'Saving PDF…');
+    pdf.save(filename);
     toast('success', 'Downloaded', filename);
   } catch (e) {
     console.error('[PDF]', e);
