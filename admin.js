@@ -14142,6 +14142,296 @@ function pupSeverityClass(sev) {
   return 'pup-sev-none';
 }
 
+const PUP_SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, none: 4 };
+const PUP_SEVERITY_LABELS = {
+  critical: 'Critical',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+  none: 'None',
+};
+
+function pupNormalizeSeverity(sev) {
+  const s = (typeof sev === 'string' ? sev : '').trim().toLowerCase();
+  return PUP_SEVERITY_RANK[s] != null ? s : 'none';
+}
+
+function pupSeverityLabel(sev) {
+  const n = pupNormalizeSeverity(sev);
+  return PUP_SEVERITY_LABELS[n] || 'None';
+}
+
+/** Mirror server-side pipelineGroupImpactsByPolicy for raw f4_impacts in the modal. */
+function pupGroupImpactsByPolicy(f4Impacts) {
+  if (!Array.isArray(f4Impacts) || !f4Impacts.length) return [];
+  const byPolicy = new Map();
+  for (const group of f4Impacts) {
+    const pointId = group && group.point_id != null ? group.point_id : null;
+    const pointText = group && typeof group.point_text === 'string' ? group.point_text : '';
+    const impacts = Array.isArray(group && group.impacts) ? group.impacts : [];
+    for (const imp of impacts) {
+      if (!imp || imp.policy_id == null) continue;
+      const pid = String(imp.policy_id);
+      const sev = pupNormalizeSeverity(imp.severity);
+      const requires = imp.requires_amendment === true;
+      const meaningful = requires || sev !== 'none';
+      const entry = {
+        point_id: pointId,
+        point_text: pointText,
+        impact_summary: typeof imp.impact_summary === 'string' ? imp.impact_summary : '',
+        severity: sev,
+        severity_label: pupSeverityLabel(sev),
+        severity_reasoning: typeof imp.severity_reasoning === 'string' ? imp.severity_reasoning : '',
+        requires_amendment: requires,
+        similarity_score: typeof imp.similarity_score === 'number' ? imp.similarity_score : null,
+        amendments: Array.isArray(imp.amendments) ? imp.amendments : [],
+        compliance_gap: typeof imp.compliance_gap === 'string' ? imp.compliance_gap : '',
+        is_affected: meaningful,
+      };
+      const existing = byPolicy.get(pid);
+      if (existing) {
+        existing.matched_points.push(entry);
+        existing.policy_title = existing.policy_title || imp.policy_title || '';
+      } else {
+        byPolicy.set(pid, {
+          policy_id: pid,
+          policy_title: typeof imp.policy_title === 'string' ? imp.policy_title : '',
+          matched_points: [entry],
+        });
+      }
+    }
+  }
+
+  const out = [];
+  for (const group of byPolicy.values()) {
+    group.matched_points.sort((a, b) => {
+      const da = PUP_SEVERITY_RANK[a.severity] - PUP_SEVERITY_RANK[b.severity];
+      if (da !== 0) return da;
+      const sa = a.similarity_score == null ? -1 : a.similarity_score;
+      const sb = b.similarity_score == null ? -1 : b.similarity_score;
+      return sb - sa;
+    });
+    let worstRank = PUP_SEVERITY_RANK.none;
+    let isAffected = false;
+    let requiresAmendment = false;
+    let affectedPoints = 0;
+    for (const ent of group.matched_points) {
+      const r = PUP_SEVERITY_RANK[ent.severity];
+      if (r < worstRank) worstRank = r;
+      if (ent.is_affected) {
+        isAffected = true;
+        affectedPoints += 1;
+      }
+      if (ent.requires_amendment) requiresAmendment = true;
+    }
+    const worstSev = Object.keys(PUP_SEVERITY_RANK).find((k) => PUP_SEVERITY_RANK[k] === worstRank) || 'none';
+    out.push({
+      policy_id: group.policy_id,
+      policy_title: group.policy_title || `Policy ${group.policy_id}`,
+      is_affected: isAffected,
+      worst_severity: worstSev,
+      worst_severity_label: pupSeverityLabel(worstSev),
+      requires_amendment: requiresAmendment,
+      matched_points_count: group.matched_points.length,
+      affected_points_count: affectedPoints,
+      matched_points: group.matched_points,
+    });
+  }
+
+  out.sort((a, b) => {
+    if (a.is_affected !== b.is_affected) return a.is_affected ? -1 : 1;
+    const da = PUP_SEVERITY_RANK[a.worst_severity] - PUP_SEVERITY_RANK[b.worst_severity];
+    if (da !== 0) return da;
+    if (b.matched_points_count !== a.matched_points_count) return b.matched_points_count - a.matched_points_count;
+    return String(a.policy_title).localeCompare(String(b.policy_title));
+  });
+  return out;
+}
+
+function pupChangeTypeLabel(changeType) {
+  const t = String(changeType || '').trim().toLowerCase();
+  if (!t) return '';
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+function pupRenderImpactDetailBlock(label, content) {
+  if (!content) return '';
+  return (
+    '<div class="pup-impact-detail-block">' +
+    '<div class="pup-impact-detail-label">' + esc(label) + '</div>' +
+    '<div class="pup-impact-detail-content" dir="auto">' + esc(content) + '</div>' +
+    '</div>'
+  );
+}
+
+function pupRenderAmendmentCards(amendments) {
+  if (!Array.isArray(amendments) || !amendments.length) return '';
+  const parts = [
+    '<div class="pup-impact-detail-block">' +
+    '<div class="pup-impact-detail-label">Proposed amendments (' + esc(String(amendments.length)) + ')</div>' +
+    '<div class="pup-impact-amend-list">',
+  ];
+  for (const a of amendments) {
+    const changeType = pupChangeTypeLabel(a.change_type);
+    parts.push('<article class="pup-impact-amend-card">');
+    parts.push('<div class="pup-impact-amend-head">');
+    if (changeType) {
+      parts.push(
+        '<span class="pup-impact-change-type pup-impact-change-type--' +
+          esc(a.change_type || 'modify') +
+          '">' +
+          esc(changeType) +
+          '</span>'
+      );
+    }
+    if (a.policy_section) {
+      parts.push('<span class="pup-impact-amend-section">Section: ' + esc(a.policy_section) + '</span>');
+    }
+    parts.push('</div>');
+    if (a.current_text_summary) {
+      parts.push(
+        '<div class="pup-impact-amend-row">' +
+          '<span class="pup-impact-amend-row-label">Current</span>' +
+          '<p class="pup-impact-amend-row-text" dir="auto">' + esc(a.current_text_summary) + '</p>' +
+          '</div>'
+      );
+    }
+    if (a.required_change) {
+      parts.push(
+        '<div class="pup-impact-amend-row">' +
+          '<span class="pup-impact-amend-row-label">Required change</span>' +
+          '<p class="pup-impact-amend-row-text" dir="auto">' + esc(a.required_change) + '</p>' +
+          '</div>'
+      );
+    }
+    parts.push('</article>');
+  }
+  parts.push('</div></div>');
+  return parts.join('');
+}
+
+function pupRenderImpactPointDetails(pt) {
+  const parts = ['<div class="pup-impact-point-body">'];
+  parts.push(pupRenderImpactDetailBlock('Impact analysis', pt.impact_summary));
+  parts.push(pupRenderImpactDetailBlock('Severity', pt.severity_reasoning || pt.severity_label));
+  parts.push(pupRenderImpactDetailBlock('Compliance gap', pt.compliance_gap));
+  parts.push(pupRenderAmendmentCards(pt.amendments));
+  if (typeof pt.similarity_score === 'number') {
+    parts.push(
+      '<div class="pup-impact-point-meta">' +
+        'Similarity match · <strong>' + esc(String(pt.similarity_score)) + '</strong>' +
+        (pt.requires_amendment ? ' · <span class="pup-impact-amend-inline">Requires amendment</span>' : '') +
+        '</div>'
+    );
+  }
+  parts.push('</div>');
+  return parts.join('');
+}
+
+function pupRenderImpactByPolicyHtml(f4Impacts, data) {
+  const policies = pupGroupImpactsByPolicy(f4Impacts);
+  if (!policies.length) {
+    return '<p class="pup-result-prose">No impact rows.</p>';
+  }
+
+  const affectedCount = policies.filter((p) => p.is_affected).length;
+  const analyzedCount = policies.length;
+  const totalPointHits = policies.reduce((n, p) => n + p.matched_points_count, 0);
+  const f1 = data && data.f1_relevance;
+  const confidencePct =
+    f1 && typeof f1.confidence === 'number'
+      ? Math.round(Math.min(1, Math.max(0, f1.confidence)) * 100)
+      : null;
+  const worstOverall = policies.reduce((best, p) => {
+    const r = PUP_SEVERITY_RANK[p.worst_severity];
+    return r < best.rank ? { rank: r, label: p.worst_severity_label } : best;
+  }, { rank: PUP_SEVERITY_RANK.none, label: 'None' });
+
+  const parts = [];
+  parts.push('<div class="pup-impact-stats">');
+  parts.push(
+    '<div class="pup-impact-stat-card">' +
+      '<div class="pup-impact-stat-label">Impact</div>' +
+      '<div class="pup-impact-stat-value">' +
+        (confidencePct != null ? '<span class="pup-impact-stat-pct">' + esc(String(confidencePct)) + '%</span>' : '') +
+        '<span class="pup-impact-sev-badge ' + esc(pupSeverityClass(worstOverall.label.toLowerCase())) + '">' +
+          esc(worstOverall.label) +
+        '</span>' +
+      '</div>' +
+      '<div class="pup-impact-stat-sub">AI confidence</div>' +
+      '<div class="pup-impact-stat-bar pup-impact-stat-bar--' + esc(pupSeverityClass(worstOverall.label.toLowerCase())) + '"></div>' +
+    '</div>'
+  );
+  parts.push(
+    '<div class="pup-impact-stat-card">' +
+      '<div class="pup-impact-stat-label">Affected policies</div>' +
+      '<div class="pup-impact-stat-value pup-impact-stat-value--lg">' + esc(String(affectedCount)) + '</div>' +
+      '<div class="pup-impact-stat-sub">Analysed ' + esc(String(analyzedCount)) + ' policies</div>' +
+    '</div>'
+  );
+  parts.push(
+    '<div class="pup-impact-stat-card">' +
+      '<div class="pup-impact-stat-label">Policy impacts</div>' +
+      '<div class="pup-impact-stat-value pup-impact-stat-value--lg">' + esc(String(totalPointHits)) + '</div>' +
+      '<div class="pup-impact-stat-sub">Policies indexed · ' +
+        esc(String(typeof data.policy_count_indexed === 'number' ? data.policy_count_indexed : analyzedCount)) +
+      '</div>' +
+    '</div>'
+  );
+  parts.push('</div>');
+
+  parts.push('<div class="pup-impact-section-head">');
+  parts.push('<span class="pup-impact-section-icon" aria-hidden="true">📄</span>');
+  parts.push('<span class="pup-impact-section-title">Affected policies</span>');
+  parts.push('</div>');
+
+  parts.push('<div class="pup-impact-policy-list">');
+  for (const policy of policies) {
+    const sevCls = pupSeverityClass(policy.worst_severity);
+    parts.push(
+      '<section class="pup-impact-policy-card' +
+        (policy.is_affected ? '' : ' pup-impact-policy-card--muted') +
+        '" data-policy-id="' + esc(policy.policy_id) + '">'
+    );
+    parts.push('<header class="pup-impact-policy-head">');
+    parts.push('<div class="pup-impact-policy-title-wrap">');
+    parts.push('<h5 class="pup-impact-policy-title">' + esc(policy.policy_title) + '</h5>');
+    parts.push('<div class="pup-impact-policy-badges">');
+    parts.push(
+      '<span class="pup-impact-sev-badge ' + sevCls + '">' + esc(policy.worst_severity_label) + '</span>'
+    );
+    if (policy.requires_amendment) {
+      parts.push('<span class="pup-impact-amend-badge">Requires amendment</span>');
+    } else if (!policy.is_affected) {
+      parts.push('<span class="pup-impact-neutral-badge">No material impact</span>');
+    }
+    parts.push('</div></div>');
+    parts.push(
+      '<div class="pup-impact-policy-counter" title="Affected regulation points / total matched">' +
+        esc(String(policy.affected_points_count)) + ' / ' + esc(String(policy.matched_points_count)) +
+      '</div>'
+    );
+    parts.push('</header>');
+
+    parts.push('<div class="pup-impact-point-list">');
+    for (const pt of policy.matched_points) {
+      const ptSev = pupSeverityClass(pt.severity);
+      parts.push('<details class="pup-impact-point' + (pt.is_affected ? '' : ' pup-impact-point--muted') + '">');
+      parts.push('<summary class="pup-impact-point-summary">');
+      parts.push('<span class="pup-impact-point-id">' + esc(pt.point_id || 'Point') + '</span>');
+      parts.push('<span class="pup-impact-point-text" dir="auto">' + esc(pt.point_text || '') + '</span>');
+      parts.push('<span class="pup-impact-point-sev ' + ptSev + '">' + esc(pt.severity_label) + '</span>');
+      parts.push('<span class="pup-impact-point-toggle">View details</span>');
+      parts.push('</summary>');
+      parts.push(pupRenderImpactPointDetails(pt));
+      parts.push('</details>');
+    }
+    parts.push('</div></section>');
+  }
+  parts.push('</div>');
+  return parts.join('');
+}
+
 function renderPolicyPipelineResultHtml(data) {
   if (!data || typeof data !== 'object') {
     return '<p class="pup-result-prose">' + esc(String(data)) + '</p>';
@@ -14270,61 +14560,9 @@ function renderPolicyPipelineResultHtml(data) {
 
   const f4 = data.f4_impacts;
   if (Array.isArray(f4) && f4.length) {
-    parts.push('<div class="pup-result-panel">');
+    parts.push('<div class="pup-result-panel pup-result-panel--impact">');
     parts.push('<h4>Impact analysis</h4>');
-    for (const block of f4) {
-      parts.push('<div class="pup-result-point-card">');
-      parts.push('<div class="pup-result-point-head">' + esc(block.point_id || '') + '</div>');
-      parts.push(
-        '<p class="pup-result-prose" style="margin:0;margin-bottom:10px">' + esc(block.point_text || '') + '</p>'
-      );
-      const impacts = Array.isArray(block.impacts) ? block.impacts : [];
-      if (!impacts.length) parts.push('<p class="pup-result-meta">No impact rows.</p>');
-      for (const imp of impacts) {
-        const sev = pupSeverityClass(imp.severity);
-        parts.push('<div class="pup-result-impact-card ' + sev + '">');
-        parts.push('<div class="pup-result-impact-head">' + esc(imp.policy_title || imp.policy_id || 'Policy') + '</div>');
-        if (imp.impact_summary) {
-          parts.push('<p class="pup-result-prose" style="margin:10px 0 6px">' + esc(imp.impact_summary) + '</p>');
-        }
-        parts.push('<dl class="pup-result-dl">');
-        if (imp.severity) parts.push('<dt>Severity</dt><dd>' + esc(String(imp.severity)) + '</dd>');
-        if (imp.severity_reasoning) parts.push('<dt>Rationale</dt><dd>' + esc(imp.severity_reasoning) + '</dd>');
-        if (typeof imp.requires_amendment === 'boolean') {
-          parts.push('<dt>Requires amendment</dt><dd>' + esc(String(imp.requires_amendment)) + '</dd>');
-        }
-        if (imp.compliance_gap) parts.push('<dt>Compliance gap</dt><dd>' + esc(imp.compliance_gap) + '</dd>');
-        parts.push('</dl>');
-        const amds = Array.isArray(imp.amendments) ? imp.amendments : [];
-        if (amds.length) {
-          parts.push('<p style="margin:12px 0 6px;font-size:11px;font-weight:600;color:#111827">Suggested amendments</p>');
-          parts.push('<ol class="pup-result-amends">');
-          for (const a of amds) {
-            const head = [];
-            if (a.change_type) head.push('[' + a.change_type + ']');
-            if (a.policy_section) head.push(a.policy_section);
-            parts.push('<li><strong>' + esc(head.join(' ').trim()) + '</strong>');
-            if (a.required_change) {
-              parts.push('<div style="margin-top:4px">' + esc(a.required_change) + '</div>');
-            }
-            if (a.current_text_summary) {
-              parts.push('<div style="margin-top:4px;font-size:11px;color:#64748b"><em>Current summary:</em> ' + esc(a.current_text_summary) + '</div>');
-            }
-            parts.push('</li>');
-          }
-          parts.push('</ol>');
-        }
-        if (
-          typeof imp.raw_response === 'string' &&
-          imp.raw_response &&
-          !(imp.severity || imp.impact_summary)
-        ) {
-          parts.push('<pre style="margin-top:10px;font-size:11px;line-height:1.4;background:#fef2f2;padding:8px;border-radius:6px">' + esc(imp.raw_response) + '</pre>');
-        }
-        parts.push('</div>');
-      }
-      parts.push('</div>');
-    }
+    parts.push(pupRenderImpactByPolicyHtml(f4, data));
     parts.push('</div>');
   }
 
