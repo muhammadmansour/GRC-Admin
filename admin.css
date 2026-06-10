@@ -304,6 +304,10 @@
   line-height: 1;
 }
 .notif-badge--running { background: #6366f1; }
+/* `display: flex` above overrides the browser's default [hidden]{display:none},
+   so we must reassert it ourselves — otherwise the red dot stays visible even
+   when JS sets badge.hidden = true. */
+.notif-badge[hidden] { display: none !important; }
 @keyframes notif-badge-pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.2)} }
 .notif-badge--pulse { animation: notif-badge-pulse 0.6s ease 3; }
 
