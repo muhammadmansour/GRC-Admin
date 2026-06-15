@@ -4699,10 +4699,23 @@ async function csUploadToColl(storeId) {
     const file = e.target.files[0];
     if (!file) return;
     try {
-      const formData = new FormData();
-      formData.append('file', file);
       toast('info', 'Uploading...', `Uploading "${file.name}"...`);
-      const res = await fetch(`/api/collections/${storeId}/files`, { method: 'POST', body: formData });
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const s = reader.result || '';
+          const idx = s.indexOf(',');
+          if (idx < 0) reject(new Error('Could not read file'));
+          else resolve(s.slice(idx + 1));
+        };
+        reader.onerror = () => reject(new Error('File read error'));
+        reader.readAsDataURL(file);
+      });
+      const res = await fetch(`/api/collections/${storeId}/files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: file.name, mimeType: file.type || 'application/octet-stream', data: base64 }),
+      });
       const data = await res.json();
       if (data.success) {
         toast('success', 'Uploaded', `"${file.name}" uploaded.`);
@@ -6659,10 +6672,23 @@ async function studioUploadFile(storeId) {
     const file = e.target.files[0];
     if (!file) return;
     try {
-      const formData = new FormData();
-      formData.append('file', file);
       toast('info', 'Uploading...', `Uploading "${file.name}"...`);
-      const res = await fetch(`/api/collections/${storeId}/files`, { method: 'POST', body: formData });
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const s = reader.result || '';
+          const idx = s.indexOf(',');
+          if (idx < 0) reject(new Error('Could not read file'));
+          else resolve(s.slice(idx + 1));
+        };
+        reader.onerror = () => reject(new Error('File read error'));
+        reader.readAsDataURL(file);
+      });
+      const res = await fetch(`/api/collections/${storeId}/files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: file.name, mimeType: file.type || 'application/octet-stream', data: base64 }),
+      });
       const data = await res.json();
       if (data.success) {
         toast('success', 'Uploaded', `"${file.name}" uploaded.`);
