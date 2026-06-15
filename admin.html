@@ -1322,8 +1322,39 @@
             <div id="pcfg-panel-impact" class="pcfg-tab-panel" role="tabpanel" aria-labelledby="pcfg-tab-impact">
               <div class="admin-card lu-panel pcfg-panel">
                 <div class="pcfg-panel-inner">
-                  <p class="pcfg-lead">Use this space to configure impact scales, thresholds, and how pipeline outputs map to your risk or compliance taxonomy.</p>
-                  <p class="pcfg-muted">Wiring to saved settings and the pipeline API will be added here.</p>
+                  <p class="pcfg-lead">Define how each severity level should be interpreted by the AI during impact analysis. These definitions are saved to the database and automatically applied to every pipeline run.</p>
+                  <div id="pcfg-impact-loading" class="lu-loading lu-loading-panel" style="display:none">
+                    <div class="spinner"></div>
+                    <span>Loading…</span>
+                  </div>
+                  <div id="pcfg-impact-form">
+                    <div class="pup-f4-sev-grid">
+                      <div class="pup-f4-sev-field pup-f4-sev-field--critical">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-critical">Critical</label>
+                        <textarea id="pcfg-sev-critical" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as a critical impact…"></textarea>
+                      </div>
+                      <div class="pup-f4-sev-field pup-f4-sev-field--high">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-high">High</label>
+                        <textarea id="pcfg-sev-high" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as a high impact…"></textarea>
+                      </div>
+                      <div class="pup-f4-sev-field pup-f4-sev-field--medium">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-medium">Medium</label>
+                        <textarea id="pcfg-sev-medium" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as a medium impact…"></textarea>
+                      </div>
+                      <div class="pup-f4-sev-field pup-f4-sev-field--low">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-low">Low</label>
+                        <textarea id="pcfg-sev-low" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as a low impact…"></textarea>
+                      </div>
+                      <div class="pup-f4-sev-field pup-f4-sev-field--none pup-f4-sev-field--span2">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-none">None</label>
+                        <textarea id="pcfg-sev-none" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as no impact (optional)…"></textarea>
+                      </div>
+                    </div>
+                    <div class="pcfg-impact-actions">
+                      <button type="button" class="btn-admin-ghost" id="pcfg-impact-fill-suggested">Fill suggested definitions</button>
+                      <button type="button" class="btn-admin-primary" id="pcfg-impact-save">Save</button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

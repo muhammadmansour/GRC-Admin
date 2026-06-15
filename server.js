@@ -592,6 +592,16 @@ try {
   addCol('report_pdf_error',        "TEXT DEFAULT NULL");
 } catch (migErr) { console.warn('pipeline_runs report-pdf migration:', migErr.message); }
 
+// Create pipeline_config table (key-value store for pipeline settings)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pipeline_config (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT ''
+    )
+  `);
+} catch (migErr) { console.warn('pipeline_config table migration:', migErr.message); }
+
 // Migrate org_contexts: add new profile columns if missing
 try {
   const cols = db.pragma('table_info(org_contexts)').map(c => c.name);
@@ -6467,10 +6477,23 @@ const server = http.createServer(async (req, res) => {
         sendJSON(res, 400, { error: 'regulationText is required.' });
         return;
       }
-      const f4SeverityDefinitions =
+      // Use request-provided defs; fall back to DB-stored impact criteria
+      let f4SeverityDefinitions =
         body.f4SeverityDefinitions && typeof body.f4SeverityDefinitions === 'object'
           ? body.f4SeverityDefinitions
           : undefined;
+      if (!f4SeverityDefinitions || !Object.keys(f4SeverityDefinitions).some(k => f4SeverityDefinitions[k])) {
+        try {
+          const dbDefs = {};
+          for (const k of ['critical', 'high', 'medium', 'low', 'none']) {
+            const row = db.prepare('SELECT value FROM pipeline_config WHERE key = ?').get(`f4_sev_${k}`);
+            if (row && row.value) dbDefs[k] = row.value;
+          }
+          if (Object.keys(dbDefs).length) f4SeverityDefinitions = dbDefs;
+        } catch (dbErr) {
+          console.warn('[PolicyUpdatePipeline] Could not load impact criteria from DB:', dbErr.message);
+        }
+      }
       const result = await runPolicyUpdatePipeline({
         apiKey,
         orgContext,
@@ -10132,6 +10155,43 @@ Return a JSON array where each element has "article", "title", and "text" fields
       console.error('Collections API Error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ---- Pipeline Config API ----
+
+  const F4_SEV_KEYS = ['critical', 'high', 'medium', 'low', 'none'];
+
+  // GET /api/pipeline-config/impact-criteria — Return stored severity definitions
+  if (url.pathname === '/api/pipeline-config/impact-criteria' && req.method === 'GET') {
+    try {
+      const out = {};
+      for (const k of F4_SEV_KEYS) {
+        const row = db.prepare('SELECT value FROM pipeline_config WHERE key = ?').get(`f4_sev_${k}`);
+        out[k] = row ? row.value : '';
+      }
+      sendJSON(res, 200, { success: true, data: out });
+    } catch (err) {
+      sendJSON(res, 500, { error: err.message });
+    }
+    return;
+  }
+
+  // POST /api/pipeline-config/impact-criteria — Save severity definitions
+  if (url.pathname === '/api/pipeline-config/impact-criteria' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const upsert = db.prepare(`INSERT INTO pipeline_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+      const saveAll = db.transaction((defs) => {
+        for (const k of F4_SEV_KEYS) {
+          upsert.run(`f4_sev_${k}`, typeof defs[k] === 'string' ? defs[k].trim() : '');
+        }
+      });
+      saveAll(body);
+      sendJSON(res, 200, { success: true });
+    } catch (err) {
+      sendJSON(res, 500, { error: err.message });
     }
     return;
   }

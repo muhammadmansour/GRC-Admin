@@ -10087,6 +10087,7 @@ function showPcfgTab(slug, pushHistory) {
   const orgPanel = document.getElementById('pcfg-panel-default-org');
   if (impactPanel) {
     const show = tab === 'impact';
+    if (show) loadPcfgImpactPanel();
     impactPanel.hidden = !show;
     impactPanel.style.display = show ? '' : 'none';
   }
@@ -10175,6 +10176,78 @@ function onSetPcfgDefaultOrg(id) {
   toast('success', 'Default organisation set', 'This org will be pre-selected in the pipeline.');
 }
 
+const PCFG_IMPACT_KEYS = ['critical', 'high', 'medium', 'low', 'none'];
+let pcfgImpactWired = false;
+
+async function loadPcfgImpactPanel() {
+  const loadEl = document.getElementById('pcfg-impact-loading');
+  const formEl = document.getElementById('pcfg-impact-form');
+  if (loadEl) { loadEl.style.display = 'flex'; }
+  if (formEl) { formEl.style.display = 'none'; }
+  try {
+    const r = await fetch('/api/pipeline-config/impact-criteria');
+    const j = await r.json();
+    if (j.success && j.data) {
+      for (const k of PCFG_IMPACT_KEYS) {
+        const el = document.getElementById(`pcfg-sev-${k}`);
+        if (el) el.value = j.data[k] || '';
+      }
+    }
+  } catch (e) {
+    console.warn('Could not load impact criteria config:', e.message);
+  } finally {
+    if (loadEl) { loadEl.style.display = 'none'; }
+    if (formEl) { formEl.style.display = ''; }
+  }
+}
+
+async function savePcfgImpactPanel() {
+  const saveBtn = document.getElementById('pcfg-impact-save');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+  try {
+    const body = {};
+    for (const k of PCFG_IMPACT_KEYS) {
+      const el = document.getElementById(`pcfg-sev-${k}`);
+      body[k] = el ? el.value.trim() : '';
+    }
+    const r = await fetch('/api/pipeline-config/impact-criteria', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (j.success) {
+      toast('success', 'Saved', 'Impact criteria saved and will be used in all pipeline runs.');
+    } else {
+      throw new Error(j.error || 'Save failed');
+    }
+  } catch (e) {
+    toast('error', 'Save failed', e.message);
+  } finally {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+  }
+}
+
+function wirePcfgImpactPanel() {
+  if (pcfgImpactWired) return;
+  pcfgImpactWired = true;
+
+  const saveBtn = document.getElementById('pcfg-impact-save');
+  if (saveBtn) saveBtn.addEventListener('click', savePcfgImpactPanel);
+
+  const fillBtn = document.getElementById('pcfg-impact-fill-suggested');
+  if (fillBtn) {
+    fillBtn.addEventListener('click', () => {
+      const defs = PUP_SEVERITY_SUGGESTED_DEFINITIONS;
+      for (const k of PCFG_IMPACT_KEYS) {
+        const el = document.getElementById(`pcfg-sev-${k}`);
+        if (el) el.value = defs[k] || '';
+      }
+      toast('info', 'Filled', 'Review and save when ready.');
+    });
+  }
+}
+
 function loadPipelineConfigurationPage() {
   const slug = currentSubId === 'default-org' ? 'default-org' : 'impact';
   showPcfgTab(slug, false);
@@ -10190,6 +10263,9 @@ function loadPipelineConfigurationPage() {
       });
     });
   }
+
+  wirePcfgImpactPanel();
+  if (slug !== 'default-org') loadPcfgImpactPanel();
 }
 
 function loadLegislativeInternalSourcesPage() {
@@ -14193,6 +14269,21 @@ function loadPolicyUpdatePipelinePage() {
   initPupExtractModal();
   refreshPolicyUpdatePipelineOrgDropdown().catch(() => {});
   fetchGrcPolicies().catch(() => {});
+  // Pre-populate severity textareas from DB-stored config (user can still override per-run)
+  fetch('/api/pipeline-config/impact-criteria').then(r => r.json()).then(j => {
+    if (!j.success || !j.data) return;
+    const map = [
+      ['critical', 'pup-f4-sev-critical'],
+      ['high',     'pup-f4-sev-high'],
+      ['medium',   'pup-f4-sev-medium'],
+      ['low',      'pup-f4-sev-low'],
+      ['none',     'pup-f4-sev-none'],
+    ];
+    for (const [key, id] of map) {
+      const el = document.getElementById(id);
+      if (el && j.data[key]) el.value = j.data[key];
+    }
+  }).catch(() => {});
 }
 
 function setPupPipelineLoadingOverlay(visible) {

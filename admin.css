@@ -9383,6 +9383,15 @@ body.pup-pipeline-overlay-open {
   color: #64748b;
 }
 
+/* ── Pipeline config — impact criteria actions row ─────────── */
+.pcfg-impact-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+  justify-content: flex-end;
+}
+
 /* ── Pipeline config — default org list ───────────────────── */
 .pcfg-org-list {
   display: flex;
