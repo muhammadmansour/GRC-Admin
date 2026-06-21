@@ -23,7 +23,7 @@
     "@google/genai": "^1.41.0",
     "better-sqlite3": "^12.6.2",
     "js-yaml": "^4.1.0",
-    "puppeteer": "^25.1.0",
+    "puppeteer": "^24.43.1",
     "xlsx": "^0.18.5"
   }
 }
