@@ -6761,6 +6761,20 @@ Return a JSON array where each element has "article", "title", and "text" fields
       if (!row) { sendJSON(res, 404, { error: 'Run not found.' }); return; }
       const status = row.report_pdf_status || null;
       if (!status) {
+        // Legacy run created before server-side PDF generation existed. Rather
+        // than reporting 'unavailable' forever, generate the PDF on demand from
+        // the stored result and return 'pending' so the client polls for it.
+        let storedResult = null;
+        try { storedResult = JSON.parse(row.result || '{}'); } catch { storedResult = null; }
+        if (storedResult && typeof storedResult === 'object' && Object.keys(storedResult).length) {
+          kickPipelineReportPdfGeneration(row.id, storedResult, {
+            sourceName: row.regulation_snippet || '',
+            generatedAt: row.created_at || new Date().toISOString(),
+          });
+          sendJSON(res, 200, { success: true, status: 'pending', runId: row.id });
+          return;
+        }
+        // Truly nothing to render from — keep the honest 'unavailable' signal.
         sendJSON(res, 200, { success: true, status: 'unavailable', runId: row.id });
         return;
       }
