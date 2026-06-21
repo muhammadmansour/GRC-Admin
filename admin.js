@@ -9658,7 +9658,11 @@ async function findPipelineRunForLuSource(sourceRow) {
     if (byFile) return byFile;
   }
 
-  return runs[0] || null;
+  // No genuine match. Do NOT fall back to runs[0] — that made every source's
+  // report show the same (most-recent) run's data regardless of which source
+  // was clicked. Returning null lets the caller surface an honest
+  // "no report for this source yet" message instead of stale/static data.
+  return null;
 }
 
 async function openLuPipelineSummaryReport(sourceId) {
