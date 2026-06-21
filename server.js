@@ -1353,10 +1353,16 @@ async function getSharedPuppeteerBrowser() {
     } catch (_) { /* fall-through, relaunch */ }
     _puppeteerBrowserPromise = null;
   }
-  _puppeteerBrowserPromise = p.mod.launch({
+  // Allow pointing at a system-installed Chrome (e.g. google-chrome-stable from
+  // apt, which pulls in all required shared libraries). Falls back to the
+  // browser Puppeteer downloaded into its cache when the env var is unset.
+  const launchOpts = {
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none'],
-  });
+  };
+  const execPath = (process.env.PUPPETEER_EXECUTABLE_PATH || '').trim();
+  if (execPath) launchOpts.executablePath = execPath;
+  _puppeteerBrowserPromise = p.mod.launch(launchOpts);
   const b = await _puppeteerBrowserPromise;
   b.on('disconnected', () => { if (_puppeteerBrowserPromise) _puppeteerBrowserPromise = null; });
   return b;
