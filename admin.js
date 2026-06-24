@@ -2,6 +2,145 @@
    WathbaGRC Admin Panel JS
    ============================ */
 
+// ─── Notification Manager ────────────────────────────────────
+const _notifs = []; // [{id, title, message, status:'running'|'success'|'error'|'info', result, createdAt}]
+let _notifOpen = false;
+
+function _notifRender() {
+  const list  = document.getElementById('notif-list');
+  const badge = document.getElementById('notif-badge');
+  const btn   = document.getElementById('notif-bell-btn');
+  if (!list) return;
+
+  const running = _notifs.filter(n => n.status === 'running').length;
+  // Count items the user hasn't acknowledged yet (panel open clears n.unseen).
+  // Running items aren't counted here because they get their own pulsing badge above.
+  const unseen  = _notifs.filter(n => n.unseen === true && n.status !== 'running').length;
+
+  if (badge) {
+    if (running > 0) {
+      badge.hidden = false;
+      badge.textContent = running;
+      badge.className = 'notif-badge notif-badge--running';
+    } else if (unseen > 0) {
+      badge.hidden = false;
+      badge.textContent = unseen;
+      badge.className = 'notif-badge';
+    } else {
+      badge.hidden = true;
+    }
+  }
+  if (btn) btn.classList.toggle('is-running', running > 0);
+
+  if (!_notifs.length) {
+    list.innerHTML = '<div class="notif-empty-msg">No active processes</div>';
+    return;
+  }
+
+  list.innerHTML = _notifs.map(n => {
+    const iconHtml = n.status === 'running'
+      ? `<span class="notif-item-icon notif-icon--running" aria-hidden="true"><span class="notif-spinner"></span></span>`
+      : n.status === 'success'
+        ? `<span class="notif-item-icon notif-icon--success" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`
+        : n.status === 'error'
+          ? `<span class="notif-item-icon notif-icon--error" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>`
+          : `<span class="notif-item-icon notif-icon--info" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.4"/><path d="M6 5.5V8.5M6 3.5v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>`;
+    const timeStr = n.createdAt ? new Date(n.createdAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+    const clickable = n.result && n.status === 'success';
+    return `<div class="notif-item${clickable ? ' notif-item--clickable' : ''}" data-notif-id="${esc(n.id)}"
+        ${clickable ? `onclick="onNotifClick('${esc(n.id)}')"` : ''}>
+      ${iconHtml}
+      <div class="notif-item-body">
+        <div class="notif-item-title">${esc(n.title)}</div>
+        ${n.message ? `<div class="notif-item-msg">${esc(n.message)}</div>` : ''}
+      </div>
+      <div class="notif-item-right">
+        <span class="notif-item-time">${esc(timeStr)}</span>
+        ${n.status !== 'running' ? `<button class="notif-dismiss-btn" onclick="dismissNotif(event,'${esc(n.id)}')" title="Dismiss">×</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function addNotif(id, title, message, status = 'running', result = null) {
+  const existing = _notifs.findIndex(n => n.id === id);
+  const entry = { id, title, message, status, result, createdAt: new Date().toISOString(), unseen: true };
+  if (existing >= 0) _notifs[existing] = { ..._notifs[existing], ...entry };
+  else _notifs.unshift(entry);
+  _notifRender();
+}
+
+function updateNotif(id, updates) {
+  const idx = _notifs.findIndex(n => n.id === id);
+  if (idx < 0) return;
+  // When a notification transitions to a terminal state and the panel is
+  // closed, re-mark it as unseen so the badge counts it (user hasn't seen the
+  // final result yet). If the panel is open, leave unseen=false because the
+  // updated row is already visible.
+  const becameTerminal = updates.status === 'success' || updates.status === 'error';
+  if (becameTerminal) {
+    const panel = document.getElementById('notif-panel');
+    const panelClosed = !panel || panel.hidden;
+    if (panelClosed) updates = { ...updates, unseen: true };
+  }
+  _notifs[idx] = { ..._notifs[idx], ...updates };
+  _notifRender();
+  // _notifRender adds the pulse class via the badge state — apply the
+  // attention-grabbing variant only when a fresh terminal update arrived.
+  if (becameTerminal) {
+    const badge = document.getElementById('notif-badge');
+    if (badge && !badge.hidden) badge.classList.add('notif-badge--pulse');
+  }
+}
+
+function dismissNotif(e, id) {
+  if (e) e.stopPropagation();
+  const idx = _notifs.findIndex(n => n.id === id);
+  if (idx >= 0) _notifs.splice(idx, 1);
+  _notifRender();
+}
+
+function clearDoneNotifications() {
+  for (let i = _notifs.length - 1; i >= 0; i--) {
+    if (_notifs[i].status !== 'running') _notifs.splice(i, 1);
+  }
+  _notifRender();
+}
+
+function onNotifClick(id) {
+  const n = _notifs.find(x => x.id === id);
+  if (n && n.result) {
+    toggleNotifPanel(); // close panel
+    openPolicyPipelineResultModal(n.result);
+  }
+}
+
+function toggleNotifPanel() {
+  const panel = document.getElementById('notif-panel');
+  const btn   = document.getElementById('notif-bell-btn');
+  if (!panel) return;
+  _notifOpen = panel.hidden;
+  panel.hidden = !_notifOpen;
+  if (btn) btn.setAttribute('aria-expanded', String(_notifOpen));
+  if (_notifOpen) {
+    _notifs.forEach(n => { n.unseen = false; });
+    _notifRender();
+    // Close on outside click
+    setTimeout(() => document.addEventListener('click', _notifOutsideClick, { once: true }), 0);
+  }
+}
+
+function _notifOutsideClick(e) {
+  const wrap = document.getElementById('notif-wrap');
+  if (wrap && !wrap.contains(e.target)) {
+    const panel = document.getElementById('notif-panel');
+    if (panel) panel.hidden = true;
+    _notifOpen = false;
+    const btn = document.getElementById('notif-bell-btn');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+}
+
 // ─── Auth Guard ──────────────────────────────────────────────
 (function checkAuth() {
   const hasCookie = document.cookie.split(';').some(c => c.trim().startsWith('wathba_token='));
@@ -99,9 +238,13 @@ const PAGE_NAMES = {
   'org-contexts': 'Organization Contexts',
   'data-studio': 'Data Studio',
   'policy-update-pipeline': 'Policy update pipeline',
+  'pipeline-history': 'Pipeline history',
   'prompts': 'Prompts',
   'file-collections': 'File Collections',
   'workbench': 'Workbench',
+  'legislative-internal-sources': 'Internal sources',
+  'legislative-external-sources': 'External sources',
+  'pipeline-configuration': 'Pipeline configuration',
   'audit-log': 'Audit Log',
 };
 const VALID_PAGES = Object.keys(PAGE_NAMES);
@@ -130,6 +273,17 @@ function navigateTo(page, pushState = true, subId = null) {
   const target = document.querySelector(`.sidebar-item[data-page="${page}"]`);
   if (target) target.classList.add('active');
 
+  if (
+    page === 'legislative-internal-sources' ||
+    page === 'legislative-external-sources' ||
+    page === 'pipeline-configuration'
+  ) {
+    const legSec = document.getElementById('section-legislative-updates');
+    const legToggle = document.querySelector('.sidebar-section-toggle[data-section="legislative-updates"]');
+    if (legSec) legSec.classList.add('open');
+    if (legToggle) legToggle.classList.remove('collapsed');
+  }
+
   // Update pages
   document.querySelectorAll('.admin-page').forEach(p => p.classList.remove('active'));
   const pageEl = document.getElementById('page-' + page);
@@ -153,7 +307,11 @@ function navigateTo(page, pushState = true, subId = null) {
   if (page === 'policy-ingestion') loadPolicyIngestion(subId);
   if (page === 'data-studio') loadDataStudioPage();
   if (page === 'policy-update-pipeline') loadPolicyUpdatePipelinePage();
+  if (page === 'pipeline-history') loadPipelineHistoryPage();
   if (page === 'workbench') loadWorkbench(subId);
+  if (page === 'legislative-internal-sources') loadLegislativeInternalSourcesPage();
+  if (page === 'legislative-external-sources') loadLegislativeExternalSourcesPage();
+  if (page === 'pipeline-configuration') loadPipelineConfigurationPage();
   if (page === 'audit-log') loadAuditLog(subId);
 
   // Scroll to top
@@ -181,8 +339,21 @@ window.addEventListener('popstate', (e) => {
 // Parse page + optional sub-ID from URL pathname
 function parseRoute() {
   const parts = window.location.pathname.replace(/^\//, '').split('/');
-  const page = (parts[0] && VALID_PAGES.includes(parts[0])) ? parts[0] : 'dashboard';
-  const subId = parts[1] || null;
+  const raw = parts[0] || '';
+  let page = 'dashboard';
+  let subId = parts[1] || null;
+
+  if (raw === 'legislative-updates') {
+    page = 'legislative-internal-sources';
+  } else if (raw === 'pipeline-impact-criteria') {
+    page = 'pipeline-configuration';
+    subId = null;
+  } else if (raw === 'pipeline-default-org') {
+    page = 'pipeline-configuration';
+    subId = 'default-org';
+  } else if (raw && VALID_PAGES.includes(raw)) {
+    page = raw;
+  }
   return { page, subId };
 }
 
@@ -1170,6 +1341,7 @@ async function fetchGrcPolicies() {
       id: p.id,
       name: p.name || '',
       refId: p.ref_id || '',
+      description: p.description || p.observation || '',
       category: p.category || '',
       status: p.status || '',
       csfFunction: p.csf_function || '',
@@ -1398,7 +1570,7 @@ let grcRiskScenariosCache = null;
 
 async function fetchGrcRiskScenarios() {
   try {
-    const res = await fetch('/api/grc/risk-scenarios');
+    const res = await fetch('/api/grc/risk-scenarios/');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     grcRiskScenariosCache = (data.results || []).map(r => ({
@@ -4536,10 +4708,23 @@ async function csUploadToColl(storeId) {
     const file = e.target.files[0];
     if (!file) return;
     try {
-      const formData = new FormData();
-      formData.append('file', file);
       toast('info', 'Uploading...', `Uploading "${file.name}"...`);
-      const res = await fetch(`/api/collections/${storeId}/files`, { method: 'POST', body: formData });
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const s = reader.result || '';
+          const idx = s.indexOf(',');
+          if (idx < 0) reject(new Error('Could not read file'));
+          else resolve(s.slice(idx + 1));
+        };
+        reader.onerror = () => reject(new Error('File read error'));
+        reader.readAsDataURL(file);
+      });
+      const res = await fetch(`/api/collections/${storeId}/files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: file.name, mimeType: file.type || 'application/octet-stream', data: base64 }),
+      });
       const data = await res.json();
       if (data.success) {
         toast('success', 'Uploaded', `"${file.name}" uploaded.`);
@@ -6496,10 +6681,23 @@ async function studioUploadFile(storeId) {
     const file = e.target.files[0];
     if (!file) return;
     try {
-      const formData = new FormData();
-      formData.append('file', file);
       toast('info', 'Uploading...', `Uploading "${file.name}"...`);
-      const res = await fetch(`/api/collections/${storeId}/files`, { method: 'POST', body: formData });
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const s = reader.result || '';
+          const idx = s.indexOf(',');
+          if (idx < 0) reject(new Error('Could not read file'));
+          else resolve(s.slice(idx + 1));
+        };
+        reader.onerror = () => reject(new Error('File read error'));
+        reader.readAsDataURL(file);
+      });
+      const res = await fetch(`/api/collections/${storeId}/files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: file.name, mimeType: file.type || 'application/octet-stream', data: base64 }),
+      });
       const data = await res.json();
       if (data.success) {
         toast('success', 'Uploaded', `"${file.name}" uploaded.`);
@@ -9303,6 +9501,796 @@ function wbShowView(view) {
   }
 }
 
+let legislativeInternalPageWired = false;
+/** @type {Array<Record<string, unknown>>} */
+let luInternalSourcesCache = [];
+
+const LU_ICON_DOC =
+  '<svg class="lu-doc-svg" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M14 2v6h6M8 13h8M8 17h5M8 9h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const LU_ICON_REPORT =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M8 17V11M12 17V7M16 17v-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const LU_ICON_EDIT =
+  '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8.84058 2.85709L13.1432 7.15979L4.45285 15.8501H0.150146V11.5474L8.84058 2.85709Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M11.25 1.75L14.25 4.75" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+const LU_ICON_TRASH =
+  '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 4.5h9M6.5 4.5V3.5a1.5 1.5 0 0 1 1.5-1.5h0a1.5 1.5 0 0 1 1.5 1.5v1M12.5 4.5v8.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1V4.5M6.5 7v4M9.5 7v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function luBuildDocPreviewCell(href, fileName) {
+  if (!href)
+    return '<span class="lu-action-preview-placeholder" title="No document available">—</span>';
+  const safeName = fileName ? String(fileName).replace(/"/g, '') : '';
+  const t = safeName ? `Open “${safeName}” in new tab` : 'Open document in new tab';
+  return `<a class="lu-doc-open lu-doc-open--preview lu-action-doc" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(t)}">${LU_ICON_DOC}<span class="visually-hidden">Open document</span></a>`;
+}
+
+function openLuAddModal() {
+  const o = document.getElementById('lu-add-modal-overlay');
+  if (!o) return;
+  document.getElementById('lu-input-name').value = '';
+  document.getElementById('lu-input-description').value = '';
+  document.getElementById('lu-input-file').value = '';
+  const err = document.getElementById('lu-modal-error');
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  o.classList.add('active');
+  o.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLuAddModal() {
+  const o = document.getElementById('lu-add-modal-overlay');
+  if (!o) return;
+  o.classList.remove('active');
+  o.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+  const submit = document.getElementById('lu-add-modal-submit');
+  if (submit) {
+    const btnText = submit.querySelector('.btn-text');
+    const loading = document.getElementById('lu-add-modal-loading');
+    if (btnText) btnText.classList.remove('hidden');
+    if (loading) loading.classList.add('hidden');
+    submit.disabled = false;
+  }
+}
+
+function luFileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = r.result;
+      const i = typeof s === 'string' ? s.indexOf(',') : -1;
+      resolve(i >= 0 ? s.slice(i + 1) : '');
+    };
+    r.onerror = () => reject(new Error('Failed to read file'));
+    r.readAsDataURL(file);
+  });
+}
+
+function openLuEditModal(id) {
+  const row = luInternalSourcesCache.find((s) => s.id === id);
+  const o = document.getElementById('lu-edit-modal-overlay');
+  if (!row || !o) return;
+  document.getElementById('lu-edit-input-id').value = String(row.id);
+  document.getElementById('lu-edit-input-name').value = String(row.name || '');
+  document.getElementById('lu-edit-input-description').value = String(
+    row.description != null ? row.description : '',
+  );
+  const hint = document.getElementById('lu-edit-file-hint');
+  if (hint) hint.textContent = row.original_file_name ? String(row.original_file_name) : '—';
+  const err = document.getElementById('lu-edit-modal-error');
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  o.classList.add('active');
+  o.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLuEditModal() {
+  const o = document.getElementById('lu-edit-modal-overlay');
+  if (!o) return;
+  o.classList.remove('active');
+  o.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+  const submit = document.getElementById('lu-edit-modal-submit');
+  if (submit) {
+    const btnText = submit.querySelector('.btn-text');
+    const loading = document.getElementById('lu-edit-modal-loading');
+    if (btnText) btnText.classList.remove('hidden');
+    if (loading) loading.classList.add('hidden');
+    submit.disabled = false;
+  }
+}
+
+async function luDeleteInternalSource(id) {
+  const row = luInternalSourcesCache.find((s) => s.id === id);
+  const label = row && row.name ? String(row.name) : 'this source';
+  if (!window.confirm(`Delete “${label}”? The file will be removed from storage.`)) return;
+  try {
+    const res = await fetch(
+      `/api/legislative-updates/internal-sources/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+    toast('success', 'Deleted', 'Source removed.');
+    loadLegislativeInternalSourcesList();
+  } catch (e) {
+    toast('error', 'Delete failed', e.message || String(e));
+  }
+}
+
+/** Best-effort match of an internal source → its pipeline run (no DB schema change). */
+async function findPipelineRunForLuSource(sourceRow) {
+  if (!sourceRow) return null;
+  const fileName = String(sourceRow.original_file_name || sourceRow.name || '').trim();
+  const sourceName = String(sourceRow.name || '').trim().toLowerCase();
+
+  const runsRes = await fetch('/api/ai-tools/pipeline-runs');
+  const runsJson = await runsRes.json().catch(() => ({}));
+  if (!runsRes.ok) throw new Error(runsJson.error || runsRes.statusText || 'Could not load pipeline runs');
+  const runs = runsJson.data || [];
+  if (!runs.length) return null;
+
+  let prefix = '';
+  try {
+    const extRes = await fetch('/api/ai-tools/extracted-regulations');
+    const extJson = await extRes.json().catch(() => ({}));
+    if (extRes.ok) {
+      const records = extJson.data || [];
+      const ext = records.find((r) => {
+        const sf = String(r.sourceFile || '').trim().toLowerCase();
+        return fileName && sf && sf === fileName.toLowerCase();
+      });
+      if (ext && Array.isArray(ext.articles) && ext.articles.length) {
+        const first = ext.articles.find((a) => a && String(a.text || '').trim());
+        if (first) prefix = String(first.text).slice(0, 120).trim();
+      }
+    }
+  } catch (_) { /* non-fatal */ }
+
+  if (prefix) {
+    const byText = runs.find((r) => String(r.regulation_text || '').includes(prefix));
+    if (byText) return byText;
+  }
+
+  if (sourceName) {
+    const byName = runs.find((r) => String(r.regulation_snippet || '').toLowerCase().includes(sourceName));
+    if (byName) return byName;
+  }
+
+  if (fileName) {
+    const base = fileName.replace(/\.[^.]+$/, '').toLowerCase();
+    const byFile = runs.find((r) => String(r.regulation_snippet || '').toLowerCase().includes(base));
+    if (byFile) return byFile;
+  }
+
+  // No genuine match. Do NOT fall back to runs[0] — that made every source's
+  // report show the same (most-recent) run's data regardless of which source
+  // was clicked. Returning null lets the caller surface an honest
+  // "no report for this source yet" message instead of stale/static data.
+  return null;
+}
+
+async function openLuPipelineSummaryReport(sourceId) {
+  const row = luInternalSourcesCache.find((s) => String(s.id) === String(sourceId));
+  if (!row) {
+    toast('error', 'Source not found', 'Reload the page and try again.');
+    return;
+  }
+  try {
+    const run = await findPipelineRunForLuSource(row);
+    if (!run) {
+      toast('info', 'No pipeline run yet', 'Upload and process this source first to generate a report.');
+      return;
+    }
+    const detailRes = await fetch(`/api/ai-tools/pipeline-runs/${encodeURIComponent(run.id)}`);
+    const detailJson = await detailRes.json().catch(() => ({}));
+    if (!detailRes.ok) throw new Error(detailJson.error || detailRes.statusText || 'Could not load pipeline run');
+    const payload = detailJson.data && detailJson.data.result ? detailJson.data.result : null;
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Pipeline run has no result payload.');
+    }
+    openPolicyPipelineResultModal(payload, {
+      view: 'summary',
+      meta: {
+        sourceName: row.name || row.original_file_name || 'Internal source',
+        runId: run.id,
+        generatedAt: run.created_at || new Date().toISOString(),
+      },
+    });
+  } catch (e) {
+    toast('error', 'Report unavailable', e.message || String(e));
+  }
+}
+
+function initLegislativeInternalPageListeners() {
+  const addBtn = document.getElementById('lu-add-source-btn');
+  const overlay = document.getElementById('lu-add-modal-overlay');
+  const closeBtn = document.getElementById('lu-add-modal-close');
+  const cancelBtn = document.getElementById('lu-add-modal-cancel');
+  const submitBtn = document.getElementById('lu-add-modal-submit');
+  const editOverlay = document.getElementById('lu-edit-modal-overlay');
+  const editClose = document.getElementById('lu-edit-modal-close');
+  const editCancel = document.getElementById('lu-edit-modal-cancel');
+  const editSubmit = document.getElementById('lu-edit-modal-submit');
+  const tableWrap = document.getElementById('lu-internal-table-wrap');
+
+  if (addBtn) addBtn.addEventListener('click', () => openLuAddModal());
+  if (closeBtn) closeBtn.addEventListener('click', () => closeLuAddModal());
+  if (cancelBtn) cancelBtn.addEventListener('click', () => closeLuAddModal());
+  if (overlay) {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeLuAddModal();
+    });
+  }
+  if (editClose) editClose.addEventListener('click', () => closeLuEditModal());
+  if (editCancel) editCancel.addEventListener('click', () => closeLuEditModal());
+  if (editOverlay) {
+    editOverlay.addEventListener('click', (e) => {
+      if (e.target === editOverlay) closeLuEditModal();
+    });
+  }
+  if (tableWrap && !tableWrap.dataset.luAct) {
+    tableWrap.dataset.luAct = '1';
+    tableWrap.addEventListener('click', (e) => {
+      const editBtn = e.target.closest('[data-lu-edit]');
+      if (editBtn) {
+        openLuEditModal(editBtn.getAttribute('data-lu-edit'));
+        return;
+      }
+      const delBtn = e.target.closest('[data-lu-delete]');
+      if (delBtn) {
+        luDeleteInternalSource(delBtn.getAttribute('data-lu-delete'));
+        return;
+      }
+      const reportBtn = e.target.closest('[data-lu-report]');
+      if (reportBtn) {
+        openLuPipelineSummaryReport(reportBtn.getAttribute('data-lu-report'));
+      }
+    });
+  }
+  if (editSubmit) {
+    editSubmit.addEventListener('click', async () => {
+      const err = document.getElementById('lu-edit-modal-error');
+      const idEl = document.getElementById('lu-edit-input-id');
+      const id = idEl && idEl.value ? idEl.value.trim() : '';
+      const name = document.getElementById('lu-edit-input-name').value.trim();
+      const description = document.getElementById('lu-edit-input-description').value.trim();
+      if (err) {
+        err.style.display = 'none';
+        err.textContent = '';
+      }
+      if (!id) return;
+      if (!name) {
+        if (err) {
+          err.textContent = 'Name is required.';
+          err.style.display = 'block';
+        }
+        return;
+      }
+      const btnText = editSubmit.querySelector('.btn-text');
+      const loading = document.getElementById('lu-edit-modal-loading');
+      if (btnText) btnText.classList.add('hidden');
+      if (loading) loading.classList.remove('hidden');
+      editSubmit.disabled = true;
+      try {
+        const res = await fetch(
+          `/api/legislative-updates/internal-sources/${encodeURIComponent(id)}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, description }),
+          },
+        );
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json.error || res.statusText);
+        closeLuEditModal();
+        toast('success', 'Saved', 'Source updated.');
+        loadLegislativeInternalSourcesList();
+      } catch (e) {
+        if (err) {
+          err.textContent = e.message || String(e);
+          err.style.display = 'block';
+        }
+      } finally {
+        if (btnText) btnText.classList.remove('hidden');
+        if (loading) loading.classList.add('hidden');
+        editSubmit.disabled = false;
+      }
+    });
+  }
+  if (submitBtn) {
+    submitBtn.addEventListener('click', async () => {
+      const err = document.getElementById('lu-modal-error');
+      const name = document.getElementById('lu-input-name').value.trim();
+      const description = document.getElementById('lu-input-description').value.trim();
+      const fileInput = document.getElementById('lu-input-file');
+      const file = fileInput.files && fileInput.files[0];
+      err.style.display = 'none';
+      err.textContent = '';
+      if (!name) {
+        err.textContent = 'Name is required.';
+        err.style.display = 'block';
+        return;
+      }
+      if (!file) {
+        err.textContent = 'Please choose a file.';
+        err.style.display = 'block';
+        return;
+      }
+      const btnText = submitBtn.querySelector('.btn-text');
+      const loading = document.getElementById('lu-add-modal-loading');
+      if (btnText) btnText.classList.add('hidden');
+      if (loading) loading.classList.remove('hidden');
+      submitBtn.disabled = true;
+      try {
+        const data = await luFileToBase64(file);
+        const res = await fetch('/api/legislative-updates/internal-sources', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name,
+            description,
+            fileName: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            data,
+          }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json.error || json.hint || res.statusText);
+        closeLuAddModal();
+        toast('success', 'Uploaded', 'Source saved. Extracting policies…');
+        loadLegislativeInternalSourcesList();
+        // Trigger Gemini policy extraction in the background
+        onPupPolicyFileSelected(file, 'internal-sources');
+      } catch (e) {
+        err.textContent = e.message || String(e);
+        err.style.display = 'block';
+      } finally {
+        if (btnText) btnText.classList.remove('hidden');
+        if (loading) loading.classList.add('hidden');
+        submitBtn.disabled = false;
+      }
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const addO = document.getElementById('lu-add-modal-overlay');
+    if (addO && addO.classList.contains('active')) closeLuAddModal();
+    const editO = document.getElementById('lu-edit-modal-overlay');
+    if (editO && editO.classList.contains('active')) closeLuEditModal();
+  });
+}
+
+// ─── Internal Sources tabs ─────────────────────────────────────────────────
+
+let luIsActiveTab = 'files';
+
+function showLuIsTab(tab) {
+  luIsActiveTab = tab;
+  const tabs = document.querySelectorAll('.lu-is-tab');
+  tabs.forEach(btn => {
+    const on = btn.getAttribute('data-lu-is-tab') === tab;
+    btn.classList.toggle('is-active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  const filesPanel = document.getElementById('lu-is-panel-files');
+  const policiesPanel = document.getElementById('lu-is-panel-policies');
+  if (filesPanel)    { filesPanel.hidden    = tab !== 'files';    }
+  if (policiesPanel) { policiesPanel.hidden = tab !== 'policies'; }
+
+  if (tab === 'policies') loadLuExtractedRegulations();
+}
+
+function initLuIsTabs() {
+  document.querySelectorAll('.lu-is-tab').forEach(btn => {
+    btn.addEventListener('click', () => showLuIsTab(btn.getAttribute('data-lu-is-tab')));
+  });
+}
+
+async function loadLuExtractedRegulations() {
+  const loadEl  = document.getElementById('lu-ep-loading');
+  const emptyEl = document.getElementById('lu-ep-empty');
+  const gridEl  = document.getElementById('lu-ep-grid');
+  const errEl   = document.getElementById('lu-ep-error');
+  if (!gridEl) return;
+
+  if (loadEl)  { loadEl.style.display = 'flex'; }
+  if (emptyEl) { emptyEl.style.display = 'none'; }
+  if (errEl)   { errEl.style.display = 'none'; errEl.textContent = ''; }
+  gridEl.innerHTML = '';
+
+  try {
+    const res  = await fetch('/api/ai-tools/extracted-regulations');
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+
+    if (loadEl) loadEl.style.display = 'none';
+    const records = json.data || [];
+
+    // Update tab badge
+    const totalArticles = records.reduce((s, r) => s + (r.articles ? r.articles.length : 0), 0);
+    const badge = document.getElementById('lu-is-tab-policies-count');
+    if (badge) badge.textContent = totalArticles > 0 ? String(totalArticles) : '';
+
+    if (!records.length) {
+      if (emptyEl) emptyEl.style.display = 'flex';
+      return;
+    }
+
+    // Store raw data for the modal
+    window._luEpRecords = records;
+
+    gridEl.innerHTML = records.map((record, idx) => {
+      const dateStr  = record.createdAt ? new Date(record.createdAt).toLocaleString() : '—';
+      const fileName = record.sourceFile || 'Unknown file';
+      const articles = Array.isArray(record.articles) ? record.articles : [];
+      const articleItems = articles.map((a, ai) => {
+        const uid = `acc-${idx}-${ai}`;
+        return `<div class="lu-acc-item" id="${uid}">
+          <button type="button" class="lu-acc-trigger" onclick="toggleLuAccItem('${uid}')" aria-expanded="false">
+            <span class="lu-ep-article-label">${esc(a.article || '')}</span>
+            <span class="lu-acc-title">${esc(a.title || '')}</span>
+            <svg class="lu-acc-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="lu-acc-body" hidden>
+            <p class="lu-ep-policy-content">${esc(a.text || '')}</p>
+          </div>
+        </div>`;
+      }).join('');
+
+      const groupId = `lu-group-${idx}`;
+      return `<div class="lu-ep-group" id="${groupId}">
+        <button type="button" class="lu-ep-group-header lu-ep-group-toggle" onclick="toggleLuGroup('${groupId}')" aria-expanded="false">
+          <div class="lu-ep-group-icon" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9 1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5L9 1zm0 0v4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="lu-ep-group-meta">
+            <div class="lu-ep-group-file" title="${esc(fileName)}">${esc(fileName)}</div>
+            <div class="lu-ep-group-date">${esc(dateStr)}</div>
+          </div>
+          <span class="lu-ep-group-badge">${articles.length} article${articles.length === 1 ? '' : 's'}</span>
+          <svg class="lu-ep-group-chevron" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 5l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="lu-ep-group-body" hidden>
+          <div class="lu-acc-list">${articleItems || '<p style="padding:12px 16px;font-size:12px;color:#94a3b8">No articles in this extraction.</p>'}</div>
+          <div class="lu-ep-group-actions">
+            <button class="lu-ep-raw-btn" onclick="openLuRawModal(${idx})">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M5 3L1 8l4 5M11 3l4 5-4 5M9 2l-2 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Raw data
+            </button>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+    // Wire raw data modal close on overlay click
+    const rawOverlay = document.getElementById('lu-raw-modal-overlay');
+    if (rawOverlay) {
+      rawOverlay.onclick = e => { if (e.target === rawOverlay) closeLuRawModal(); };
+    }
+
+  } catch (e) {
+    if (loadEl)  loadEl.style.display  = 'none';
+    if (errEl)   { errEl.textContent = e.message || String(e); errEl.style.display = 'block'; }
+  }
+}
+
+function toggleLuGroup(groupId) {
+  const group = document.getElementById(groupId);
+  if (!group) return;
+  const btn  = group.querySelector('.lu-ep-group-toggle');
+  const body = group.querySelector('.lu-ep-group-body');
+  const open = btn.getAttribute('aria-expanded') === 'true';
+  btn.setAttribute('aria-expanded', String(!open));
+  body.hidden = open;
+  group.classList.toggle('is-open', !open);
+}
+
+function toggleLuAccItem(uid) {
+  const item    = document.getElementById(uid);
+  if (!item) return;
+  const trigger = item.querySelector('.lu-acc-trigger');
+  const body    = item.querySelector('.lu-acc-body');
+  const open    = trigger.getAttribute('aria-expanded') === 'true';
+  trigger.setAttribute('aria-expanded', String(!open));
+  body.hidden = open;
+  item.classList.toggle('is-open', !open);
+}
+
+function openLuRawModal(idx) {
+  const records = window._luEpRecords || [];
+  const record  = records[idx];
+  if (!record) return;
+  const overlay = document.getElementById('lu-raw-modal-overlay');
+  const pre     = document.getElementById('lu-raw-modal-pre');
+  const title   = document.getElementById('lu-raw-modal-title');
+  if (!overlay || !pre) return;
+  if (title) title.textContent = record.sourceFile || 'Raw extracted regulation';
+  pre.textContent = JSON.stringify(record.articles || record.policies, null, 2);
+  overlay.classList.add('active');
+}
+
+function closeLuRawModal() {
+  const overlay = document.getElementById('lu-raw-modal-overlay');
+  if (overlay) overlay.classList.remove('active');
+}
+
+async function loadLegislativeInternalSourcesList() {
+  const loadEl = document.getElementById('lu-internal-loading');
+  const emptyEl = document.getElementById('lu-internal-empty');
+  const wrap = document.getElementById('lu-internal-table-wrap');
+  const tbody = document.getElementById('lu-internal-tbody');
+  const errEl = document.getElementById('lu-internal-error');
+  if (!loadEl || !tbody) return;
+  if (errEl) {
+    errEl.style.display = 'none';
+    errEl.textContent = '';
+  }
+  loadEl.style.display = 'flex';
+  if (emptyEl) emptyEl.style.display = 'none';
+  if (wrap) wrap.style.display = 'none';
+  tbody.innerHTML = '';
+  try {
+    const res = await fetch('/api/legislative-updates/internal-sources');
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+    loadEl.style.display = 'none';
+    const sources = json.sources || [];
+    luInternalSourcesCache = sources;
+    const filesBadge = document.getElementById('lu-is-tab-files-count');
+    if (filesBadge) filesBadge.textContent = sources.length > 0 ? String(sources.length) : '';
+    if (!sources.length) {
+      if (emptyEl) {
+        emptyEl.style.display = 'flex';
+      }
+      return;
+    }
+    if (emptyEl) emptyEl.style.display = 'none';
+    if (wrap) wrap.style.display = 'block';
+    tbody.innerHTML = sources
+      .map((s) => {
+        const dateStr = s.created_at ? new Date(s.created_at).toLocaleString() : '—';
+        const href = s.download_url ? String(s.download_url) : '';
+        const sid = escapeHtml(String(s.id));
+        const fname = s.original_file_name ? String(s.original_file_name) : '';
+        return `<tr class="lu-data-row" data-lu-id="${sid}">
+        <td class="lu-col-name"><span class="lu-cell-name">${escapeHtml(s.name)}</span></td>
+        <td class="lu-desc lu-col-desc">${escapeHtml(s.description || '') || '<span class="lu-desc-empty">—</span>'}</td>
+        <td class="lu-col-user lu-cell-muted">${escapeHtml(s.uploaded_by || '—')}</td>
+        <td class="lu-col-date lu-cell-muted">${escapeHtml(dateStr)}</td>
+        <td class="lu-col-actions"><div class="lu-row-actions">
+          <button type="button" class="lu-icon-btn" data-lu-edit="${sid}" aria-label="Edit source">${LU_ICON_EDIT}</button>
+          <button type="button" class="lu-icon-btn lu-icon-btn--danger" data-lu-delete="${sid}" aria-label="Delete source">${LU_ICON_TRASH}</button>
+          <button type="button" class="lu-icon-btn lu-icon-btn--report" data-lu-report="${sid}" aria-label="View relevance report" title="Relevance report">${LU_ICON_REPORT}</button>
+          ${luBuildDocPreviewCell(href, fname)}
+        </div></td>
+      </tr>`;
+      })
+      .join('');
+  } catch (e) {
+    loadEl.style.display = 'none';
+    luInternalSourcesCache = [];
+    if (errEl) {
+      errEl.textContent = e.message || String(e);
+      errEl.style.display = 'block';
+    }
+  }
+}
+
+function loadLegislativeExternalSourcesPage() {
+  /* Static placeholder until connectors ship */
+}
+
+let pcfgTabsWired = false;
+
+function showPcfgTab(slug, pushHistory) {
+  const tab = slug === 'default-org' ? 'default-org' : 'impact';
+  const pageRoot = document.getElementById('page-pipeline-configuration');
+  if (!pageRoot) return;
+  pageRoot.querySelectorAll('[data-pcfg-tab]').forEach((btn) => {
+    const on = btn.getAttribute('data-pcfg-tab') === tab;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  const impactPanel = document.getElementById('pcfg-panel-impact');
+  const orgPanel = document.getElementById('pcfg-panel-default-org');
+  if (impactPanel) {
+    const show = tab === 'impact';
+    if (show) loadPcfgImpactPanel();
+    impactPanel.hidden = !show;
+    impactPanel.style.display = show ? '' : 'none';
+  }
+  if (orgPanel) {
+    const show = tab === 'default-org';
+    orgPanel.hidden = !show;
+    orgPanel.style.display = show ? '' : 'none';
+    if (show) loadPcfgDefaultOrgPanel();
+  }
+  if (pushHistory && currentPage === 'pipeline-configuration') {
+    if (tab === 'default-org') updateRoute('pipeline-configuration', 'default-org');
+    else updateRoute('pipeline-configuration', null);
+  }
+}
+
+const PCFG_DEFAULT_ORG_KEY = 'wathba_default_pipeline_org';
+
+function getPcfgDefaultOrgId() {
+  try { return localStorage.getItem(PCFG_DEFAULT_ORG_KEY) || ''; } catch { return ''; }
+}
+
+function setPcfgDefaultOrgId(id) {
+  try {
+    if (id) localStorage.setItem(PCFG_DEFAULT_ORG_KEY, id);
+    else localStorage.removeItem(PCFG_DEFAULT_ORG_KEY);
+  } catch { /* ignore */ }
+}
+
+async function loadPcfgDefaultOrgPanel() {
+  const listEl   = document.getElementById('pcfg-org-list');
+  const loadEl   = document.getElementById('pcfg-org-loading');
+  const emptyEl  = document.getElementById('pcfg-org-empty');
+  if (!listEl) return;
+
+  if (loadEl)  { loadEl.style.display = 'flex'; }
+  if (emptyEl) { emptyEl.style.display = 'none'; }
+  listEl.innerHTML = '';
+
+  let orgs = [];
+  try {
+    const d = await fetchJSON(API.orgContexts);
+    orgs = Array.isArray(d.contexts) ? d.contexts : [];
+  } catch (e) {
+    if (loadEl) loadEl.style.display = 'none';
+    listEl.innerHTML = `<p style="color:#ef4444;font-size:13px">Failed to load organisations: ${esc(e.message)}</p>`;
+    return;
+  }
+
+  if (loadEl) loadEl.style.display = 'none';
+
+  if (!orgs.length) {
+    if (emptyEl) emptyEl.style.display = 'flex';
+    return;
+  }
+
+  const currentDefault = getPcfgDefaultOrgId();
+
+  listEl.innerHTML = orgs.map(org => {
+    const id      = String(org.id || '');
+    const name    = org.nameEn || org.name || 'Untitled';
+    const sector  = org.sector || org.sectorCustom || '';
+    const country = org.country || org.geographic_scope || '';
+    const isDefault = id && id === currentDefault;
+    const initials = name.split(' ').slice(0, 2).map(w => w[0] || '').join('').toUpperCase() || '?';
+
+    return `<div class="pcfg-org-card${isDefault ? ' is-default' : ''}" data-org-id="${esc(id)}">
+      <div class="pcfg-org-avatar">${esc(initials)}</div>
+      <div class="pcfg-org-info">
+        <div class="pcfg-org-name">${esc(name)}</div>
+        ${sector || country ? `<div class="pcfg-org-meta">${[sector, country].filter(Boolean).map(esc).join(' · ')}</div>` : ''}
+      </div>
+      ${isDefault
+        ? `<span class="pcfg-org-badge-default">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Default
+          </span>`
+        : `<button class="pcfg-org-set-default-btn" onclick="onSetPcfgDefaultOrg('${esc(id)}')">Set as default</button>`
+      }
+    </div>`;
+  }).join('');
+}
+
+function onSetPcfgDefaultOrg(id) {
+  setPcfgDefaultOrgId(id);
+  loadPcfgDefaultOrgPanel();
+  toast('success', 'Default organisation set', 'This org will be pre-selected in the pipeline.');
+}
+
+const PCFG_IMPACT_KEYS = ['critical', 'high', 'medium', 'low', 'none'];
+let pcfgImpactWired = false;
+
+async function loadPcfgImpactPanel() {
+  const loadEl = document.getElementById('pcfg-impact-loading');
+  const formEl = document.getElementById('pcfg-impact-form');
+  if (loadEl) { loadEl.style.display = 'flex'; }
+  if (formEl) { formEl.style.display = 'none'; }
+  try {
+    const r = await fetch('/api/pipeline-config/impact-criteria');
+    const j = await r.json();
+    if (j.success && j.data) {
+      for (const k of PCFG_IMPACT_KEYS) {
+        const el = document.getElementById(`pcfg-sev-${k}`);
+        if (el) el.value = j.data[k] || '';
+      }
+    }
+  } catch (e) {
+    console.warn('Could not load impact criteria config:', e.message);
+  } finally {
+    if (loadEl) { loadEl.style.display = 'none'; }
+    if (formEl) { formEl.style.display = ''; }
+  }
+}
+
+async function savePcfgImpactPanel() {
+  const saveBtn = document.getElementById('pcfg-impact-save');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+  try {
+    const body = {};
+    for (const k of PCFG_IMPACT_KEYS) {
+      const el = document.getElementById(`pcfg-sev-${k}`);
+      body[k] = el ? el.value.trim() : '';
+    }
+    const r = await fetch('/api/pipeline-config/impact-criteria', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (j.success) {
+      toast('success', 'Saved', 'Impact criteria saved and will be used in all pipeline runs.');
+    } else {
+      throw new Error(j.error || 'Save failed');
+    }
+  } catch (e) {
+    toast('error', 'Save failed', e.message);
+  } finally {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+  }
+}
+
+function wirePcfgImpactPanel() {
+  if (pcfgImpactWired) return;
+  pcfgImpactWired = true;
+
+  const saveBtn = document.getElementById('pcfg-impact-save');
+  if (saveBtn) saveBtn.addEventListener('click', savePcfgImpactPanel);
+
+  const fillBtn = document.getElementById('pcfg-impact-fill-suggested');
+  if (fillBtn) {
+    fillBtn.addEventListener('click', () => {
+      const defs = PUP_SEVERITY_SUGGESTED_DEFINITIONS;
+      for (const k of PCFG_IMPACT_KEYS) {
+        const el = document.getElementById(`pcfg-sev-${k}`);
+        if (el) el.value = defs[k] || '';
+      }
+      toast('info', 'Filled', 'Review and save when ready.');
+    });
+  }
+}
+
+function loadPipelineConfigurationPage() {
+  const slug = currentSubId === 'default-org' ? 'default-org' : 'impact';
+  showPcfgTab(slug, false);
+
+  const pageRoot = document.getElementById('page-pipeline-configuration');
+  if (!pageRoot) return;
+  if (!pcfgTabsWired) {
+    pcfgTabsWired = true;
+    pageRoot.querySelectorAll('[data-pcfg-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const t = btn.getAttribute('data-pcfg-tab');
+        showPcfgTab(t === 'default-org' ? 'default-org' : 'impact', true);
+      });
+    });
+  }
+
+  wirePcfgImpactPanel();
+  if (slug !== 'default-org') loadPcfgImpactPanel();
+}
+
+function loadLegislativeInternalSourcesPage() {
+  if (!legislativeInternalPageWired) {
+    legislativeInternalPageWired = true;
+    initLegislativeInternalPageListeners();
+    initLuIsTabs();
+  }
+  showLuIsTab('files');
+  loadLegislativeInternalSourcesList();
+}
+
 async function loadWorkbench(subId) {
   if (subId) {
     await loadWorkbenchDetail(subId);
@@ -11498,11 +12486,20 @@ document.getElementById('al-ca-search').addEventListener('input', (e) => {
 const DATA_STUDIO_CA_STORAGE_KEY = 'ds_data_studio_compliance_assessment_uuid';
 
 let dataStudioUploadWired = false;
+/** Policies pane (Data Studio): Excel → POST /api/policies/ */
+let dataStudioPolicyUploadWired = false;
+let dataStudioPolicyLastFile = null;
+/** Hub cards switching applied / policies / risk-scenarios panes */
+let dataStudioHubWired = false;
 let policyUpdatePipelineWired = false;
 /** Cached list for Policy update pipeline org dropdown (from GET /api/org-contexts) */
 let pupOrgContextsCache = [];
 let policyUpdatePipelineLastRaw = null;
+/** @type {{ sourceName?: string, runId?: string, generatedAt?: string }|null} */
+let policyUpdatePipelineLastMeta = null;
 let policyUpdatePipelineResultModalWired = false;
+/** Active fetch: abort to cancel in-flight policy pipeline run from the UI */
+let pupPipelineAbortController = null;
 /** Policy update pipeline wizard: 0 organisation, 1 regulation, 2 policies */
 let pupStepperIndex = 0;
 const PUP_PIPELINE_LAST_STEP = 2;
@@ -11525,32 +12522,580 @@ function persistDataStudioAuditUuid(uuid) {
   } catch (_) { /* ignore */ }
 }
 
+const DATA_STUDIO_VALID_PANES = new Set(['applied', 'policies', 'risk-scenarios']);
+
+function dataStudioPaneFromHash() {
+  const h = (typeof location !== 'undefined' ? location.hash || '' : '')
+    .replace(/^#/, '')
+    .trim()
+    .toLowerCase();
+  if (h === 'policies') return 'policies';
+  if (h === 'risk-scenarios') return 'risk-scenarios';
+  return 'applied';
+}
+
+/** Switch Data Studio area; updates URL (/data-studio or /data-studio#…) when syncUrl is true. */
+function setDataStudioPane(slug, opts) {
+  opts = opts || {};
+  const syncUrl = opts.syncUrl !== false;
+  const pane = DATA_STUDIO_VALID_PANES.has(slug) ? slug : 'applied';
+
+  document.querySelectorAll('#page-data-studio .ds-hub-card').forEach(btn => {
+    const id = btn.getAttribute('data-ds-pane');
+    const active = id === pane;
+    btn.classList.toggle('is-active', active);
+    if (active) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
+  });
+
+  document.querySelectorAll('#page-data-studio .ds-pane').forEach(el => {
+    const id = el.getAttribute('data-ds-pane');
+    const active = id === pane;
+    el.classList.toggle('ds-pane-active', active);
+    el.setAttribute('aria-hidden', active ? 'false' : 'true');
+  });
+
+  if (syncUrl && currentPage === 'data-studio' && window.location.pathname === '/data-studio') {
+    const desired = pane === 'applied' ? '/data-studio' : `/data-studio#${pane}`;
+    const current = `${window.location.pathname}${window.location.hash || ''}`;
+    if (current !== desired) {
+      history.replaceState({ page: 'data-studio', subId: null }, '', desired);
+    }
+  }
+
+  if (pane === 'risk-scenarios') {
+    ensureRiskStudioLoaded();
+  }
+}
+window.setDataStudioPane = setDataStudioPane;
+
+function syncDataStudioPaneFromHash() {
+  setDataStudioPane(dataStudioPaneFromHash(), { syncUrl: false });
+}
+
+const RISK_STUDIO_ASSESSMENT_KEY = 'ds_risk_studio_last_assessment_uuid';
+let riskStudioPanelWired = false;
+let riskStudioStepperWired = false;
+/** Data Studio risk wizard: 0 matrix, 1 folder/perimeter seed, 2 assessment POST, 3 scenarios */
+let drsStepperIndex = 0;
+const DRS_RISK_STUDIO_LAST_STEP = 3;
+let dataStudioRiskScenarioLastFile = null;
+let dataStudioRiskScenarioUploadWired = false;
+let drsWizardBusy = false;
+
+function setRiskStudioWizardBusy(on) {
+  drsWizardBusy = !!on;
+  syncDataRiskStudioStepperDOM();
+}
+
+function syncDataRiskStudioStepperDOM() {
+  const root = document.getElementById('ds-pane-risk-scenarios');
+  if (!root) return;
+  const idx = drsStepperIndex;
+  const total = DRS_RISK_STUDIO_LAST_STEP + 1;
+  root.querySelectorAll('.drs-step-panel').forEach(panel => {
+    const i = Number.parseInt(panel.getAttribute('data-drs-step-index'), 10);
+    if (Number.isNaN(i)) return;
+    const on = i === idx;
+    if (on) {
+      panel.removeAttribute('hidden');
+      panel.hidden = false;
+    } else {
+      panel.setAttribute('hidden', '');
+      panel.hidden = true;
+    }
+  });
+
+  root.querySelectorAll('[data-drs-step-label]').forEach(label => {
+    const i = Number.parseInt(label.getAttribute('data-drs-step-label'), 10);
+    if (Number.isNaN(i)) return;
+    label.classList.toggle('is-active', i === idx);
+    label.classList.toggle('is-done', i < idx);
+    if (i === idx) label.setAttribute('aria-current', 'step');
+    else label.removeAttribute('aria-current');
+  });
+
+  const fill = document.getElementById('drs-stepper-progress-fill');
+  if (fill) fill.style.width = `${((idx + 1) / total) * 100}%`;
+
+  const back = document.getElementById('drs-step-back');
+  const next = document.getElementById('drs-step-next');
+  const statusEl = document.getElementById('drs-step-status');
+  if (back) back.disabled = idx === 0 || drsWizardBusy;
+  if (next) {
+    const last = idx >= DRS_RISK_STUDIO_LAST_STEP;
+    next.hidden = last;
+    next.setAttribute('aria-hidden', last ? 'true' : 'false');
+    if (!last) {
+      next.disabled = drsWizardBusy;
+      next.textContent = idx === 2 ? 'Create assessment & continue' : 'Next step';
+    }
+  }
+  if (statusEl) statusEl.textContent = `Step ${idx + 1} of ${total}`;
+}
+
+function drsRiskStepperGo(delta) {
+  drsStepperIndex = Math.max(0, Math.min(DRS_RISK_STUDIO_LAST_STEP, drsStepperIndex + delta));
+  syncDataRiskStudioStepperDOM();
+}
+
+function drsRiskStepperBack() {
+  if (drsWizardBusy) return;
+  drsRiskStepperGo(-1);
+}
+
+function drsRiskStepperNext() {
+  if (drsStepperIndex >= DRS_RISK_STUDIO_LAST_STEP || drsWizardBusy) return;
+  if (drsStepperIndex === 0) {
+    const risk_matrix = document.getElementById('dsr-matrix-select')?.value?.trim();
+    if (!risk_matrix) {
+      toast('error', 'Risk matrix', 'Reload the matrix list and choose one — or create a matrix — before continuing.');
+      return;
+    }
+    drsRiskStepperGo(1);
+    return;
+  }
+  if (drsStepperIndex === 1) {
+    const folder = document.getElementById('dsr-folder-select')?.value?.trim();
+    if (!folder) {
+      toast('error', 'Folder', 'Reload folders if needed and choose one before continuing.');
+      return;
+    }
+    void (async () => {
+      setRiskStudioWizardBusy(true);
+      try {
+        await loadRiskStudioPerimetersForFolder();
+        drsRiskStepperGo(1);
+      } finally {
+        setRiskStudioWizardBusy(false);
+      }
+    })();
+    return;
+  }
+  if (drsStepperIndex === 2) {
+    void (async () => {
+      setRiskStudioWizardBusy(true);
+      try {
+        const ok = await runRiskStudioCreateAssessment();
+        if (ok) drsRiskStepperGo(1);
+      } finally {
+        setRiskStudioWizardBusy(false);
+      }
+    })();
+    return;
+  }
+}
+
+function initDataRiskStudioStepper() {
+  if (riskStudioStepperWired) return;
+  const back = document.getElementById('drs-step-back');
+  const next = document.getElementById('drs-step-next');
+  if (!back || !next) return;
+  riskStudioStepperWired = true;
+  back.addEventListener('click', () => drsRiskStepperBack());
+  next.addEventListener('click', () => drsRiskStepperNext());
+  drsStepperIndex = 0;
+  syncDataRiskStudioStepperDOM();
+}
+
+function initRiskStudioPanel() {
+  if (riskStudioPanelWired) return;
+  const root = document.getElementById('ds-pane-risk-scenarios');
+  if (!root) return;
+  riskStudioPanelWired = true;
+  initDataRiskStudioStepper();
+  document.getElementById('dsr-btn-reload-matrices-only')?.addEventListener('click', () => loadRiskStudioMatrices().catch(() => {}));
+  document.getElementById('dsr-btn-reload-risk-folders')?.addEventListener('click', () =>
+    refreshDataStudioFolderSelects().catch(() => {}),
+  );
+  document.getElementById('dsr-btn-create-matrix')?.addEventListener('click', () => runRiskStudioUploadRiskMatrixLibraryYaml());
+  document.getElementById('dsm-file-risk-yaml')?.addEventListener('change', syncRiskStudioRiskYamlLabel);
+  document.getElementById('dsm-file-risk-yaml-browse')?.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    document.getElementById('dsm-file-risk-yaml')?.click();
+  });
+  document.getElementById('dsm-file-risk-yaml')?.closest('.ds-upload-field')?.querySelector('.ds-upload-bar')?.addEventListener('click', e => {
+    if ((e.target).closest('.ds-upload-browse')) return;
+    e.preventDefault();
+    document.getElementById('dsm-file-risk-yaml')?.click();
+  });
+  document.getElementById('dsr-folder-select')?.addEventListener('change', () => loadRiskStudioPerimetersForFolder().catch(() => {}));
+  document.getElementById('dsr-btn-create-perimeter')?.addEventListener('click', () => runRiskStudioCreatePerimeter());
+  document.getElementById('dsr-btn-create-scenario')?.addEventListener('click', () => runRiskStudioCreateScenario());
+  document.getElementById('dsr-btn-action-plan')?.addEventListener('click', () => runRiskStudioActionPlan());
+}
+
+function restoreRiskStudioAssessmentField() {
+  const el = document.getElementById('dsr-assessment-uuid');
+  if (!el || el.value.trim()) return;
+  try {
+    const s = localStorage.getItem(RISK_STUDIO_ASSESSMENT_KEY);
+    if (s) el.value = s;
+  } catch (_) { /* ignore */ }
+}
+
+function persistRiskStudioAssessment(uuid) {
+  const v = String(uuid || '').trim();
+  if (!v) return;
+  try {
+    localStorage.setItem(RISK_STUDIO_ASSESSMENT_KEY, v);
+  } catch (_) { /* ignore */ }
+}
+
+async function loadRiskStudioPrereqs() {
+  initRiskStudioPanel();
+  await loadRiskStudioMatrices();
+  await refreshDataStudioFolderSelects();
+  await loadRiskStudioPerimetersForFolder();
+  restoreRiskStudioAssessmentField();
+}
+
+function syncRiskStudioRiskYamlLabel() {
+  const fileInput = document.getElementById('dsm-file-risk-yaml');
+  const label = document.getElementById('dsm-matrix-yaml-label');
+  const f = fileInput?.files?.[0];
+  if (!label) return;
+  if (f) {
+    label.textContent = f.name;
+    label.classList.remove('is-empty');
+  } else {
+    label.textContent = 'No file selected';
+    label.classList.add('is-empty');
+  }
+}
+
+/** POST /api/stored-libraries/upload/ via JSON body relay (multipart built on server) — same flow as Libraries YAML modal. */
+async function runRiskStudioUploadRiskMatrixLibraryYaml() {
+  const fileInput = document.getElementById('dsm-file-risk-yaml');
+  const file = fileInput?.files?.[0];
+  const logEl = document.getElementById('dsr-log');
+  const btn = document.getElementById('dsr-btn-create-matrix');
+
+  if (!file) {
+    toast('error', 'Risk matrix library', 'Choose a .yaml risk-matrix stored library file (see template).');
+    return;
+  }
+  const lower = String(file.name || '').toLowerCase();
+  if (!lower.endsWith('.yaml') && !lower.endsWith('.yml')) {
+    toast('error', 'Risk matrix library', 'Use a .yaml or .yml file.');
+    return;
+  }
+
+  let yaml;
+  try {
+    yaml = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      reader.onerror = () => reject(new Error('Could not read file.'));
+      reader.readAsText(file, 'UTF-8');
+    });
+  } catch (e) {
+    toast('error', 'Risk matrix library', e.message || 'Read failed.');
+    return;
+  }
+  if (!String(yaml || '').trim()) {
+    toast('error', 'Risk matrix library', 'File is empty.');
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/data-studio/upload-risk-matrix-library-yaml', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ fileName: file.name, yaml }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.success === false) throw new Error(j.error || j.detail || r.statusText || 'Upload failed');
+
+    const res = j.result || {};
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(res, null, 2);
+    }
+    toast(
+      'success',
+      'Library uploaded',
+      'Stored library uploaded and loaded — use Reload risk matrices, then choose a matrix.',
+    );
+    if (fileInput) fileInput.value = '';
+    syncRiskStudioRiskYamlLabel();
+    await loadRiskStudioMatrices();
+  } catch (e) {
+    toast('error', 'Risk matrix library', e.message || '');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function loadRiskStudioPerimetersForFolder() {
+  const folderSel = document.getElementById('dsr-folder-select');
+  const perSel = document.getElementById('dsr-perimeter-select');
+  if (!folderSel || !perSel) return;
+  const folder = folderSel.value;
+  perSel.innerHTML = '<option value="">Loading…</option>';
+  try {
+    let q = 'page_size=200';
+    if (folder) q += `&folder=${encodeURIComponent(folder)}`;
+    const r = await fetch(`/api/grc/perimeters/?${q}`, { credentials: 'same-origin' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Perimeters request failed');
+    const list = Array.isArray(j.results) ? j.results : [];
+    perSel.innerHTML = '<option value="">— Choose perimeter —</option>' +
+      list.map(p => {
+        const id = p.id || p.uuid;
+        const label = p.name || p.ref_id || id;
+        return `<option value="${esc(id)}">${esc(label)}</option>`;
+      }).join('');
+    if (list.length === 1) {
+      const onlyId = list[0].id || list[0].uuid;
+      if (onlyId) perSel.value = onlyId;
+    }
+  } catch (e) {
+    perSel.innerHTML = `<option value="">${esc(e.message)}</option>`;
+  }
+}
+
+async function loadRiskStudioMatrices() {
+  const sel = document.getElementById('dsr-matrix-select');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const r = await fetch('/api/grc/risk-matrices/?page_size=200', { credentials: 'same-origin' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Risk matrices request failed');
+    const list = Array.isArray(j.results) ? j.results : [];
+    const enabled = list.filter(m => m.is_enabled !== false);
+    const use = enabled.length ? enabled : list;
+    sel.innerHTML = '<option value="">— Choose risk matrix —</option>' +
+      use.map(m => {
+        const id = m.id || m.uuid;
+        const label = m.name || m.ref_id || id;
+        return `<option value="${esc(id)}">${esc(label)}${m.is_enabled === false ? ' (disabled)' : ''}</option>`;
+      }).join('');
+    if (prev && use.some(m => String(m.id || m.uuid) === String(prev))) {
+      sel.value = prev;
+    } else if (!prev && use.length === 1) {
+      const onlyId = use[0].id || use[0].uuid;
+      if (onlyId) sel.value = onlyId;
+    }
+  } catch (e) {
+    sel.innerHTML = `<option value="">${esc(e.message)}</option>`;
+  }
+}
+
+async function runRiskStudioCreatePerimeter() {
+  const name = document.getElementById('dsr-perimeter-name')?.value?.trim();
+  const folder = document.getElementById('dsr-folder-select')?.value;
+  const logEl = document.getElementById('dsr-log');
+  if (!name || !folder) {
+    toast('error', 'Perimeter', 'Enter a name and choose a folder.');
+    return;
+  }
+  if (name.includes('/')) {
+    toast('error', 'Perimeter', 'Name must not contain /.');
+    return;
+  }
+  try {
+    const r = await fetch('/api/grc/perimeters/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ name, folder }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.success === false) throw new Error(j.error || j.detail || r.statusText || 'Create failed');
+    const res = j.result || j;
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(res, null, 2);
+    }
+    toast('success', 'Perimeter created', res.name || '');
+    await loadRiskStudioPerimetersForFolder();
+    const id = res.id || res.uuid;
+    const perSel = document.getElementById('dsr-perimeter-select');
+    if (perSel && id) perSel.value = id;
+    document.getElementById('dsr-perimeter-name').value = '';
+  } catch (e) {
+    toast('error', 'Perimeter', e.message || '');
+  }
+}
+
+async function runRiskStudioCreateAssessment() {
+  const name = document.getElementById('dsr-ra-name')?.value?.trim();
+  const perimeter = document.getElementById('dsr-perimeter-select')?.value;
+  const risk_matrix = document.getElementById('dsr-matrix-select')?.value;
+  const description = document.getElementById('dsr-ra-description')?.value?.trim();
+  const ref_id = document.getElementById('dsr-ra-ref-id')?.value?.trim();
+  const logEl = document.getElementById('dsr-log');
+  if (!String(perimeter || '').trim()) {
+    toast(
+      'error',
+      'Risk assessment',
+      'Choose a perimeter. If the list is empty, go back to step 2 (Folder & perimeter), pick or create a perimeter, then use Next to refresh the list.',
+    );
+    return false;
+  }
+  if (!String(risk_matrix || '').trim()) {
+    toast(
+      'error',
+      'Risk assessment',
+      'Risk matrix missing — return to step 1 (Risk matrix), reload the list, and select one.',
+    );
+    return false;
+  }
+  if (!name) {
+    toast('error', 'Risk assessment', 'Enter an assessment name.');
+    return false;
+  }
+  const body = { name, perimeter, risk_matrix };
+  if (description) body.description = description;
+  if (ref_id) body.ref_id = ref_id;
+  try {
+    const r = await fetch('/api/grc/risk-assessments/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.success === false) throw new Error(j.error || j.detail || r.statusText || 'Create failed');
+    const res = j.result || j;
+    const id = res.id || res.uuid;
+    persistRiskStudioAssessment(id);
+    const assessEl = document.getElementById('dsr-assessment-uuid');
+    if (assessEl && id) assessEl.value = id;
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(res, null, 2);
+    }
+    toast('success', 'Risk assessment created', id ? String(id).slice(0, 13) + '…' : '');
+    return true;
+  } catch (e) {
+    toast('error', 'Risk assessment', e.message || '');
+    return false;
+  }
+}
+
+async function runRiskStudioCreateScenario() {
+  const risk_assessment = document.getElementById('dsr-assessment-uuid')?.value?.trim();
+  const name = document.getElementById('dsr-scenario-name')?.value?.trim();
+  const logEl = document.getElementById('dsr-log');
+  if (!risk_assessment || !name) {
+    toast('error', 'Scenario', 'Assessment UUID and scenario name are required.');
+    return;
+  }
+  try {
+    const r = await fetch('/api/grc/risk-scenarios/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ risk_assessment, name }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.success === false) throw new Error(j.error || j.detail || r.statusText || 'Create failed');
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(j.result || j, null, 2);
+    }
+    toast('success', 'Scenario created', name);
+    document.getElementById('dsr-scenario-name').value = '';
+  } catch (e) {
+    toast('error', 'Scenario', e.message || '');
+  }
+}
+
+async function runRiskStudioActionPlan() {
+  const id = document.getElementById('dsr-assessment-uuid')?.value?.trim();
+  const logEl = document.getElementById('dsr-log');
+  if (!id) {
+    toast('error', 'Action plan', 'Enter a risk assessment UUID first.');
+    return;
+  }
+  try {
+    const r = await fetch(`/api/grc/risk-assessments/${encodeURIComponent(id)}/action-plan/`, { credentials: 'same-origin' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText || 'Request failed');
+    if (logEl) {
+      logEl.style.display = 'block';
+      logEl.textContent = JSON.stringify(j.result || j, null, 2);
+    }
+    toast('success', 'Action plan', 'Loaded from GRC.');
+  } catch (e) {
+    toast('error', 'Action plan', e.message || '');
+  }
+}
+
+function ensureRiskStudioLoaded() {
+  loadRiskStudioPrereqs().catch(() => {});
+}
+
+function initDataStudioHub() {
+  if (dataStudioHubWired) return;
+  const grid = document.querySelector('#page-data-studio .ds-hub-grid');
+  if (!grid) return;
+  dataStudioHubWired = true;
+  grid.querySelectorAll('.ds-hub-card').forEach(btn => {
+    btn.addEventListener('click', () => {
+      setDataStudioPane(btn.getAttribute('data-ds-pane') || 'applied');
+    });
+  });
+  window.addEventListener('hashchange', () => {
+    if (currentPage === 'data-studio') syncDataStudioPaneFromHash();
+  });
+}
+
 function loadDataStudioPage() {
   restoreDataStudioSavedAudit();
   loadDataStudioGrcOptions().catch(() => {});
+  syncDataStudioPaneFromHash();
 }
 
-async function loadDataStudioGrcOptions() {
-  const folderSel = document.getElementById('ds-folder-select');
-  if (!folderSel) return;
-  const prevFolder = folderSel.value;
-  folderSel.innerHTML = '<option value="">Loading…</option>';
+async function refreshDataStudioFolderSelects() {
+  const selects = [];
+  const s1 = document.getElementById('ds-folder-select');
+  const s2 = document.getElementById('dsp-folder-select');
+  const s3 = document.getElementById('dsr-folder-select');
+  if (s1) selects.push(s1);
+  if (s2) selects.push(s2);
+  if (s3) selects.push(s3);
+  if (!selects.length) return;
+
+  const prevVals = selects.map(sel => ({ sel, prev: sel.value }));
+  selects.forEach(sel => {
+    sel.innerHTML = '<option value="">Loading…</option>';
+  });
+
   try {
     const fr = await fetch('/api/grc/folders?page_size=500');
     const fj = await fr.json();
     if (!fr.ok) throw new Error(fj.error || 'Folders request failed');
     let folders = fj.folders;
     if (!Array.isArray(folders)) folders = Array.isArray(folders?.results) ? folders.results : [];
-    folderSel.innerHTML = '<option value="">— Choose folder —</option>' +
+    const opts =
+      '<option value="">— Choose folder —</option>' +
       folders.map(f => {
         const id = f.id || f.uuid;
         const label = f.name || f.name_en || f.title || id;
         return `<option value="${esc(id)}">${esc(label)}</option>`;
       }).join('');
-    if (prevFolder) folderSel.value = prevFolder;
+    prevVals.forEach(({ sel, prev }) => {
+      sel.innerHTML = opts;
+      if (prev) sel.value = prev;
+    });
   } catch (e) {
-    folderSel.innerHTML = `<option value="">${esc(e.message)}</option>`;
+    const errOpts = `<option value="">${esc(e.message)}</option>`;
+    prevVals.forEach(({ sel }) => {
+      sel.innerHTML = errOpts;
+    });
   }
+}
+
+async function loadDataStudioGrcOptions() {
+  await refreshDataStudioFolderSelects();
   loadDataStudioFrameworkOptions().catch(() => {});
 }
 
@@ -11906,6 +13451,376 @@ function initDataStudioUpload() {
   }
 }
 
+function initDataStudioPolicyUpload() {
+  if (dataStudioPolicyUploadWired) return;
+  const drop = document.getElementById('dsp-dropzone');
+  const input = document.getElementById('dsp-file-input');
+  if (!drop || !input) return;
+  dataStudioPolicyUploadWired = true;
+
+  const openPicker = () => input.click();
+
+  drop.addEventListener('click', e => {
+    if (e.target.closest('a,button')) return;
+    openPicker();
+  });
+  drop.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openPicker();
+    }
+  });
+
+  ['dragenter', 'dragover'].forEach(ev => {
+    drop.addEventListener(ev, e => {
+      e.preventDefault();
+      e.stopPropagation();
+      drop.classList.add('ds-dropzone-active');
+    });
+  });
+  drop.addEventListener('dragleave', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!drop.contains(e.relatedTarget)) drop.classList.remove('ds-dropzone-active');
+  });
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    drop.classList.remove('ds-dropzone-active');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleDataStudioPolicyFile(f);
+  });
+
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    if (f) handleDataStudioPolicyFile(f);
+    input.value = '';
+  });
+
+  const importBtn = document.getElementById('dsp-btn-import-grc');
+  if (importBtn) importBtn.addEventListener('click', () => runDataStudioPolicyImport());
+}
+
+async function handleDataStudioPolicyFile(file) {
+  const statusEl = document.getElementById('dsp-status');
+  const preview = document.getElementById('dsp-preview');
+  const theadRow = document.getElementById('dsp-preview-thead');
+  const tbody = document.querySelector('#dsp-preview-table tbody');
+  const metaEl = document.getElementById('dsp-preview-meta');
+  if (!statusEl || !preview || !theadRow || !tbody || !metaEl) return;
+
+  const nameLower = (file.name || '').toLowerCase();
+  if (!/\.(xlsx|xls|csv)$/.test(nameLower)) {
+    toast('error', 'Invalid file', 'Choose an Excel (.xlsx, .xls) or .csv file.');
+    return;
+  }
+  statusEl.textContent = 'Reading file…';
+  preview.style.display = 'none';
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('Could not read file.'));
+      r.readAsDataURL(file);
+    });
+    const data = typeof dataUrl === 'string' && dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+
+    const r = await fetch('/api/data-studio/preview-excel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: file.name, data }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(j.error || r.statusText || 'Upload failed');
+    }
+    if (!j.success) throw new Error(j.error || 'Preview failed');
+
+    metaEl.innerHTML = `
+      <strong>${esc(j.fileName || file.name)}</strong>
+      · Sheet: <code>${esc(j.activeSheet || '')}</code>
+      · <span class="ds-meta-rows">${Number(j.totalRows) || 0} data rows</span>
+      ${(j.sheetNames && j.sheetNames.length > 1) ? ` · ${j.sheetNames.length} sheets (preview uses the first)` : ''}
+    `;
+
+    const headers = j.previewHeaders || [];
+    theadRow.innerHTML = headers.map(h => `<th>${esc(String(h))}</th>`).join('');
+    const rows = j.preview || [];
+    tbody.innerHTML = rows.map(row => {
+      const cells = headers.map(h => {
+        const v = row[h];
+        const s = v != null && v !== '' ? String(v) : '';
+        return `<td>${esc(s)}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    preview.style.display = 'block';
+    dataStudioPolicyLastFile = { name: file.name, data };
+    const importPanel = document.getElementById('dsp-import-panel');
+    const importBtn = document.getElementById('dsp-btn-import-grc');
+    if (importPanel) importPanel.style.display = 'block';
+    if (importBtn) importBtn.disabled = false;
+    const logEl = document.getElementById('dsp-import-log');
+    if (logEl) {
+      logEl.style.display = 'none';
+      logEl.textContent = '';
+    }
+    refreshDataStudioFolderSelects().catch(() => {});
+
+    statusEl.textContent = rows.length
+      ? `Showing ${rows.length} preview row${rows.length === 1 ? '' : 's'}${(j.totalRows > rows.length) ? ` of ${j.totalRows}` : ''}. Choose folder and import — each row POSTs to GRC /api/policies/.`
+      : 'No data rows after the header row.';
+    toast('success', 'File loaded', 'Policy import preview is ready.');
+  } catch (err) {
+    console.error('[Data Studio policies]', err);
+    statusEl.textContent = '';
+    toast('error', 'Could not read spreadsheet', err.message || 'Unknown error');
+  }
+}
+
+async function runDataStudioPolicyImport() {
+  const folder = document.getElementById('dsp-folder-select')?.value;
+  const logEl = document.getElementById('dsp-import-log');
+  const btn = document.getElementById('dsp-btn-import-grc');
+  if (!dataStudioPolicyLastFile || !folder) {
+    toast('error', 'Missing inputs', 'Choose a GRC folder and load a spreadsheet first.');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (logEl) {
+    logEl.style.display = 'block';
+    logEl.textContent = 'POST /api/policies/ per row…';
+  }
+  try {
+    const r = await fetch('/api/data-studio/import-policies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        fileName: dataStudioPolicyLastFile.name,
+        data: dataStudioPolicyLastFile.data,
+        folder,
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(j.error || r.statusText || 'Import failed');
+    }
+    if (logEl) {
+      logEl.textContent = JSON.stringify(
+        {
+          createdCount: j.createdCount,
+          failedCount: j.failedCount,
+          sheetName: j.sheetName,
+          errors: j.errors,
+          created: j.created,
+        },
+        null,
+        2
+      );
+    }
+    if (!j.failedCount) {
+      toast('success', 'Policies imported', `${j.createdCount} policy(ies) created in GRC.`);
+    } else if (j.createdCount) {
+      toast('warning', 'Import partially failed', `${j.createdCount} created, ${j.failedCount} failed — see log.`);
+    } else {
+      toast('error', 'Import failed', `${j.failedCount} row(s) failed — see log.`);
+    }
+  } catch (e) {
+    console.error('[Data Studio policy import]', e);
+    if (logEl) logEl.textContent = e.message || String(e);
+    toast('error', 'Import failed', e.message || '');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function initDataStudioRiskScenarioUpload() {
+  if (dataStudioRiskScenarioUploadWired) return;
+  const drop = document.getElementById('dsrs-dropzone');
+  const input = document.getElementById('dsrs-file-input');
+  if (!drop || !input) return;
+  dataStudioRiskScenarioUploadWired = true;
+
+  const openPicker = () => input.click();
+
+  drop.addEventListener('click', e => {
+    if (e.target.closest('a,button')) return;
+    openPicker();
+  });
+  drop.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openPicker();
+    }
+  });
+
+  ['dragenter', 'dragover'].forEach(ev => {
+    drop.addEventListener(ev, e => {
+      e.preventDefault();
+      e.stopPropagation();
+      drop.classList.add('ds-dropzone-active');
+    });
+  });
+  drop.addEventListener('dragleave', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!drop.contains(e.relatedTarget)) drop.classList.remove('ds-dropzone-active');
+  });
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    drop.classList.remove('ds-dropzone-active');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleDataStudioRiskScenarioFile(f);
+  });
+
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    if (f) handleDataStudioRiskScenarioFile(f);
+    input.value = '';
+  });
+
+  document.getElementById('dsrs-btn-import-grc')?.addEventListener('click', () => runDataStudioRiskScenarioImport());
+}
+
+async function handleDataStudioRiskScenarioFile(file) {
+  const statusEl = document.getElementById('dsrs-status');
+  const preview = document.getElementById('dsrs-preview');
+  const theadRow = document.getElementById('dsrs-preview-thead');
+  const tbody = document.querySelector('#dsrs-preview-table tbody');
+  const metaEl = document.getElementById('dsrs-preview-meta');
+  if (!statusEl || !preview || !theadRow || !tbody || !metaEl) return;
+
+  const nameLower = (file.name || '').toLowerCase();
+  if (!/\.(xlsx|xls|csv)$/.test(nameLower)) {
+    toast('error', 'Invalid file', 'Choose an Excel (.xlsx, .xls) or .csv file.');
+    return;
+  }
+  statusEl.textContent = 'Reading file…';
+  preview.style.display = 'none';
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('Could not read file.'));
+      r.readAsDataURL(file);
+    });
+    const data = typeof dataUrl === 'string' && dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+
+    const r = await fetch('/api/data-studio/preview-excel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: file.name, data }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(j.error || r.statusText || 'Upload failed');
+    }
+    if (!j.success) throw new Error(j.error || 'Preview failed');
+
+    metaEl.innerHTML = `
+      <strong>${esc(j.fileName || file.name)}</strong>
+      · Sheet: <code>${esc(j.activeSheet || '')}</code>
+      · <span class="ds-meta-rows">${Number(j.totalRows) || 0} data rows</span>
+      ${(j.sheetNames && j.sheetNames.length > 1) ? ` · ${j.sheetNames.length} sheets (preview uses the first)` : ''}
+    `;
+
+    const headers = j.previewHeaders || [];
+    theadRow.innerHTML = headers.map(h => `<th>${esc(String(h))}</th>`).join('');
+    const rows = j.preview || [];
+    tbody.innerHTML = rows.map(row => {
+      const cells = headers.map(h => {
+        const v = row[h];
+        const s = v != null && v !== '' ? String(v) : '';
+        return `<td>${esc(s)}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    preview.style.display = 'block';
+    dataStudioRiskScenarioLastFile = { name: file.name, data };
+    const importPanel = document.getElementById('dsrs-import-panel');
+    const importBtn = document.getElementById('dsrs-btn-import-grc');
+    if (importPanel) importPanel.style.display = 'block';
+    if (importBtn) importBtn.disabled = false;
+    const logEl = document.getElementById('dsrs-import-log');
+    if (logEl) {
+      logEl.style.display = 'none';
+      logEl.textContent = '';
+    }
+
+    statusEl.textContent = rows.length
+      ? `Showing ${rows.length} preview row${rows.length === 1 ? '' : 's'}. Each row needs a name column; set risk assessment UUID in the field above or add a risk_assessment column.`
+      : 'No data rows after the header row.';
+    toast('success', 'File loaded', 'Risk scenario spreadsheet preview ready.');
+  } catch (err) {
+    console.error('[Data Studio risk scenarios Excel]', err);
+    statusEl.textContent = '';
+    toast('error', 'Could not read spreadsheet', err.message || 'Unknown error');
+  }
+}
+
+async function runDataStudioRiskScenarioImport() {
+  const risk_assessment = document.getElementById('dsr-assessment-uuid')?.value?.trim() || '';
+  const logEl = document.getElementById('dsrs-import-log');
+  const btn = document.getElementById('dsrs-btn-import-grc');
+  if (!dataStudioRiskScenarioLastFile) {
+    toast('error', 'No file', 'Load a spreadsheet first.');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (logEl) {
+    logEl.style.display = 'block';
+    logEl.textContent = risk_assessment
+      ? 'POST /api/risk-scenarios/ per row…'
+      : 'POST /api/risk-scenarios/ per row (using risk_assessment column or default)…';
+  }
+  try {
+    const r = await fetch('/api/data-studio/import-risk-scenarios', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        fileName: dataStudioRiskScenarioLastFile.name,
+        data: dataStudioRiskScenarioLastFile.data,
+        risk_assessment,
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(j.error || r.statusText || 'Import failed');
+    }
+    if (logEl) {
+      logEl.textContent = JSON.stringify(
+        {
+          createdCount: j.createdCount,
+          failedCount: j.failedCount,
+          sheetName: j.sheetName,
+          errors: j.errors,
+          created: j.created,
+        },
+        null,
+        2
+      );
+    }
+    if (!j.failedCount) {
+      toast('success', 'Scenarios imported', `${j.createdCount} scenario(s) created in GRC.`);
+    } else if (j.createdCount) {
+      toast('warning', 'Import partially failed', `${j.createdCount} created, ${j.failedCount} failed — see log.`);
+    } else {
+      toast('error', 'Import failed', `${j.failedCount} row(s) failed — see log.`);
+    }
+  } catch (e) {
+    console.error('[Data Studio risk scenario import]', e);
+    if (logEl) logEl.textContent = e.message || String(e);
+    toast('error', 'Import failed', e.message || '');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function handleDataStudioFile(file) {
   const statusEl = document.getElementById('ds-status');
   const preview = document.getElementById('ds-preview');
@@ -11980,7 +13895,7 @@ async function handleDataStudioFile(file) {
 }
 
 /**
- * Same shape as server.js buildOrgProfileText — plain text for F1 org context (no "missing profile" filler).
+ * Same shape as server.js buildOrgProfileText — plain text for pipeline org context (no "missing profile" filler).
  */
 function formatOrgProfileTextForPipeline(orgContext) {
   if (!orgContext) return '';
@@ -12007,7 +13922,7 @@ function formatOrgProfileTextForPipeline(orgContext) {
   return p.join('\n');
 }
 
-/** Sample bundles: organisation + regulation + policies aligned per sector so F1 scope matches the excerpt. Values = `#pup-preset-select`. */
+/** Sample bundles: organisation + regulation + policies aligned per sector so scope matches the excerpt. Values = `#pup-preset-select`. */
 const PUP_DATASETS = Object.freeze({
   'python-demo': {
     orgContext:
@@ -12265,8 +14180,14 @@ async function refreshPolicyUpdatePipelineOrgDropdown() {
     opt.textContent = label;
     sel.appendChild(opt);
   }
-  if (prev && pupOrgContextsCache.some(x => String(x.id) === String(prev))) {
-    sel.value = prev;
+  // Restore previous selection, or fall back to the configured default org
+  const defaultId = getPcfgDefaultOrgId();
+  const restoreId = (prev && pupOrgContextsCache.some(x => String(x.id) === String(prev))) ? prev
+    : (defaultId && pupOrgContextsCache.some(x => String(x.id) === String(defaultId))) ? defaultId
+    : '';
+  if (restoreId) {
+    sel.value = restoreId;
+    onPolicyUpdatePipelineOrgSelect();
   }
 }
 
@@ -12308,6 +14229,12 @@ function syncPolicyPipelineStepperDOM() {
   const fill = document.getElementById('pup-stepper-progress-fill');
   if (fill) fill.style.width = `${((idx + 1) / total) * 100}%`;
 
+  const cap = document.getElementById('pup-step-caption');
+  if (cap) {
+    const names = ['Organisation', 'Regulation', 'Policies'];
+    cap.textContent = `Step ${idx + 1} of ${total} · ${names[idx] || ''}`;
+  }
+
   const back = document.getElementById('pup-step-back');
   const next = document.getElementById('pup-step-next');
   const run = document.getElementById('pup-run-btn');
@@ -12329,6 +14256,9 @@ function resetPolicyPipelineStepper() {
 function pupStepperGo(delta) {
   pupStepperIndex = Math.max(0, Math.min(PUP_PIPELINE_LAST_STEP, pupStepperIndex + delta));
   syncPolicyPipelineStepperDOM();
+  if (pupStepperIndex === PUP_PIPELINE_LAST_STEP) {
+    loadPupPoliciesFromGrc();
+  }
 }
 
 function pupStepperBack() {
@@ -12349,7 +14279,38 @@ function pupStepperNext() {
 
 function loadPolicyUpdatePipelinePage() {
   initPolicyUpdatePipeline();
+  initPupExtractModal();
   refreshPolicyUpdatePipelineOrgDropdown().catch(() => {});
+  fetchGrcPolicies().catch(() => {});
+  // Pre-populate severity textareas from DB-stored config (user can still override per-run)
+  fetch('/api/pipeline-config/impact-criteria').then(r => r.json()).then(j => {
+    if (!j.success || !j.data) return;
+    const map = [
+      ['critical', 'pup-f4-sev-critical'],
+      ['high',     'pup-f4-sev-high'],
+      ['medium',   'pup-f4-sev-medium'],
+      ['low',      'pup-f4-sev-low'],
+      ['none',     'pup-f4-sev-none'],
+    ];
+    for (const [key, id] of map) {
+      const el = document.getElementById(id);
+      if (el && j.data[key]) el.value = j.data[key];
+    }
+  }).catch(() => {});
+}
+
+function setPupPipelineLoadingOverlay(visible) {
+  const ov = document.getElementById('pup-pipeline-loading-overlay');
+  if (!ov) return;
+  if (visible) {
+    ov.hidden = false;
+    ov.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('pup-pipeline-overlay-open');
+  } else {
+    ov.hidden = true;
+    ov.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('pup-pipeline-overlay-open');
+  }
 }
 
 function initPolicyUpdatePipeline() {
@@ -12359,8 +14320,18 @@ function initPolicyUpdatePipeline() {
   const backBtn = document.getElementById('pup-step-back');
   const nextBtn = document.getElementById('pup-step-next');
   const presetSel = document.getElementById('pup-preset-select');
+  const cancelPipelineBtn = document.getElementById('pup-pipeline-cancel-btn');
+  const fillSevBtn = document.getElementById('pup-f4-fill-defaults');
+  const loadGrcPoliciesBtn = document.getElementById('pup-load-grc-policies');
   if (!orgSel || !runBtn || !backBtn || !nextBtn || !presetSel) return;
   policyUpdatePipelineWired = true;
+  if (fillSevBtn) fillSevBtn.addEventListener('click', () => fillPupSeveritySuggestedDefinitions());
+  if (loadGrcPoliciesBtn) loadGrcPoliciesBtn.addEventListener('click', () => loadPupPoliciesFromGrc());
+  if (cancelPipelineBtn) {
+    cancelPipelineBtn.addEventListener('click', () => {
+      if (pupPipelineAbortController) pupPipelineAbortController.abort();
+    });
+  }
   runBtn.addEventListener('click', () => runPolicyUpdatePipeline());
   orgSel.addEventListener('change', () => onPolicyUpdatePipelineOrgSelect());
   presetSel.addEventListener('change', () => onPupPresetSelectChange());
@@ -12371,10 +14342,10 @@ function initPolicyUpdatePipeline() {
 }
 
 const PUP_STAGE_LABELS = {
-  f1: 'F1 — Relevance',
-  f2: 'F2 — Extract policy points',
-  f3: 'F3 — Policy match',
-  f4: 'F4 — Impact',
+  f1: 'Relevance',
+  f2: 'Extract policy points',
+  f3: 'Policy match',
+  f4: 'Impact',
 };
 
 function pupStageLabel(sr) {
@@ -12387,13 +14358,13 @@ function pupSkippedStagesNote(data) {
   if (f1 && typeof f1 === 'object' && typeof f1.is_relevant !== 'boolean') return null;
   const s = String(data.stage_reached || '').toLowerCase();
   if (s === 'f1') {
-    return 'Stages F2–F4 were not executed because this regulation was classified as not relevant to the organisation.';
+    return 'Later stages were not run because this regulation was classified as not relevant to the organisation.';
   }
   if (s === 'f2') {
-    return 'Stages F3 and F4 were not run — no policy points could be extracted from the regulation text.';
+    return 'Matching and impact were not run — no policy points could be extracted from the regulation text.';
   }
   if (s === 'f3') {
-    return 'Stage F4 was not run — no regulation points matched your indexed policies above the similarity threshold.';
+    return 'Impact analysis was not run — no regulation points matched your indexed policies above the similarity threshold.';
   }
   return null;
 }
@@ -12404,10 +14375,301 @@ function pupSeverityClass(sev) {
   return 'pup-sev-none';
 }
 
-function renderPolicyPipelineResultHtml(data) {
+const PUP_SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, none: 4 };
+const PUP_SEVERITY_LABELS = {
+  critical: 'Critical',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+  none: 'None',
+};
+
+function pupNormalizeSeverity(sev) {
+  const s = (typeof sev === 'string' ? sev : '').trim().toLowerCase();
+  return PUP_SEVERITY_RANK[s] != null ? s : 'none';
+}
+
+function pupSeverityLabel(sev) {
+  const n = pupNormalizeSeverity(sev);
+  return PUP_SEVERITY_LABELS[n] || 'None';
+}
+
+/** Mirror server-side pipelineGroupImpactsByPolicy for raw f4_impacts in the modal. */
+function pupGroupImpactsByPolicy(f4Impacts) {
+  if (!Array.isArray(f4Impacts) || !f4Impacts.length) return [];
+  const byPolicy = new Map();
+  for (const group of f4Impacts) {
+    const pointId = group && group.point_id != null ? group.point_id : null;
+    const pointText = group && typeof group.point_text === 'string' ? group.point_text : '';
+    const impacts = Array.isArray(group && group.impacts) ? group.impacts : [];
+    for (const imp of impacts) {
+      if (!imp || imp.policy_id == null) continue;
+      const pid = String(imp.policy_id);
+      const sev = pupNormalizeSeverity(imp.severity);
+      const requires = imp.requires_amendment === true;
+      const meaningful = requires || sev !== 'none';
+      const entry = {
+        point_id: pointId,
+        point_text: pointText,
+        impact_summary: typeof imp.impact_summary === 'string' ? imp.impact_summary : '',
+        severity: sev,
+        severity_label: pupSeverityLabel(sev),
+        severity_reasoning: typeof imp.severity_reasoning === 'string' ? imp.severity_reasoning : '',
+        requires_amendment: requires,
+        similarity_score: typeof imp.similarity_score === 'number' ? imp.similarity_score : null,
+        amendments: Array.isArray(imp.amendments) ? imp.amendments : [],
+        compliance_gap: typeof imp.compliance_gap === 'string' ? imp.compliance_gap : '',
+        is_affected: meaningful,
+      };
+      const existing = byPolicy.get(pid);
+      if (existing) {
+        existing.matched_points.push(entry);
+        existing.policy_title = existing.policy_title || imp.policy_title || '';
+      } else {
+        byPolicy.set(pid, {
+          policy_id: pid,
+          policy_title: typeof imp.policy_title === 'string' ? imp.policy_title : '',
+          matched_points: [entry],
+        });
+      }
+    }
+  }
+
+  const out = [];
+  for (const group of byPolicy.values()) {
+    group.matched_points.sort((a, b) => {
+      const da = PUP_SEVERITY_RANK[a.severity] - PUP_SEVERITY_RANK[b.severity];
+      if (da !== 0) return da;
+      const sa = a.similarity_score == null ? -1 : a.similarity_score;
+      const sb = b.similarity_score == null ? -1 : b.similarity_score;
+      return sb - sa;
+    });
+    let worstRank = PUP_SEVERITY_RANK.none;
+    let isAffected = false;
+    let requiresAmendment = false;
+    let affectedPoints = 0;
+    for (const ent of group.matched_points) {
+      const r = PUP_SEVERITY_RANK[ent.severity];
+      if (r < worstRank) worstRank = r;
+      if (ent.is_affected) {
+        isAffected = true;
+        affectedPoints += 1;
+      }
+      if (ent.requires_amendment) requiresAmendment = true;
+    }
+    const worstSev = Object.keys(PUP_SEVERITY_RANK).find((k) => PUP_SEVERITY_RANK[k] === worstRank) || 'none';
+    out.push({
+      policy_id: group.policy_id,
+      policy_title: group.policy_title || `Policy ${group.policy_id}`,
+      is_affected: isAffected,
+      worst_severity: worstSev,
+      worst_severity_label: pupSeverityLabel(worstSev),
+      requires_amendment: requiresAmendment,
+      matched_points_count: group.matched_points.length,
+      affected_points_count: affectedPoints,
+      matched_points: group.matched_points,
+    });
+  }
+
+  out.sort((a, b) => {
+    if (a.is_affected !== b.is_affected) return a.is_affected ? -1 : 1;
+    const da = PUP_SEVERITY_RANK[a.worst_severity] - PUP_SEVERITY_RANK[b.worst_severity];
+    if (da !== 0) return da;
+    if (b.matched_points_count !== a.matched_points_count) return b.matched_points_count - a.matched_points_count;
+    return String(a.policy_title).localeCompare(String(b.policy_title));
+  });
+  return out;
+}
+
+function pupChangeTypeLabel(changeType) {
+  const t = String(changeType || '').trim().toLowerCase();
+  if (!t) return '';
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+function pupRenderImpactDetailBlock(label, content) {
+  if (!content) return '';
+  return (
+    '<div class="pup-impact-detail-block">' +
+    '<div class="pup-impact-detail-label">' + esc(label) + '</div>' +
+    '<div class="pup-impact-detail-content" dir="auto">' + esc(content) + '</div>' +
+    '</div>'
+  );
+}
+
+function pupRenderAmendmentCards(amendments) {
+  if (!Array.isArray(amendments) || !amendments.length) return '';
+  const parts = [
+    '<div class="pup-impact-detail-block">' +
+    '<div class="pup-impact-detail-label">Proposed amendments (' + esc(String(amendments.length)) + ')</div>' +
+    '<div class="pup-impact-amend-list">',
+  ];
+  for (const a of amendments) {
+    const changeType = pupChangeTypeLabel(a.change_type);
+    parts.push('<article class="pup-impact-amend-card">');
+    parts.push('<div class="pup-impact-amend-head">');
+    if (changeType) {
+      parts.push(
+        '<span class="pup-impact-change-type pup-impact-change-type--' +
+          esc(a.change_type || 'modify') +
+          '">' +
+          esc(changeType) +
+          '</span>'
+      );
+    }
+    if (a.policy_section) {
+      parts.push('<span class="pup-impact-amend-section">Section: ' + esc(a.policy_section) + '</span>');
+    }
+    parts.push('</div>');
+    if (a.current_text_summary) {
+      parts.push(
+        '<div class="pup-impact-amend-row">' +
+          '<span class="pup-impact-amend-row-label">Current</span>' +
+          '<p class="pup-impact-amend-row-text" dir="auto">' + esc(a.current_text_summary) + '</p>' +
+          '</div>'
+      );
+    }
+    if (a.required_change) {
+      parts.push(
+        '<div class="pup-impact-amend-row">' +
+          '<span class="pup-impact-amend-row-label">Required change</span>' +
+          '<p class="pup-impact-amend-row-text" dir="auto">' + esc(a.required_change) + '</p>' +
+          '</div>'
+      );
+    }
+    parts.push('</article>');
+  }
+  parts.push('</div></div>');
+  return parts.join('');
+}
+
+function pupRenderImpactPointDetails(pt) {
+  const parts = ['<div class="pup-impact-point-body">'];
+  parts.push(pupRenderImpactDetailBlock('Impact analysis', pt.impact_summary));
+  parts.push(pupRenderImpactDetailBlock('Severity', pt.severity_reasoning || pt.severity_label));
+  parts.push(pupRenderImpactDetailBlock('Compliance gap', pt.compliance_gap));
+  parts.push(pupRenderAmendmentCards(pt.amendments));
+  if (typeof pt.similarity_score === 'number') {
+    parts.push(
+      '<div class="pup-impact-point-meta">' +
+        'Similarity match · <strong>' + esc(String(pt.similarity_score)) + '</strong>' +
+        (pt.requires_amendment ? ' · <span class="pup-impact-amend-inline">Requires amendment</span>' : '') +
+        '</div>'
+    );
+  }
+  parts.push('</div>');
+  return parts.join('');
+}
+
+function pupRenderImpactByPolicyHtml(f4Impacts, data) {
+  const policies = pupGroupImpactsByPolicy(f4Impacts);
+  if (!policies.length) {
+    return '<p class="pup-result-prose">No impact rows.</p>';
+  }
+
+  const affectedCount = policies.filter((p) => p.is_affected).length;
+  const analyzedCount = policies.length;
+  const totalPointHits = policies.reduce((n, p) => n + p.matched_points_count, 0);
+  const f1 = data && data.f1_relevance;
+  const confidencePct =
+    f1 && typeof f1.confidence === 'number'
+      ? Math.round(Math.min(1, Math.max(0, f1.confidence)) * 100)
+      : null;
+  const worstOverall = policies.reduce((best, p) => {
+    const r = PUP_SEVERITY_RANK[p.worst_severity];
+    return r < best.rank ? { rank: r, label: p.worst_severity_label } : best;
+  }, { rank: PUP_SEVERITY_RANK.none, label: 'None' });
+
+  const parts = [];
+  parts.push('<div class="pup-impact-stats">');
+  parts.push(
+    '<div class="pup-impact-stat-card">' +
+      '<div class="pup-impact-stat-label">Impact</div>' +
+      '<div class="pup-impact-stat-value">' +
+        (confidencePct != null ? '<span class="pup-impact-stat-pct">' + esc(String(confidencePct)) + '%</span>' : '') +
+        '<span class="pup-impact-sev-badge ' + esc(pupSeverityClass(worstOverall.label.toLowerCase())) + '">' +
+          esc(worstOverall.label) +
+        '</span>' +
+      '</div>' +
+      '<div class="pup-impact-stat-sub">AI confidence</div>' +
+      '<div class="pup-impact-stat-bar pup-impact-stat-bar--' + esc(pupSeverityClass(worstOverall.label.toLowerCase())) + '"></div>' +
+    '</div>'
+  );
+  parts.push(
+    '<div class="pup-impact-stat-card">' +
+      '<div class="pup-impact-stat-label">Affected policies</div>' +
+      '<div class="pup-impact-stat-value pup-impact-stat-value--lg">' + esc(String(affectedCount)) + '</div>' +
+      '<div class="pup-impact-stat-sub">Analysed ' + esc(String(analyzedCount)) + ' policies</div>' +
+    '</div>'
+  );
+  parts.push(
+    '<div class="pup-impact-stat-card">' +
+      '<div class="pup-impact-stat-label">Policy impacts</div>' +
+      '<div class="pup-impact-stat-value pup-impact-stat-value--lg">' + esc(String(totalPointHits)) + '</div>' +
+      '<div class="pup-impact-stat-sub">Policies indexed · ' +
+        esc(String(typeof data.policy_count_indexed === 'number' ? data.policy_count_indexed : analyzedCount)) +
+      '</div>' +
+    '</div>'
+  );
+  parts.push('</div>');
+
+  parts.push('<div class="pup-impact-section-head">');
+  parts.push('<span class="pup-impact-section-icon" aria-hidden="true">📄</span>');
+  parts.push('<span class="pup-impact-section-title">Affected policies</span>');
+  parts.push('</div>');
+
+  parts.push('<div class="pup-impact-policy-list">');
+  for (const policy of policies) {
+    const sevCls = pupSeverityClass(policy.worst_severity);
+    parts.push(
+      '<section class="pup-impact-policy-card' +
+        (policy.is_affected ? '' : ' pup-impact-policy-card--muted') +
+        '" data-policy-id="' + esc(policy.policy_id) + '">'
+    );
+    parts.push('<header class="pup-impact-policy-head">');
+    parts.push('<div class="pup-impact-policy-title-wrap">');
+    parts.push('<h5 class="pup-impact-policy-title">' + esc(policy.policy_title) + '</h5>');
+    parts.push('<div class="pup-impact-policy-badges">');
+    parts.push(
+      '<span class="pup-impact-sev-badge ' + sevCls + '">' + esc(policy.worst_severity_label) + '</span>'
+    );
+    if (policy.requires_amendment) {
+      parts.push('<span class="pup-impact-amend-badge">Requires amendment</span>');
+    } else if (!policy.is_affected) {
+      parts.push('<span class="pup-impact-neutral-badge">No material impact</span>');
+    }
+    parts.push('</div></div>');
+    parts.push(
+      '<div class="pup-impact-policy-counter" title="Affected regulation points / total matched">' +
+        esc(String(policy.affected_points_count)) + ' / ' + esc(String(policy.matched_points_count)) +
+      '</div>'
+    );
+    parts.push('</header>');
+
+    parts.push('<div class="pup-impact-point-list">');
+    for (const pt of policy.matched_points) {
+      const ptSev = pupSeverityClass(pt.severity);
+      parts.push('<details class="pup-impact-point' + (pt.is_affected ? '' : ' pup-impact-point--muted') + '">');
+      parts.push('<summary class="pup-impact-point-summary">');
+      parts.push('<span class="pup-impact-point-id">' + esc(pt.point_id || 'Point') + '</span>');
+      parts.push('<span class="pup-impact-point-text" dir="auto">' + esc(pt.point_text || '') + '</span>');
+      parts.push('<span class="pup-impact-point-sev ' + ptSev + '">' + esc(pt.severity_label) + '</span>');
+      parts.push('<span class="pup-impact-point-toggle">View details</span>');
+      parts.push('</summary>');
+      parts.push(pupRenderImpactPointDetails(pt));
+      parts.push('</details>');
+    }
+    parts.push('</div></section>');
+  }
+  parts.push('</div>');
+  return parts.join('');
+}
+
+function renderPolicyPipelineResultHtml(data, opts = {}) {
   if (!data || typeof data !== 'object') {
     return '<p class="pup-result-prose">' + esc(String(data)) + '</p>';
   }
+  const view = opts.view === 'summary' ? 'summary' : 'full';
 
   const parts = [];
   parts.push('<div class="pup-result-top">');
@@ -12427,14 +14689,14 @@ function renderPolicyPipelineResultHtml(data) {
   const f1 = data.f1_relevance;
   if (f1 && typeof f1 === 'object') {
     parts.push('<div class="pup-result-panel">');
-    parts.push('<h4>F1 · Relevance assessment</h4>');
+    parts.push('<h4>Relevance assessment</h4>');
     if (typeof f1.is_relevant !== 'boolean') {
       parts.push(
-        '<p class="pup-result-note">The model did not return valid F1 JSON (expected a boolean <code>is_relevant</code>). ' +
+        '<p class="pup-result-note">The model did not return valid JSON (expected a boolean <code>is_relevant</code>). ' +
           'This is <strong>not</strong> the same as “not relevant” — the API response was empty, blocked, or unparsable. Retry, shorten inputs, or check your Gemini key / model.</p>'
       );
       parts.push(
-        '<p class="pup-result-meta">The pipeline runs in order — <strong>F1 → F2 → F3 → F4</strong>. Later stages never start unless F1 returns valid JSON ' +
+        '<p class="pup-result-meta">The pipeline runs in order — <strong>relevance → extraction → matching → impact</strong>. Later stages do not start unless the relevance step returns valid JSON ' +
           'with <code>is_relevant: true</code> (truncated Arabic/English responses often die mid-<code>"reasoning"</code> string).</p>'
       );
       if (f1.raw_response != null && String(f1.raw_response).trim()) {
@@ -12471,11 +14733,18 @@ function renderPolicyPipelineResultHtml(data) {
     parts.push('</div>');
   }
 
+  if (view === 'summary') {
+    parts.push(
+      '<p class="pup-result-note pup-result-note--summary">Relevance summary only. Use <strong>Download PDF</strong> below for the complete organised report.</p>'
+    );
+    return parts.join('');
+  }
+
   const f2 = data.f2_summary;
   if (f2 && typeof f2 === 'object') {
     const pts = Array.isArray(f2.policy_points) ? f2.policy_points : [];
     parts.push('<div class="pup-result-panel">');
-    parts.push('<h4>F2 · Regulation points extracted</h4>');
+    parts.push('<h4>Regulation points extracted</h4>');
     if (!pts.length) {
       parts.push('<p class="pup-result-prose">No policy points returned.</p>');
     } else {
@@ -12498,7 +14767,7 @@ function renderPolicyPipelineResultHtml(data) {
   const f3 = data.f3_matches;
   if (Array.isArray(f3)) {
     parts.push('<div class="pup-result-panel">');
-    parts.push('<h4>F3 · Embeddings vs policies</h4>');
+    parts.push('<h4>Policy matching</h4>');
     if (!f3.length) {
       parts.push('<p class="pup-result-prose">No points to match.</p>');
     } else {
@@ -12532,61 +14801,9 @@ function renderPolicyPipelineResultHtml(data) {
 
   const f4 = data.f4_impacts;
   if (Array.isArray(f4) && f4.length) {
-    parts.push('<div class="pup-result-panel">');
-    parts.push('<h4>F4 · Impact analysis</h4>');
-    for (const block of f4) {
-      parts.push('<div class="pup-result-point-card">');
-      parts.push('<div class="pup-result-point-head">' + esc(block.point_id || '') + '</div>');
-      parts.push(
-        '<p class="pup-result-prose" style="margin:0;margin-bottom:10px">' + esc(block.point_text || '') + '</p>'
-      );
-      const impacts = Array.isArray(block.impacts) ? block.impacts : [];
-      if (!impacts.length) parts.push('<p class="pup-result-meta">No impact rows.</p>');
-      for (const imp of impacts) {
-        const sev = pupSeverityClass(imp.severity);
-        parts.push('<div class="pup-result-impact-card ' + sev + '">');
-        parts.push('<div class="pup-result-impact-head">' + esc(imp.policy_title || imp.policy_id || 'Policy') + '</div>');
-        if (imp.impact_summary) {
-          parts.push('<p class="pup-result-prose" style="margin:10px 0 6px">' + esc(imp.impact_summary) + '</p>');
-        }
-        parts.push('<dl class="pup-result-dl">');
-        if (imp.severity) parts.push('<dt>Severity</dt><dd>' + esc(String(imp.severity)) + '</dd>');
-        if (imp.severity_reasoning) parts.push('<dt>Rationale</dt><dd>' + esc(imp.severity_reasoning) + '</dd>');
-        if (typeof imp.requires_amendment === 'boolean') {
-          parts.push('<dt>Requires amendment</dt><dd>' + esc(String(imp.requires_amendment)) + '</dd>');
-        }
-        if (imp.compliance_gap) parts.push('<dt>Compliance gap</dt><dd>' + esc(imp.compliance_gap) + '</dd>');
-        parts.push('</dl>');
-        const amds = Array.isArray(imp.amendments) ? imp.amendments : [];
-        if (amds.length) {
-          parts.push('<p style="margin:12px 0 6px;font-size:11px;font-weight:600;color:#111827">Suggested amendments</p>');
-          parts.push('<ol class="pup-result-amends">');
-          for (const a of amds) {
-            const head = [];
-            if (a.change_type) head.push('[' + a.change_type + ']');
-            if (a.policy_section) head.push(a.policy_section);
-            parts.push('<li><strong>' + esc(head.join(' ').trim()) + '</strong>');
-            if (a.required_change) {
-              parts.push('<div style="margin-top:4px">' + esc(a.required_change) + '</div>');
-            }
-            if (a.current_text_summary) {
-              parts.push('<div style="margin-top:4px;font-size:11px;color:#64748b"><em>Current summary:</em> ' + esc(a.current_text_summary) + '</div>');
-            }
-            parts.push('</li>');
-          }
-          parts.push('</ol>');
-        }
-        if (
-          typeof imp.raw_response === 'string' &&
-          imp.raw_response &&
-          !(imp.severity || imp.impact_summary)
-        ) {
-          parts.push('<pre style="margin-top:10px;font-size:11px;line-height:1.4;background:#fef2f2;padding:8px;border-radius:6px">' + esc(imp.raw_response) + '</pre>');
-        }
-        parts.push('</div>');
-      }
-      parts.push('</div>');
-    }
+    parts.push('<div class="pup-result-panel pup-result-panel--impact">');
+    parts.push('<h4>Impact analysis</h4>');
+    parts.push(pupRenderImpactByPolicyHtml(f4, data));
     parts.push('</div>');
   }
 
@@ -12602,25 +14819,758 @@ function closePolicyPipelineResultModal() {
   overlay.classList.remove('active');
   overlay.setAttribute('aria-hidden', 'true');
   document.body.style.overflow = '';
+  const shell = overlay.querySelector('.pup-result-modal-shell');
+  const expandBtn = document.getElementById('pup-result-modal-expand');
+  if (shell) shell.classList.remove('pup-result-modal-shell--expanded');
+  if (expandBtn) {
+    expandBtn.classList.remove('is-expanded');
+    expandBtn.setAttribute('aria-expanded', 'false');
+    expandBtn.setAttribute('aria-label', 'Expand result');
+    expandBtn.title = 'Expand';
+  }
 }
 
-function openPolicyPipelineResultModal(data) {
+function openPolicyPipelineResultModal(data, opts = {}) {
   const overlay = document.getElementById('pup-result-modal-overlay');
   const bodyEl = document.getElementById('pup-result-modal-body');
   const titleEl = document.getElementById('pup-result-modal-title');
   if (!overlay || !bodyEl) return;
-  policyUpdatePipelineLastRaw = data;
-  if (titleEl) {
-    titleEl.textContent =
-      data && typeof data === 'object' && data.stage_reached != null
-        ? 'Pipeline result · ' + pupStageLabel(data.stage_reached)
-        : 'Pipeline result';
+  const shell = overlay.querySelector('.pup-result-modal-shell');
+  const expandBtn = document.getElementById('pup-result-modal-expand');
+  if (shell) shell.classList.remove('pup-result-modal-shell--expanded');
+  if (expandBtn) {
+    expandBtn.classList.remove('is-expanded');
+    expandBtn.setAttribute('aria-expanded', 'false');
+    expandBtn.setAttribute('aria-label', 'Expand result');
+    expandBtn.title = 'Expand';
   }
-  bodyEl.innerHTML = renderPolicyPipelineResultHtml(data);
+  const view = opts.view === 'summary' ? 'summary' : 'full';
+  policyUpdatePipelineLastRaw = data;
+  policyUpdatePipelineLastMeta = opts.meta && typeof opts.meta === 'object' ? opts.meta : null;
+  if (titleEl) {
+    const stage =
+      data && typeof data === 'object' && data.stage_reached != null
+        ? pupStageLabel(data.stage_reached)
+        : null;
+    if (view === 'summary') {
+      titleEl.textContent = stage ? `Relevance report · ${stage}` : 'Relevance report';
+    } else {
+      titleEl.textContent = stage ? `Pipeline result · ${stage}` : 'Pipeline result';
+    }
+  }
+  bodyEl.innerHTML = renderPolicyPipelineResultHtml(data, { view });
   bodyEl.scrollTop = 0;
   overlay.classList.add('active');
   overlay.setAttribute('aria-hidden', 'false');
   document.body.style.overflow = 'hidden';
+}
+
+/** Print/PDF stylesheet — Cairo, coloured section headers, card layout. */
+const PUP_REPORT_FONT_LINK =
+  'https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&display=swap';
+const PUP_REPORT_CSS = `
+* { box-sizing: border-box; }
+.rpt-root {
+  font-family: 'Cairo', system-ui, sans-serif;
+  color: #0f172a;
+  background: #fff;
+  font-size: 13px;
+  line-height: 1.55;
+  width: 794px;
+  padding: 0;
+}
+.rpt-cover {
+  background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 55%, #3b82f6 100%);
+  color: #fff;
+  padding: 28px 32px 24px;
+  border-radius: 0;
+}
+.rpt-cover-title {
+  margin: 0 0 8px;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.rpt-cover-sub {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.92;
+  font-weight: 500;
+}
+.rpt-cover-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.rpt-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(255,255,255,0.18);
+  border: 1px solid rgba(255,255,255,0.28);
+}
+.rpt-body { padding: 24px 28px 32px; }
+.rpt-kpi-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.rpt-kpi {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #f8fafc;
+}
+.rpt-kpi-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+.rpt-kpi-value { font-size: 20px; font-weight: 700; color: #0f172a; }
+.rpt-section {
+  margin-bottom: 22px;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+.rpt-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+}
+.rpt-section-head--relevance { background: #047857; }
+.rpt-section-head--points { background: #4f46e5; }
+.rpt-section-head--matching { background: #0d9488; }
+.rpt-section-head--impact { background: #c2410c; }
+.rpt-section-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.22);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+.rpt-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  background: #fff;
+}
+.rpt-card:last-child { margin-bottom: 0; }
+.rpt-badge-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.rpt-badge {
+  display: inline-flex;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.rpt-badge--yes { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+.rpt-badge--no { background: #fffbeb; color: #b45309; border: 1px solid #fcd34d; }
+.rpt-badge--confidence { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+.rpt-prose { margin: 0 0 10px; white-space: pre-wrap; }
+.rpt-prose[dir="auto"], .rpt-list[dir="auto"] { unicode-bidi: plaintext; }
+.rpt-list { margin: 0; padding-left: 18px; }
+.rpt-list li { margin-bottom: 4px; }
+.rpt-point-id {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  background: #312e81;
+  padding: 3px 8px;
+  border-radius: 5px;
+  margin-bottom: 6px;
+}
+.rpt-point-meta { font-size: 11px; color: #64748b; margin-bottom: 6px; }
+.rpt-policy-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.rpt-policy-head {
+  padding: 12px 14px;
+  background: #f1f5f9;
+  border-bottom: 1px solid #e2e8f0;
+}
+.rpt-policy-title { margin: 0 0 6px; font-size: 14px; font-weight: 700; }
+.rpt-sev { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
+.rpt-sev--critical { background: #fef2f2; color: #b91c1c; }
+.rpt-sev--high { background: #fff7ed; color: #c2410c; }
+.rpt-sev--medium { background: #fffbeb; color: #b45309; }
+.rpt-sev--low { background: #ecfdf5; color: #047857; }
+.rpt-sev--none { background: #f1f5f9; color: #64748b; }
+.rpt-impact-point {
+  padding: 12px 14px;
+  border-bottom: 1px solid #eef2f7;
+}
+.rpt-impact-point:last-child { border-bottom: none; }
+.rpt-impact-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  margin: 10px 0 4px;
+}
+.rpt-impact-label:first-child { margin-top: 0; }
+.rpt-amend {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  background: #fafafa;
+}
+.rpt-amend-type {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: #ecfdf5;
+  color: #047857;
+  margin-right: 6px;
+}
+.rpt-note {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border-left: 3px solid #94a3b8;
+  font-size: 12px;
+  color: #475569;
+  margin-bottom: 14px;
+}
+`;
+
+function pupReportSeverityClass(sev) {
+  const s = pupNormalizeSeverity(sev);
+  return `rpt-sev--${s}`;
+}
+
+function pupReportFileName(meta) {
+  const base = meta && meta.sourceName ? String(meta.sourceName) : 'pipeline-report';
+  const safe = base.replace(/[^\w\u0600-\u06FF\s-]/g, '').trim().replace(/\s+/g, '-');
+  return (safe || 'pipeline-report') + '-report.pdf';
+}
+
+/** PDF-optimised body (not the modal HTML). */
+function renderPolicyPipelineReportPdfBody(data) {
+  const parts = [];
+  const f1 = data.f1_relevance;
+  const f2 = data.f2_summary;
+  const f3 = data.f3_matches;
+  const f4 = data.f4_impacts;
+
+  if (typeof data.policy_count_indexed === 'number') {
+    parts.push('<div class="rpt-kpi-row">');
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Stage reached</div><div class="rpt-kpi-value" style="font-size:15px">' +
+        esc(pupStageLabel(data.stage_reached)) + '</div></div>'
+    );
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Indexed policies</div><div class="rpt-kpi-value">' +
+        esc(String(data.policy_count_indexed)) + '</div></div>'
+    );
+    const policies = Array.isArray(f4) ? pupGroupImpactsByPolicy(f4) : [];
+    const affected = policies.filter((p) => p.is_affected).length;
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Affected policies</div><div class="rpt-kpi-value">' +
+        esc(String(affected)) + '</div></div>'
+    );
+    parts.push('</div>');
+  }
+
+  const skip = pupSkippedStagesNote(data);
+  if (skip) parts.push('<p class="rpt-note">' + esc(skip) + '</p>');
+
+  if (f1 && typeof f1 === 'object') {
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--relevance" style="background:#047857;color:#fff"><span class="rpt-section-icon">1</span> Relevance assessment</h2>');
+    if (typeof f1.is_relevant === 'boolean') {
+      parts.push('<div class="rpt-card">');
+      parts.push('<div class="rpt-badge-row">');
+      parts.push(
+        '<span class="rpt-badge ' + (f1.is_relevant ? 'rpt-badge--yes' : 'rpt-badge--no') + '">' +
+          esc(f1.is_relevant ? 'Relevant to organisation' : 'Not relevant') + '</span>'
+      );
+      if (typeof f1.confidence === 'number') {
+        const pct = Math.round(Math.min(1, Math.max(0, f1.confidence)) * 100);
+        parts.push('<span class="rpt-badge rpt-badge--confidence">Model confidence · ' + esc(String(pct)) + '%</span>');
+      }
+      parts.push('</div>');
+      if (f1.reasoning) parts.push('<p class="rpt-prose" dir="auto">' + esc(f1.reasoning) + '</p>');
+      const aspects = Array.isArray(f1.relevant_aspects) ? f1.relevant_aspects.filter(Boolean) : [];
+      if (aspects.length) {
+        parts.push('<ul class="rpt-list" dir="auto">');
+        for (const a of aspects) parts.push('<li>' + esc(a) + '</li>');
+        parts.push('</ul>');
+      }
+      parts.push('</div>');
+    } else {
+      parts.push('<div class="rpt-card"><p class="rpt-prose">Relevance step did not return a valid verdict.</p></div>');
+    }
+    parts.push('</section>');
+  }
+
+  if (f2 && typeof f2 === 'object') {
+    const pts = Array.isArray(f2.policy_points) ? f2.policy_points : [];
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--points" style="background:#4f46e5;color:#fff"><span class="rpt-section-icon">2</span> Regulation points extracted</h2>');
+    if (!pts.length) {
+      parts.push('<div class="rpt-card"><p class="rpt-prose">No policy points returned.</p></div>');
+    } else {
+      for (const pt of pts) {
+        parts.push('<div class="rpt-card">');
+        parts.push('<span class="rpt-point-id">' + esc(pt.id || 'Point') + '</span>');
+        const metaBits = [];
+        if (pt.source_reference) metaBits.push('Reference: ' + pt.source_reference);
+        if (pt.category) metaBits.push(pt.category);
+        if (metaBits.length) parts.push('<div class="rpt-point-meta">' + esc(metaBits.join(' · ')) + '</div>');
+        parts.push('<p class="rpt-prose" dir="auto" style="margin:0">' + esc(pt.point || '') + '</p>');
+        parts.push('</div>');
+      }
+    }
+    parts.push('</section>');
+  }
+
+  if (Array.isArray(f3) && f3.length) {
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--matching" style="background:#0d9488;color:#fff"><span class="rpt-section-icon">3</span> Policy matching</h2>');
+    for (const row of f3) {
+      const matches = Array.isArray(row.matches) ? row.matches : [];
+      parts.push('<div class="rpt-card">');
+      parts.push('<span class="rpt-point-id">' + esc(row.point_id || 'Point') + '</span>');
+      parts.push('<p class="rpt-prose" dir="auto" style="margin:8px 0 10px">' + esc(row.point_text || '') + '</p>');
+      if (!matches.length) {
+        parts.push('<p class="rpt-point-meta">No policy matches above threshold.</p>');
+      } else {
+        for (const m of matches) {
+          parts.push('<div style="border-top:1px dashed #e2e8f0;padding-top:8px;margin-top:8px">');
+          parts.push('<strong>' + esc(m.policy_title || m.policy_id || 'Policy') + '</strong>');
+          if (typeof m.similarity_score === 'number') {
+            parts.push(' <span class="rpt-point-meta">· Similarity ' + esc(String(m.similarity_score)) + '</span>');
+          }
+          if (m.content_excerpt) {
+            parts.push('<p class="rpt-prose" dir="auto" style="font-size:12px;margin:6px 0 0">' + esc(m.content_excerpt) + '</p>');
+          }
+          parts.push('</div>');
+        }
+      }
+      parts.push('</div>');
+    }
+    parts.push('</section>');
+  }
+
+  if (Array.isArray(f4) && f4.length) {
+    const policies = pupGroupImpactsByPolicy(f4);
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head rpt-section-head--impact" style="background:#c2410c;color:#fff"><span class="rpt-section-icon">4</span> Impact analysis</h2>');
+    for (const policy of policies) {
+      parts.push('<div class="rpt-policy-card">');
+      parts.push('<div class="rpt-policy-head">');
+      parts.push('<h3 class="rpt-policy-title">' + esc(policy.policy_title) + '</h3>');
+      parts.push(
+        '<span class="rpt-sev ' + pupReportSeverityClass(policy.worst_severity) + '">' +
+          esc(policy.worst_severity_label) + '</span>'
+      );
+      if (policy.requires_amendment) {
+        parts.push(' <span class="rpt-sev rpt-sev--high" style="margin-left:6px">Requires amendment</span>');
+      }
+      parts.push('</div>');
+      for (const pt of policy.matched_points) {
+        parts.push('<div class="rpt-impact-point">');
+        parts.push('<span class="rpt-point-id">' + esc(pt.point_id || 'Point') + '</span>');
+        parts.push('<p class="rpt-prose" dir="auto" style="margin:8px 0">' + esc(pt.point_text || '') + '</p>');
+        if (pt.impact_summary) {
+          parts.push('<div class="rpt-impact-label">Impact analysis</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + esc(pt.impact_summary) + '</p>');
+        }
+        if (pt.severity_reasoning) {
+          parts.push('<div class="rpt-impact-label">Severity</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + esc(pt.severity_reasoning) + '</p>');
+        }
+        if (pt.compliance_gap) {
+          parts.push('<div class="rpt-impact-label">Compliance gap</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + esc(pt.compliance_gap) + '</p>');
+        }
+        const amds = Array.isArray(pt.amendments) ? pt.amendments : [];
+        if (amds.length) {
+          parts.push('<div class="rpt-impact-label">Proposed amendments (' + esc(String(amds.length)) + ')</div>');
+          for (const a of amds) {
+            parts.push('<div class="rpt-amend">');
+            if (a.change_type) {
+              parts.push('<span class="rpt-amend-type">' + esc(pupChangeTypeLabel(a.change_type)) + '</span>');
+            }
+            if (a.policy_section) parts.push('<strong>' + esc(a.policy_section) + '</strong>');
+            if (a.current_text_summary) {
+              parts.push('<div class="rpt-impact-label">Current</div>');
+              parts.push('<p class="rpt-prose" dir="auto">' + esc(a.current_text_summary) + '</p>');
+            }
+            if (a.required_change) {
+              parts.push('<div class="rpt-impact-label">Required change</div>');
+              parts.push('<p class="rpt-prose" dir="auto">' + esc(a.required_change) + '</p>');
+            }
+            parts.push('</div>');
+          }
+        }
+        parts.push('</div>');
+      }
+      parts.push('</div>');
+    }
+    parts.push('</section>');
+  }
+
+  return parts.join('');
+}
+
+function loadScriptOnce(src, dataKey) {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-' + dataKey + ']');
+    if (existing) {
+      if (existing.dataset.loaded === '1') return resolve();
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () => reject(new Error(src + ' failed to load')));
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = src;
+    s.crossOrigin = 'anonymous';
+    s.dataset[dataKey] = '1';
+    s.onload = () => { s.dataset.loaded = '1'; resolve(); };
+    s.onerror = () => reject(new Error(src + ' failed to load (CDN blocked?)'));
+    document.head.appendChild(s);
+  });
+}
+
+async function ensurePdfStackLoaded() {
+  if (typeof window.html2canvas !== 'function') {
+    await loadScriptOnce(
+      'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
+      'pupHtml2canvas'
+    );
+  }
+  if (!getJsPdfCtor()) {
+    await loadScriptOnce(
+      'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js',
+      'pupJspdf'
+    );
+  }
+  if (typeof window.html2canvas !== 'function') {
+    throw new Error('html2canvas not available after load');
+  }
+  if (!getJsPdfCtor()) {
+    throw new Error('jsPDF not available after load');
+  }
+}
+
+function getJsPdfCtor() {
+  if (window.jspdf && window.jspdf.jsPDF) return window.jspdf.jsPDF;
+  if (typeof window.jsPDF === 'function') return window.jsPDF;
+  return null;
+}
+
+async function preloadCairoForReport() {
+  try {
+    if (document.fonts && document.fonts.load) {
+      await document.fonts.load('400 14px Cairo');
+      await document.fonts.load('700 26px Cairo');
+      await document.fonts.ready;
+    }
+  } catch (_) { /* non-fatal */ }
+}
+
+function buildPolicyPipelineReportExportRoot(data, meta = {}) {
+  const sourceName = meta.sourceName ? String(meta.sourceName) : 'Policy update pipeline';
+  const generatedAt = meta.generatedAt
+    ? new Date(meta.generatedAt).toLocaleString()
+    : new Date().toLocaleString();
+  const stage = data && data.stage_reached ? pupStageLabel(data.stage_reached) : '—';
+  const root = document.createElement('div');
+  root.className = 'rpt-export-root';
+  // Render fully visible in the page so html2canvas captures real pixels.
+  // A fullscreen overlay (added separately) hides it from the user.
+  root.style.cssText =
+    'position:fixed;left:0;top:0;width:794px;background:#fff;' +
+    'visibility:visible;z-index:2147483646;';
+  root.innerHTML =
+    '<link rel="stylesheet" href="' + PUP_REPORT_FONT_LINK + '">' +
+    '<style>' + PUP_REPORT_CSS + '</style>' +
+    '<div class="rpt-root" style="font-family:Cairo,system-ui,sans-serif;width:794px">' +
+      '<header class="rpt-cover" style="background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 55%,#3b82f6 100%);color:#fff">' +
+        '<h1 class="rpt-cover-title" style="color:#fff;font-family:Cairo,system-ui,sans-serif">' + esc(sourceName) + '</h1>' +
+        '<p class="rpt-cover-sub">Policy update pipeline · impact report</p>' +
+        '<div class="rpt-cover-meta">' +
+          '<span class="rpt-chip">Generated: ' + esc(generatedAt) + '</span>' +
+          '<span class="rpt-chip">Stage: ' + esc(stage) + '</span>' +
+          (meta.runId ? '<span class="rpt-chip">Run: ' + esc(String(meta.runId)) + '</span>' : '') +
+        '</div>' +
+      '</header>' +
+      '<div class="rpt-body">' + renderPolicyPipelineReportPdfBody(data) + '</div>' +
+    '</div>';
+  return root;
+}
+
+function buildPdfLoadingOverlay() {
+  const ov = document.createElement('div');
+  ov.className = 'rpt-pdf-overlay';
+  ov.style.cssText =
+    'position:fixed;inset:0;background:rgba(15,23,42,0.78);' +
+    'z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
+    'backdrop-filter:blur(4px);';
+  ov.innerHTML =
+    '<div style="background:#fff;border-radius:16px;padding:28px 36px;text-align:center;' +
+    'box-shadow:0 25px 50px rgba(0,0,0,0.35);font-family:Cairo,system-ui,sans-serif;min-width:280px">' +
+      '<div style="width:42px;height:42px;border:4px solid #e2e8f0;border-top-color:#2563eb;' +
+      'border-radius:50%;animation:rptSpin 0.9s linear infinite;margin:0 auto 14px"></div>' +
+      '<div style="font-size:15px;font-weight:600;color:#0f172a;margin-bottom:4px">Generating PDF</div>' +
+      '<div class="rpt-pdf-step" style="font-size:12px;color:#64748b">Preparing your report…</div>' +
+    '</div>' +
+    '<style>@keyframes rptSpin{to{transform:rotate(360deg)}}</style>';
+  return ov;
+}
+
+function setPdfOverlayStep(overlay, msg) {
+  if (!overlay) return;
+  const step = overlay.querySelector('.rpt-pdf-step');
+  if (step) step.textContent = msg;
+}
+
+/**
+ * Render a tall element into a multi-page PDF.
+ *
+ * Strategy: capture the FULL element once at a moderate scale into one canvas
+ * (within the 32,767px browser limit), then slice that canvas in JS using
+ * drawImage onto smaller canvases. Each slice becomes one A4 page.
+ *
+ * For content tall enough that even scale=0.5 exceeds the canvas limit, we
+ * fall back to per-slice html2canvas captures using element x/y/height crops.
+ */
+async function renderTargetToPdfSliced(target, jsPDFCtor, onProgress) {
+  const html2canvas = window.html2canvas;
+  if (typeof html2canvas !== 'function') {
+    throw new Error('html2canvas not loaded');
+  }
+
+  const A4_W_MM = 210;
+  const A4_H_MM = 297;
+  const MARGIN_MM = 10;
+  const usableW_mm = A4_W_MM - MARGIN_MM * 2;
+  const usableH_mm = A4_H_MM - MARGIN_MM * 2;
+  const MAX_CANVAS_H = 14000; // safe under Chrome's ~32,767 limit
+
+  void target.offsetHeight;
+  const rect = target.getBoundingClientRect();
+  const targetW_px = Math.ceil(target.scrollWidth || rect.width);
+  const targetH_px = Math.ceil(target.scrollHeight || rect.height);
+
+  console.log('[PDF] target dims', { targetW_px, targetH_px, rect });
+  if (!targetW_px || !targetH_px) throw new Error('Report layout is empty — nothing to render.');
+
+  const pxPerMm_source = targetW_px / usableW_mm;
+  const sliceSourceH_px = Math.floor(usableH_mm * pxPerMm_source);
+
+  const pdf = new jsPDFCtor({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
+  const totalSlices = Math.ceil(targetH_px / sliceSourceH_px);
+  console.log('[PDF] plan', { sliceSourceH_px, totalSlices, MAX_CANVAS_H });
+
+  // Try a single full-element capture if it fits. Each slice canvas (sliceSourceH_px * scale)
+  // must stay under MAX_CANVAS_H, AND total canvas height (targetH_px * scale) too.
+  const fullScale = Math.min(1.5, MAX_CANVAS_H / Math.max(targetH_px, 1));
+  const canSingleCapture = fullScale >= 0.6;
+
+  if (canSingleCapture) {
+    console.log('[PDF] single-capture mode, scale=', fullScale);
+    if (onProgress) onProgress(1, totalSlices, 'capturing');
+    const fullCanvas = await html2canvas(target, {
+      scale: fullScale,
+      useCORS: true,
+      allowTaint: true,
+      letterRendering: true,
+      logging: false,
+      backgroundColor: '#ffffff',
+      windowWidth: targetW_px,
+      width: targetW_px,
+      height: targetH_px,
+    });
+    console.log('[PDF] full canvas', { w: fullCanvas.width, h: fullCanvas.height });
+
+    const sliceCanvasH_px = Math.floor(sliceSourceH_px * fullScale);
+    let cursor_px = 0;
+    let pageIdx = 0;
+    while (cursor_px < fullCanvas.height) {
+      const thisH = Math.min(sliceCanvasH_px, fullCanvas.height - cursor_px);
+      const slice = document.createElement('canvas');
+      slice.width = fullCanvas.width;
+      slice.height = thisH;
+      const ctx = slice.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, slice.width, slice.height);
+      ctx.drawImage(
+        fullCanvas,
+        0, cursor_px, fullCanvas.width, thisH,
+        0, 0, fullCanvas.width, thisH
+      );
+      const imgData = slice.toDataURL('image/jpeg', 0.9);
+      const sliceMm_h = (thisH / fullScale) / pxPerMm_source;
+      if (pageIdx > 0) pdf.addPage('a4', 'portrait');
+      pdf.addImage(imgData, 'JPEG', MARGIN_MM, MARGIN_MM, usableW_mm, sliceMm_h, undefined, 'FAST');
+      pageIdx++;
+      if (onProgress) onProgress(pageIdx, totalSlices, 'paginating');
+      cursor_px += thisH;
+    }
+    return pdf;
+  }
+
+  // Fallback: capture each page individually using element-crop (for very tall reports).
+  console.log('[PDF] per-slice mode');
+  const perSliceScale = Math.min(1.4, Math.max(0.7, MAX_CANVAS_H / sliceSourceH_px));
+  console.log('[PDF] perSliceScale=', perSliceScale);
+
+  for (let i = 0; i < totalSlices; i++) {
+    if (onProgress) onProgress(i + 1, totalSlices, 'capturing');
+    const yOffset_px = i * sliceSourceH_px;
+    const thisSliceH_px = Math.min(sliceSourceH_px, targetH_px - yOffset_px);
+    const canvas = await html2canvas(target, {
+      scale: perSliceScale,
+      useCORS: true,
+      allowTaint: true,
+      letterRendering: true,
+      logging: false,
+      backgroundColor: '#ffffff',
+      windowWidth: targetW_px,
+      width: targetW_px,
+      height: thisSliceH_px,
+      x: 0,
+      y: yOffset_px,
+    });
+    console.log('[PDF] slice', i + 1, '/', totalSlices, { w: canvas.width, h: canvas.height });
+    const imgData = canvas.toDataURL('image/jpeg', 0.9);
+    const sliceMm_h = thisSliceH_px / pxPerMm_source;
+    if (i > 0) pdf.addPage('a4', 'portrait');
+    pdf.addImage(imgData, 'JPEG', MARGIN_MM, MARGIN_MM, usableW_mm, sliceMm_h, undefined, 'FAST');
+  }
+  return pdf;
+}
+
+/**
+ * Trigger a browser download for a URL without opening a tab. We use an <a>
+ * anchor with `download` so Chrome saves the file via the server-supplied
+ * Content-Disposition (the signed URL is already 'attachment; filename=...').
+ */
+function triggerBrowserDownload(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  if (filename) a.download = filename;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { try { a.remove(); } catch (_) { /* ignore */ } }, 0);
+}
+
+/**
+ * Server-side PDF flow. The pipeline already rendered the report into
+ * pup-data bucket when the run finished — we just ask for a signed URL.
+ *
+ *   status === 'ready'       → instant download via the signed URL
+ *   status === 'pending'     → poll briefly (PDF is still rendering server-side)
+ *   status === 'failed'      → show the upstream error
+ *   status === 'unavailable' → run pre-dates the server-side PDF feature
+ */
+async function downloadPolicyPipelineReportPdf() {
+  const data = policyUpdatePipelineLastRaw;
+  if (!data || typeof data !== 'object') {
+    toast('error', 'Nothing to export', 'Run the pipeline first.');
+    return;
+  }
+  const meta = policyUpdatePipelineLastMeta || {};
+  const runId = meta && meta.runId ? String(meta.runId) : '';
+  if (!runId) {
+    toast(
+      'error',
+      'No saved run',
+      'This run was not persisted to history yet, so the server-side PDF is unavailable. Re-run the pipeline to enable downloads.'
+    );
+    return;
+  }
+
+  const pdfBtn = document.getElementById('pup-result-modal-download-pdf');
+  if (pdfBtn) pdfBtn.disabled = true;
+  const originalBtnText = pdfBtn ? pdfBtn.textContent : '';
+
+  const setBtnText = (txt) => {
+    if (!pdfBtn) return;
+    // Preserve the existing SVG icon if present
+    const svg = pdfBtn.querySelector('svg');
+    pdfBtn.textContent = '';
+    if (svg) pdfBtn.appendChild(svg);
+    pdfBtn.appendChild(document.createTextNode(' ' + txt));
+  };
+
+  const endpoint = `/api/ai-tools/pipeline-runs/${encodeURIComponent(runId)}/report-pdf`;
+  const POLL_INTERVAL_MS = 1500;
+  const POLL_MAX_MS = 90000; // 90s ceiling — PDF gen of large reports can take 30-60s
+
+  try {
+    setBtnText('Checking…');
+    const startedAt = Date.now();
+    let resp = null;
+    while (true) {
+      const r = await fetch(endpoint, { credentials: 'same-origin' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || r.statusText || 'Failed to query PDF status');
+      resp = j;
+      if (j.status === 'ready') break;
+      if (j.status === 'failed') throw new Error(j.error || 'Server-side PDF generation failed.');
+      if (j.status === 'unavailable') {
+        toast('warning', 'PDF unavailable', 'This run was created before server-side PDF generation was enabled.');
+        return;
+      }
+      if (j.status === 'pending') {
+        if (Date.now() - startedAt > POLL_MAX_MS) {
+          throw new Error('PDF still generating. Please try again in a moment.');
+        }
+        setBtnText(`Generating… (${Math.round((Date.now() - startedAt) / 1000)}s)`);
+        await new Promise((res) => setTimeout(res, POLL_INTERVAL_MS));
+        continue;
+      }
+      throw new Error(`Unexpected status: ${j.status || '(none)'}`);
+    }
+
+    setBtnText('Downloading…');
+    triggerBrowserDownload(resp.url, resp.filename);
+    toast('success', 'Downloaded', resp.filename || 'report.pdf');
+  } catch (e) {
+    console.error('[PDF]', e);
+    toast('error', 'PDF failed', e.message || String(e));
+  } finally {
+    if (pdfBtn) {
+      pdfBtn.disabled = false;
+      if (originalBtnText) {
+        // Restore label (icon + " Download PDF")
+        setBtnText('Download PDF');
+      }
+    }
+  }
 }
 
 function initPolicyPipelineResultModalListeners() {
@@ -12628,31 +15578,334 @@ function initPolicyPipelineResultModalListeners() {
   const overlay = document.getElementById('pup-result-modal-overlay');
   const closeBtn = document.getElementById('pup-result-modal-close');
   const closeBtnFooter = document.getElementById('pup-result-modal-close-btn');
-  const copyBtn = document.getElementById('pup-result-modal-copy-json');
+  const confirmBtn = document.getElementById('pup-result-modal-confirm-btn');
+  const pdfBtn = document.getElementById('pup-result-modal-download-pdf');
   if (!overlay || !document.body) return;
   policyUpdatePipelineResultModalWired = true;
   const close = () => closePolicyPipelineResultModal();
   if (closeBtn) closeBtn.addEventListener('click', close);
   if (closeBtnFooter) closeBtnFooter.addEventListener('click', close);
+  if (confirmBtn) confirmBtn.addEventListener('click', close);
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) close();
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && overlay.classList.contains('active')) close();
   });
-  if (copyBtn) {
-    copyBtn.addEventListener('click', async () => {
-      if (!policyUpdatePipelineLastRaw) {
-        toast('error', 'Nothing to copy', 'Run the pipeline first.');
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(JSON.stringify(policyUpdatePipelineLastRaw, null, 2));
-        toast('success', 'Copied', 'Full pipeline JSON copied to clipboard.');
-      } catch (err) {
-        toast('error', 'Copy failed', err.message || String(err));
-      }
+  if (pdfBtn) {
+    pdfBtn.addEventListener('click', () => downloadPolicyPipelineReportPdf());
+  }
+  const expandBtn = document.getElementById('pup-result-modal-expand');
+  const shell = document.querySelector('#pup-result-modal-overlay .pup-result-modal-shell');
+  if (expandBtn && shell) {
+    expandBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const on = shell.classList.toggle('pup-result-modal-shell--expanded');
+      expandBtn.classList.toggle('is-expanded', on);
+      expandBtn.setAttribute('aria-expanded', on ? 'true' : 'false');
+      expandBtn.setAttribute('aria-label', on ? 'Shrink result' : 'Expand result');
+      expandBtn.title = on ? 'Shrink' : 'Expand';
     });
+  }
+}
+
+/** Suggested severity rubric for the policy pipeline UI (optional one-click fill). "None" stays empty — add text only if you want a custom definition. */
+const PUP_SEVERITY_SUGGESTED_DEFINITIONS = {
+  critical:
+    'Regulatory or business-stopping exposure: immediate compliance failure, prohibition on processing, or severe remediation obligations; policy change is mandatory before relying on current controls.',
+  high:
+    'Material gap affecting current operations, customer contracts, or audit and regulatory posture; remediate on an accelerated timeline.',
+  medium: 'Meaningful gap with moderate exposure; schedule policy updates through the normal change process.',
+  low: 'Minor clarification or tightening, or low residual risk if unchanged in the near term.',
+};
+
+function fillPupSeveritySuggestedDefinitions() {
+  const map = [
+    ['pup-f4-sev-critical', PUP_SEVERITY_SUGGESTED_DEFINITIONS.critical],
+    ['pup-f4-sev-high', PUP_SEVERITY_SUGGESTED_DEFINITIONS.high],
+    ['pup-f4-sev-medium', PUP_SEVERITY_SUGGESTED_DEFINITIONS.medium],
+    ['pup-f4-sev-low', PUP_SEVERITY_SUGGESTED_DEFINITIONS.low],
+  ];
+  for (const [id, text] of map) {
+    const el = document.getElementById(id);
+    if (el) el.value = text;
+  }
+  const noneEl = document.getElementById('pup-f4-sev-none');
+  if (noneEl) noneEl.value = '';
+  toast('success', 'Definitions filled', 'You can edit any level before running the pipeline.');
+}
+
+function collectPupF4SeverityDefinitions() {
+  const ids = [
+    ['critical', 'pup-f4-sev-critical'],
+    ['high', 'pup-f4-sev-high'],
+    ['medium', 'pup-f4-sev-medium'],
+    ['low', 'pup-f4-sev-low'],
+    ['none', 'pup-f4-sev-none'],
+  ];
+  const out = {};
+  for (const [key, id] of ids) {
+    const el = document.getElementById(id);
+    const t = el ? String(el.value || '').trim() : '';
+    if (t) out[key] = t;
+  }
+  return out;
+}
+
+// ─── Policy file extraction ────────────────────────────────────────────────
+
+let pupExtractedPoliciesResult = null; // holds the last extraction for the modal
+
+function openPupExtractModal(articles, sourceFile, elapsed, context) {
+  const overlay = document.getElementById('pup-extract-modal-overlay');
+  const body = document.getElementById('pup-extract-modal-body');
+  const meta = document.getElementById('pup-extract-modal-meta');
+  const runLabel = document.getElementById('pup-extract-run-label');
+  if (!overlay || !body) return;
+
+  // context: 'pipeline' (PUP page) | 'internal-sources'
+  pupExtractedPoliciesResult = { articles, sourceFile, context: context || 'pipeline' };
+
+  if (meta) {
+    meta.textContent = `${articles.length} article${articles.length === 1 ? '' : 's'} · ${sourceFile}${elapsed ? ' · ' + elapsed + 's' : ''}`;
+  }
+  if (runLabel) {
+    runLabel.textContent = context === 'internal-sources' ? 'Save regulation' : 'Run pipeline';
+  }
+
+  body.innerHTML = articles.map((a, i) =>
+    `<div class="pup-extract-policy-card">
+      <span class="pup-extract-article-label">${esc(a.article || 'Article ' + (i + 1))}</span>
+      <p class="pup-extract-policy-title">${esc(a.title || '')}</p>
+      <p class="pup-extract-policy-content">${esc(a.text || '')}</p>
+    </div>`
+  ).join('');
+
+  overlay.hidden = false;
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function closePupExtractModal() {
+  const overlay = document.getElementById('pup-extract-modal-overlay');
+  if (overlay) { overlay.hidden = true; overlay.setAttribute('aria-hidden', 'true'); }
+}
+
+let _pupExtractStageTimer = null;
+
+function setPupExtractLoading(visible, fileName) {
+  const ov = document.getElementById('pup-extract-loading-overlay');
+  const lbl = document.getElementById('pup-extract-loading-label');
+  if (!ov) return;
+
+  if (visible) {
+    ov.hidden = false;
+    ov.setAttribute('aria-hidden', 'false');
+
+    // Stage messages + pill progression
+    const stages = [
+      { label: `Reading "${fileName || 'document'}"…`,   pill: 0 },
+      { label: 'Analysing document structure…',           pill: 1 },
+      { label: 'Extracting regulation articles…',         pill: 2 },
+      { label: 'Finalising results…',                     pill: 2 },
+    ];
+    const pills = [0, 1, 2].map(i => document.getElementById(`pup-extract-stage-${i}`));
+
+    function applyStage(idx) {
+      const s = stages[Math.min(idx, stages.length - 1)];
+      if (lbl) lbl.textContent = s.label;
+      pills.forEach((p, i) => {
+        if (!p) return;
+        p.classList.toggle('is-active', i === s.pill);
+        p.classList.toggle('is-done', i < s.pill);
+        p.classList.toggle('is-active', i === s.pill && idx < stages.length - 1 || (i === s.pill && idx === stages.length - 1));
+      });
+    }
+
+    applyStage(0);
+    let stageIdx = 1;
+    const delays = [4000, 8000, 14000]; // advance at 4s, 12s, 26s
+    function scheduleNext(delay) {
+      _pupExtractStageTimer = setTimeout(() => {
+        applyStage(stageIdx);
+        stageIdx++;
+        if (stageIdx < stages.length) scheduleNext(delays[stageIdx - 1] || 8000);
+      }, delay);
+    }
+    scheduleNext(delays[0]);
+
+  } else {
+    ov.hidden = true;
+    ov.setAttribute('aria-hidden', 'true');
+    if (_pupExtractStageTimer) { clearTimeout(_pupExtractStageTimer); _pupExtractStageTimer = null; }
+    // Reset pills
+    [0, 1, 2].forEach(i => {
+      const p = document.getElementById(`pup-extract-stage-${i}`);
+      if (p) { p.classList.remove('is-active', 'is-done'); }
+    });
+  }
+}
+
+async function onPupPolicyFileSelected(file, context) {
+  if (!file) return;
+  const allowed = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/msword', 'text/plain', 'text/markdown'];
+  if (!allowed.includes(file.type) && !file.name.match(/\.(pdf|docx?|txt|md)$/i)) {
+    toast('error', 'Unsupported file', 'Please upload a PDF, Word, or text document.');
+    return;
+  }
+
+  const extractNotifId = `extract-${Date.now()}`;
+  addNotif(extractNotifId, `Extracting: ${file.name}`, 'Analysing document with Gemini…', 'running');
+  setPupExtractLoading(true, file.name);
+  try {
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    const r = await fetch('/api/ai-tools/extract-policies-from-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: file.name, mimeType: file.type || 'application/octet-stream', data: base64 }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText || 'Extraction failed');
+
+    const { articles, elapsed } = j;
+    if (!articles || !articles.length) {
+      updateNotif(extractNotifId, { status: 'info', message: 'No articles found in document.' });
+      toast('info', 'No articles found', 'Gemini could not find any regulation articles in this document.');
+      return;
+    }
+    updateNotif(extractNotifId, { status: 'success', message: `${articles.length} article${articles.length === 1 ? '' : 's'} extracted` });
+
+    if (context === 'internal-sources') {
+      // Skip the modal — save and run pipeline automatically
+      const regulationText = articles.map(a =>
+        `${a.article}${a.title ? ' — ' + a.title : ''}\n${a.text}`
+      ).join('\n\n');
+      fetch('/api/ai-tools/extracted-regulations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ articles, sourceFile: file.name }),
+      }).catch(() => {});
+      toast('info', 'Pipeline started', `Running pipeline for "${file.name}" in the background.`);
+      runPipelineInBackground(regulationText, file.name);
+      return;
+    }
+
+    openPupExtractModal(articles, file.name, elapsed, context || 'pipeline');
+  } catch (err) {
+    console.error('[RegulationExtract]', err);
+    updateNotif(extractNotifId, { status: 'error', message: err.message || 'Extraction failed' });
+    toast('error', 'Extraction failed', err.message || 'Could not extract regulation from file.');
+  } finally {
+    setPupExtractLoading(false);
+    // Reset file input so same file can be re-selected
+    const fi = document.getElementById('pup-policy-file-input');
+    if (fi) fi.value = '';
+  }
+}
+
+async function onPupExtractRunPipeline() {
+  if (!pupExtractedPoliciesResult) return;
+  const { articles, sourceFile, context } = pupExtractedPoliciesResult;
+
+  // Save to DB
+  try {
+    await fetch('/api/ai-tools/extracted-regulations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ articles, sourceFile }),
+    });
+  } catch (e) {
+    console.warn('[RegulationExtract] DB save failed (non-fatal):', e.message);
+  }
+
+  // Reconstruct regulation plain text from articles
+  const regulationText = articles.map(a =>
+    `${a.article}${a.title ? ' — ' + a.title : ''}\n${a.text}`
+  ).join('\n\n');
+
+  closePupExtractModal();
+  pupExtractedPoliciesResult = null;
+
+  if (context === 'internal-sources') {
+    // Fire pipeline in the background and track via notification system
+    runPipelineInBackground(regulationText, sourceFile);
+    return;
+  }
+
+  // PUP context: fill regulation textarea and run pipeline
+  const regEl = document.getElementById('pup-regulation');
+  if (regEl) regEl.value = regulationText;
+
+  const statusEl = document.getElementById('pup-grc-policies-status');
+  if (statusEl) { statusEl.innerHTML = ''; statusEl.textContent = `${articles.length} article${articles.length === 1 ? '' : 's'} extracted from "${sourceFile}"`; }
+
+  runPolicyUpdatePipeline();
+}
+
+function initPupExtractModal() {
+  const cancelBtn = document.getElementById('pup-extract-cancel-btn');
+  const runBtn = document.getElementById('pup-extract-run-btn');
+  const uploadBtn = document.getElementById('pup-upload-extract-btn');
+  const fileInput = document.getElementById('pup-policy-file-input');
+
+  if (cancelBtn) cancelBtn.addEventListener('click', closePupExtractModal);
+  if (runBtn) runBtn.addEventListener('click', onPupExtractRunPipeline);
+  if (uploadBtn && fileInput) {
+    uploadBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files && fileInput.files[0]) onPupPolicyFileSelected(fileInput.files[0]);
+    });
+  }
+
+  // Close on backdrop click
+  const overlay = document.getElementById('pup-extract-modal-overlay');
+  if (overlay) {
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closePupExtractModal(); });
+  }
+}
+
+async function loadPupPoliciesFromGrc() {
+  const btn = document.getElementById('pup-load-grc-policies');
+  const statusEl = document.getElementById('pup-grc-policies-status');
+  const polEl = document.getElementById('pup-policies-json');
+  if (!polEl) return;
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+  polEl.classList.add('pup-policies-textarea-loading');
+  if (statusEl) {
+    statusEl.className = 'pup-grc-status';
+    statusEl.innerHTML = '<span class="pup-grc-spinner"></span>Loading policies from GRC…';
+  }
+
+  try {
+    const policies = await fetchGrcPolicies();
+    if (!policies.length) {
+      if (statusEl) { statusEl.innerHTML = ''; statusEl.textContent = 'No policies found in GRC.'; }
+      toast('info', 'No policies', 'The GRC API returned no policies.');
+      return;
+    }
+    const mapped = policies.map(p => ({
+      id: String(p.id),
+      title: p.refId ? `[${p.refId}] ${p.name}` : p.name,
+      content: p.description || p.name,
+    }));
+    polEl.value = JSON.stringify(mapped, null, 2);
+    const label = `${mapped.length} polic${mapped.length === 1 ? 'y' : 'ies'} loaded from GRC`;
+    if (statusEl) { statusEl.innerHTML = ''; statusEl.textContent = label; }
+    toast('success', 'Policies loaded', label);
+  } catch (err) {
+    console.error('[Policy pipeline] loadPupPoliciesFromGrc:', err);
+    if (statusEl) { statusEl.innerHTML = ''; statusEl.textContent = 'Failed to load from GRC.'; }
+    toast('error', 'Load failed', err.message || 'Could not fetch policies from GRC.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Load from GRC'; }
+    polEl.classList.remove('pup-policies-textarea-loading');
   }
 }
 
@@ -12661,7 +15914,7 @@ async function runPolicyUpdatePipeline() {
   const regEl = document.getElementById('pup-regulation');
   const polEl = document.getElementById('pup-policies-json');
   const outEl = document.getElementById('pup-result');
-  const statusEl = document.getElementById('pup-status');
+  const stepperCard = document.querySelector('#page-policy-update-pipeline .pup-stepper-card--modern');
   const btn = document.getElementById('pup-run-btn');
   const stepBack = document.getElementById('pup-step-back');
   const stepNext = document.getElementById('pup-step-next');
@@ -12688,7 +15941,10 @@ async function runPolicyUpdatePipeline() {
   btn.disabled = true;
   if (stepBack) stepBack.disabled = true;
   if (stepNext) stepNext.disabled = true;
-  if (statusEl) statusEl.textContent = 'Running F1–F4…';
+  pupPipelineAbortController = new AbortController();
+  const { signal } = pupPipelineAbortController;
+  setPupPipelineLoadingOverlay(true);
+  if (stepperCard) stepperCard.setAttribute('aria-busy', 'true');
   if (outEl) {
     outEl.style.display = 'none';
     outEl.textContent = '';
@@ -12698,10 +15954,12 @@ async function runPolicyUpdatePipeline() {
     const r = await fetch('/api/ai-tools/policy-update-pipeline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal,
       body: JSON.stringify({
         orgContext: orgEl ? orgEl.value : '',
         regulationText,
         policies,
+        f4SeverityDefinitions: collectPupF4SeverityDefinitions(),
       }),
     });
     const j = await r.json().catch(() => ({}));
@@ -12711,9 +15969,38 @@ async function runPolicyUpdatePipeline() {
       outEl.style.display = 'none';
       outEl.textContent = '';
     }
-    openPolicyPipelineResultModal(payload);
+    const fgSourceName = (regulationText || '').slice(0, 60).replace(/\s+/g, ' ').trim() || 'Manual regulation entry';
+    openPolicyPipelineResultModal(payload, {
+      meta: { sourceName: fgSourceName, generatedAt: new Date().toISOString() },
+    });
     toast('success', 'Pipeline finished', `Stage: ${payload.stage_reached || 'done'}`);
+    addNotif(`pup-fg-${Date.now()}`, 'Pipeline complete', `Stage reached: ${pupStageLabel(payload.stage_reached)}`, 'success', payload);
+
+    // Persist result to DB (non-blocking, non-fatal). Server kicks off PDF
+    // generation in the background; capture the run id so the Download PDF
+    // button can ask the server for the signed URL when it's ready.
+    fetch('/api/ai-tools/pipeline-runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgContext: orgEl ? orgEl.value : '',
+        regulationText,
+        policyCount: policies.length,
+        result: payload,
+        sourceName: fgSourceName,
+      }),
+    }).then(r => r.json()).then(saved => {
+      if (saved && saved.id) {
+        console.log('[PipelineRuns] Saved run:', saved.id, 'PDF:', saved.reportPdfStatus || 'unknown');
+        if (policyUpdatePipelineLastMeta) policyUpdatePipelineLastMeta.runId = saved.id;
+      }
+    }).catch(e => console.warn('[PipelineRuns] Save failed (non-fatal):', e.message));
   } catch (e) {
+    if (e && e.name === 'AbortError') {
+      toast('info', 'Cancelled', 'Pipeline request was cancelled. The server may still finish processing.');
+      closePolicyPipelineResultModal();
+      return;
+    }
     console.error('[Policy update pipeline]', e);
     closePolicyPipelineResultModal();
     if (outEl) {
@@ -12722,10 +16009,209 @@ async function runPolicyUpdatePipeline() {
     }
     toast('error', 'Pipeline failed', e.message || '');
   } finally {
+    pupPipelineAbortController = null;
     btn.disabled = false;
     if (stepNext) stepNext.disabled = false;
     syncPolicyPipelineStepperDOM();
-    if (statusEl) statusEl.textContent = '';
+    setPupPipelineLoadingOverlay(false);
+    if (stepperCard) stepperCard.removeAttribute('aria-busy');
+  }
+}
+
+// ─── Background Pipeline Run (triggered from internal sources) ─
+
+async function runPipelineInBackground(regulationText, sourceFile) {
+  const runId = `bg-pipeline-${Date.now()}`;
+  addNotif(runId, `Pipeline: ${sourceFile}`, 'Loading org context…', 'running');
+
+  try {
+    // ── 1. Resolve org context ──────────────────────────────────
+    let orgContextText = '';
+    let orgName = '';
+    const defaultOrgId = getPcfgDefaultOrgId();
+
+    // Use already-cached orgs if available, otherwise fetch
+    let allOrgs = Array.isArray(pupOrgContextsCache) && pupOrgContextsCache.length
+      ? pupOrgContextsCache
+      : [];
+    if (!allOrgs.length) {
+      try {
+        const od = await fetchJSON(API.orgContexts);
+        allOrgs = Array.isArray(od.contexts) ? od.contexts : [];
+        pupOrgContextsCache = allOrgs;
+      } catch (e) { console.warn('[BgPipeline] org fetch failed:', e.message); }
+    }
+
+    // Pick: configured default → first available
+    const org = (defaultOrgId && allOrgs.find(o => String(o.id) === String(defaultOrgId)))
+      || allOrgs[0]
+      || null;
+
+    if (org) {
+      orgContextText = formatOrgProfileTextForPipeline(org);
+      orgName = org.nameEn || org.name || 'Unknown org';
+      updateNotif(runId, { message: `Org: ${orgName} · Fetching GRC policies…` });
+    } else {
+      updateNotif(runId, { message: '⚠ No org context found · Fetching GRC policies…' });
+      toast('warning', 'No default org set', 'Go to Pipeline Configuration → Default org selection to set one.');
+    }
+
+    // ── 2. GRC policies ────────────────────────────────────────
+    let policies = [];
+    try {
+      const rawPols = await fetchGrcPolicies();
+      policies = rawPols.map(p => ({
+        id:      String(p.id),
+        title:   p.refId ? `[${p.refId}] ${p.name}` : p.name,
+        content: p.description || p.name,
+      }));
+    } catch (e) { console.warn('[BgPipeline] GRC policies fetch failed:', e.message); }
+
+    updateNotif(runId, { message: `Running · ${orgName || 'no org'} · ${policies.length} policies · ${sourceFile}` });
+
+    // ── 3. Run the pipeline ────────────────────────────────────
+    const r = await fetch('/api/ai-tools/policy-update-pipeline', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgContext:    orgContextText,
+        regulationText,
+        policies,
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText || 'Pipeline failed');
+    const payload = j.data != null ? j.data : j;
+
+    // ── 4. Persist to DB ───────────────────────────────────────
+    // Server kicks off PDF generation in the background after this insert and
+    // uploads it to the pup-data bucket. We capture the new run id so the
+    // result modal's Download PDF button asks the server for it.
+    let savedRunId = null;
+    try {
+      const saveRes = await fetch('/api/ai-tools/pipeline-runs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orgContext: orgContextText,
+          regulationText,
+          policyCount: policies.length,
+          result: payload,
+          sourceName: sourceFile,
+        }),
+      });
+      const saved = await saveRes.json().catch(() => ({}));
+      if (saved && saved.id) savedRunId = saved.id;
+    } catch (_) { /* non-fatal */ }
+
+    updateNotif(runId, {
+      status:  'success',
+      message: `Stage: ${pupStageLabel(payload.stage_reached)} · ${policies.length} policies · click to view`,
+      result:  payload,
+    });
+
+    // Mirror the foreground PUP flow: auto-surface the result modal when the
+    // background pipeline finishes, so the user gets the same end-of-run UX
+    // regardless of which entry point started the run.
+    try {
+      openPolicyPipelineResultModal(payload, {
+        meta: {
+          sourceName: sourceFile,
+          generatedAt: new Date().toISOString(),
+          ...(savedRunId ? { runId: savedRunId } : {}),
+        },
+      });
+    } catch (modalErr) {
+      console.warn('[BgPipeline] Failed to auto-open result modal:', modalErr && modalErr.message);
+    }
+    toast('success', 'Pipeline finished', `Stage: ${pupStageLabel(payload.stage_reached)} · ${sourceFile}`);
+
+  } catch (e) {
+    console.error('[BgPipeline]', e);
+    updateNotif(runId, { status: 'error', message: e.message || 'Pipeline failed' });
+    toast('error', 'Pipeline failed', e.message || `Background pipeline failed for ${sourceFile}.`);
+  }
+}
+
+// ─── Pipeline History ──────────────────────────────────────────
+
+async function loadPipelineHistoryPage() {
+  const loadEl  = document.getElementById('ph-loading');
+  const emptyEl = document.getElementById('ph-empty');
+  const errEl   = document.getElementById('ph-error');
+  const gridEl  = document.getElementById('ph-grid');
+  if (!gridEl) return;
+
+  if (loadEl)  { loadEl.style.display = 'flex'; }
+  if (emptyEl) { emptyEl.style.display = 'none'; }
+  if (errEl)   { errEl.style.display = 'none'; errEl.textContent = ''; }
+  gridEl.innerHTML = '';
+
+  try {
+    const res  = await fetch('/api/ai-tools/pipeline-runs');
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+
+    if (loadEl) loadEl.style.display = 'none';
+    const runs = json.data || [];
+
+    if (!runs.length) {
+      if (emptyEl) emptyEl.style.display = 'flex';
+      return;
+    }
+
+    gridEl.innerHTML = runs.map(run => {
+      const date    = run.created_at ? new Date(run.created_at).toLocaleString() : '—';
+      const stage   = run.stage_reached || '—';
+      const snippet = run.regulation_snippet || 'No regulation text';
+      const org     = run.org_context ? run.org_context.slice(0, 80).replace(/\s+/g, ' ').trim() : '—';
+      const count   = run.policy_count ?? '—';
+      const stageColor = stage === 'f4' ? '#16a34a' : stage === 'f3' ? '#ca8a04' : stage === 'f2' ? '#2563eb' : stage === 'f1' ? '#9333ea' : '#64748b';
+
+      return `<div class="ph-card" onclick="openPhRunDetail('${esc(run.id)}')">
+        <div class="ph-card-header">
+          <span class="ph-stage-badge" style="background:${stageColor}1a;color:${stageColor};border-color:${stageColor}40">${esc(pupStageLabel ? pupStageLabel(stage) : stage)}</span>
+          <span class="ph-card-date">${esc(date)}</span>
+        </div>
+        <p class="ph-card-snippet">${esc(snippet)}</p>
+        <div class="ph-card-meta">
+          <span class="ph-meta-item">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" stroke-width="1.4"/><path d="M5 7h6M5 10h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+            ${esc(String(count))} polic${count === 1 ? 'y' : 'ies'}
+          </span>
+          ${org !== '—' ? `<span class="ph-meta-item">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="2" y="6" width="12" height="8" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M5 6V5a3 3 0 0 1 6 0v1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+            ${esc(org)}…
+          </span>` : ''}
+        </div>
+        <div class="ph-card-arrow" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+      </div>`;
+    }).join('');
+
+  } catch (e) {
+    if (loadEl) loadEl.style.display = 'none';
+    if (errEl)  { errEl.textContent = e.message || String(e); errEl.style.display = 'block'; }
+  }
+}
+
+async function openPhRunDetail(id) {
+  try {
+    const res  = await fetch(`/api/ai-tools/pipeline-runs/${encodeURIComponent(id)}`);
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || res.statusText);
+    openPolicyPipelineResultModal(json.data.result, {
+      meta: {
+        runId: json.data.id,
+        generatedAt: json.data.created_at,
+        sourceName: json.data.regulation_snippet
+          ? String(json.data.regulation_snippet).slice(0, 80)
+          : 'Pipeline run',
+      },
+    });
+  } catch (e) {
+    toast('error', 'Could not load run', e.message || String(e));
   }
 }
 
@@ -12734,9 +16220,13 @@ async function runPolicyUpdatePipeline() {
 console.log('[admin.js] Script loaded, readyState:', document.readyState);
 
 function initApp() {
+  initDataStudioHub();
   initDataStudioUpload();
+  initDataStudioPolicyUpload();
+  initDataStudioRiskScenarioUpload();
   initPolicyPipelineResultModalListeners();
   initPolicyUpdatePipeline();
+  initPupExtractModal();
   const { page, subId } = parseRoute();
   console.log(`[admin.js] Initializing → route: /${page}${subId ? '/' + subId : ''}`);
   navigateTo(page, true, subId);

@@ -1,0 +1,70 @@
+# Data Studio · minimal risk-matrix stored library template
+# Upload via Data Studio wizard → POST /api/stored-libraries/upload/ (same as Libraries → YAML “Add”).
+# Full reference examples: backend/library/libraries/critical_risk_matrix_5x5.yaml (CISO Assistant repo).
+
+urn: urn:wathba:risk:library:data-studio-matrix-example
+ref_id: wathba_data_studio_matrix_example
+locale: en
+name: Data Studio — risk matrix library (example)
+description: Replace URNs/ref_ids and matrix content before production use.
+version: 1
+publication_date: 2026-01-01
+provider: wathba
+packager: wathba
+
+objects:
+  risk_matrices:
+    - urn: urn:wathba:risk:matrix:example-3x3
+      ref_id: example_3x3
+      name: Example 3×3 matrix
+      description: Template — grid[row][col] indexes into risk[] (see your GRC / shipped YAML for convention).
+      is_enabled: true
+      probability:
+        - id: 1
+          abbreviation: R
+          name: Rare
+          description: Unlikely
+          hexcolor: '#E8F4FC'
+        - id: 2
+          abbreviation: M
+          name: Medium
+          description: Possible
+          hexcolor: '#B8D4EA'
+        - id: 3
+          abbreviation: L
+          name: Likely
+          description: Expected
+          hexcolor: '#88B4D8'
+      impact:
+        - id: 1
+          abbreviation: L
+          name: Low
+          description: Limited effect
+          hexcolor: '#E8FCE8'
+        - id: 2
+          abbreviation: M
+          name: Medium
+          description: Noticeable effect
+          hexcolor: '#C8F0C8'
+        - id: 3
+          abbreviation: H
+          name: High
+          description: Severe effect
+          hexcolor: '#A0E0A0'
+      risk:
+        - abbreviation: L
+          name: Low
+          description: Acceptable
+          hexcolor: '#92D050'
+        - abbreviation: M
+          name: Medium
+          description: Mitigation needed
+          hexcolor: '#FFC000'
+        - abbreviation: H
+          name: High
+          description: Unacceptable until treated
+          hexcolor: '#FF0000'
+      grid:
+        - [0, 1, 2]
+        - [1, 1, 2]
+        - [2, 2, 2]

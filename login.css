@@ -355,18 +355,19 @@
 
 .login-footer {
   text-align: center;
-  font-size: 11px;
-  color: #9ca3af;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
 }
-.login-footer-logo {
-  max-width: 120px;
-  height: auto;
-  margin-top: 6px;
-  opacity: 0.85;
+.login-footer-powered {
+  font-size: 11px;
+  color: #9ca3af;
+}
+.login-footer-powered strong {
+  color: #374151;
+  font-weight: 700;
+  letter-spacing: 1px;
 }
 
 /* ---------- Responsive ---------- */

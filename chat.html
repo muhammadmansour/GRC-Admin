@@ -48,37 +48,98 @@
           </a>
         </div>
 
-        <button class="sidebar-section-toggle" data-section="controls">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4L8 1L14 4V12L8 15L2 12V4Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          CONTROLS
+        <button class="sidebar-section-toggle" data-section="ai-tools">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M8 2V5M8 11V14M2 8H5M11 8H14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          AI TOOLS
           <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         </button>
-        <div class="sidebar-section open" id="section-controls">
+        <div class="sidebar-section open" id="section-ai-tools">
           <a href="/controls-studio" class="sidebar-item" data-page="controls-studio" style="text-decoration:none">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 8H6L8 3L10 13L12 8H14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M5 8L7 10L11 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Controls Studio
+          </a>
+          <a href="/merge-optimizer" class="sidebar-item" data-page="merge-optimizer" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 2L12 14M4 4V8C4 10.2 5.8 12 8 12H12M4 4L2 6M4 4L6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Merge Optimizer
+          </a>
+          <a href="/policy-ingestion" class="sidebar-item" data-page="policy-ingestion" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H10L13 5V13C13 13.6 12.6 14 12 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 8H10M5 10.5H8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+            Policy Ingestion
+          </a>
+          <a href="/org-contexts" class="sidebar-item" data-page="org-contexts" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 13V4C2 3.4 2.4 3 3 3H13C13.6 3 14 3.4 14 4V13M5 7H11M5 10H9M8 3V1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Org Contexts
+          </a>
+          <a href="/data-studio" class="sidebar-item" data-page="data-studio" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H7L9 4H13C13.6 4 14 4.4 14 5V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 7H14M3 10H14M6 7V14M10 7V14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            Data Studio
           </a>
         </div>
 
-        <div class="sidebar-divider"></div>
+        <button class="sidebar-section-toggle" data-section="workbench">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 3H14V11C14 11.6 13.6 12 13 12H3C2.4 12 2 11.6 2 11V3Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 3L8 8L14 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 14H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          WORKBENCH
+          <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <div class="sidebar-section open" id="section-workbench">
+          <a href="/workbench" class="sidebar-item" data-page="workbench" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4H14M2 4V12C2 12.6 2.4 13 3 13H13C13.6 13 14 12.6 14 12V4M6 7H10M6 10H8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Frameworks
+          </a>
+        </div>
 
-        <a href="/org-contexts" class="sidebar-item" data-page="org-contexts" style="text-decoration:none">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 13V4C2 3.4 2.4 3 3 3H13C13.6 3 14 3.4 14 4V13M5 7H11M5 10H9M8 3V1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          Org Contexts
-        </a>
-        <a href="/prompts" class="sidebar-item" data-page="prompts" style="text-decoration:none">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H13C13.6 2 14 2.4 14 3V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5"/><path d="M5 5H11M5 8H11M5 11H8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-          Prompts
-        </a>
-        <a href="/file-collections" class="sidebar-item" data-page="file-collections" style="text-decoration:none">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 5V12C2 12.6 2.4 13 3 13H13C13.6 13 14 12.6 14 12V7C14 6.4 13.6 6 13 6H8L6.5 4H3C2.4 4 2 4.4 2 5Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          File Collections
-        </a>
+        <button class="sidebar-section-toggle" data-section="legislative-updates">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2H12V4H4V2ZM3 5H13V14C13 14.6 12.6 15 12 15H4C3.4 15 3 14.6 3 14V5ZM5 8H11M5 11H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          LEGISLATIVE UPDATES
+          <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <div class="sidebar-section open" id="section-legislative-updates">
+          <a href="/legislative-internal-sources" class="sidebar-item" data-page="legislative-internal-sources" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2H12V4H4V2ZM3 5H13V14C13 14.6 12.6 15 12 15H4C3.4 15 3 14.6 3 14V5ZM5 8H11M5 11H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Internal sources
+          </a>
+          <a href="/legislative-external-sources" class="sidebar-item" data-page="legislative-external-sources" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1C4.1 1 1 4.1 1 8C1 11.9 4.1 15 8 15C11.9 15 15 11.9 15 8C15 4.1 11.9 1 8 1Z" stroke="currentColor" stroke-width="1.5"/><path d="M1 8H15M8 1C9.7 2.7 10.5 5.3 10.5 8C10.5 10.7 9.7 13.3 8 15C6.3 13.3 5.5 10.7 5.5 8C5.5 5.3 6.3 2.7 8 1Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            External sources
+          </a>
+          <a href="/pipeline-configuration" class="sidebar-item" data-page="pipeline-configuration" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1V3M8 13V15M2.5 4L4 5.5M12 10.5L13.5 12M1 8H3M13 8H15M2.5 12L4 10.5M12 5.5L13.5 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8 5C9.657 5 11 6.343 11 8C11 9.657 9.657 11 8 11C6.343 11 5 9.657 5 8C5 6.343 6.343 5 8 5Z" stroke="currentColor" stroke-width="1.5"/></svg>
+            Pipeline configuration
+          </a>
+        </div>
+
+        <button class="sidebar-section-toggle" data-section="auditlog">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H10L13 5V14H3V2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 2V5H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 8H11M5 10.5H9M5 13H7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          AUDIT LOG
+          <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <div class="sidebar-section" id="section-auditlog">
+          <a href="/audit-log" class="sidebar-item" data-page="audit-log" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1C4.1 1 1 4.1 1 8s3.1 7 7 7 7-3.1 7-7-3.1-7-7-7z" stroke="currentColor" stroke-width="1.5"/><path d="M8 4V8L10.5 9.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Assessments
+          </a>
+        </div>
+
+        <button class="sidebar-section-toggle" data-section="config">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.5"/><path d="M8 1V3M8 13V15M1 8H3M13 8H15M3.5 3.5L5 5M11 11L12.5 12.5M3.5 12.5L5 11M11 5L12.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          CONFIGURATION
+          <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <div class="sidebar-section open" id="section-config">
+          <a href="/prompts" class="sidebar-item" data-page="prompts" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 3H14M2 6.5H10M2 10H12M2 13.5H8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            Prompts
+          </a>
+          <a href="/file-collections" class="sidebar-item" data-page="file-collections" style="text-decoration:none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 5V12C2 12.6 2.4 13 3 13H13C13.6 13 14 12.6 14 12V7C14 6.4 13.6 6 13 6H8L6.5 4H3C2.4 4 2 4.4 2 5Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            File Collections
+          </a>
+        </div>
       </nav>
 
       <div class="sidebar-footer">
-        <button class="sidebar-logout-btn" onclick="adminLogout()">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 12H3C2.4 12 2 11.6 2 11V3C2 2.4 2.4 2 3 2H5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9 10L12 7L9 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 7H5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <button class="sidebar-logout-btn" onclick="adminLogout()" title="Sign out">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 12H3C2.4 12 2 11.6 2 11V3C2 2.4 2.4 2 3 2H5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 10L12 7L9 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 7H5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
           Sign Out
         </button>
       </div>

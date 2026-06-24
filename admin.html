@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/admin.css">
+  <link rel="stylesheet" href="/admin.css?v=20260610-notif-dot-v2">
 </head>
 <body class="admin-body">
 
@@ -71,7 +71,7 @@
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H7L9 4H13C13.6 4 14 4.4 14 5V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 7H14M3 10H14M6 7V14M10 7V14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
             Data Studio
           </button>
-          <button class="sidebar-item" data-page="policy-update-pipeline">
+          <button class="sidebar-item" data-page="policy-update-pipeline" style="display:none">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 3H13M3 8H13M3 13H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11 11L13 13M11 13L13 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             Policy update pipeline
           </button>
@@ -94,6 +94,26 @@
               <span class="wb-jobs-detail" id="wb-jobs-detail"></span>
             </div>
           </div>
+        </div>
+
+        <button class="sidebar-section-toggle" data-section="legislative-updates">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2H12V4H4V2ZM3 5H13V14C13 14.6 12.6 15 12 15H4C3.4 15 3 14.6 3 14V5ZM5 8H11M5 11H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          LEGISLATIVE UPDATES
+          <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <div class="sidebar-section open" id="section-legislative-updates">
+          <button class="sidebar-item" data-page="legislative-internal-sources">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2H12V4H4V2ZM3 5H13V14C13 14.6 12.6 15 12 15H4C3.4 15 3 14.6 3 14V5ZM5 8H11M5 11H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Internal sources
+          </button>
+          <button class="sidebar-item" data-page="legislative-external-sources">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1C4.1 1 1 4.1 1 8C1 11.9 4.1 15 8 15C11.9 15 15 11.9 15 8C15 4.1 11.9 1 8 1Z" stroke="currentColor" stroke-width="1.5"/><path d="M1 8H15M8 1C9.7 2.7 10.5 5.3 10.5 8C10.5 10.7 9.7 13.3 8 15C6.3 13.3 5.5 10.7 5.5 8C5.5 5.3 6.3 2.7 8 1Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            External sources
+          </button>
+          <button class="sidebar-item" data-page="pipeline-configuration">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1V3M8 13V15M2.5 4L4 5.5M12 10.5L13.5 12M1 8H3M13 8H15M2.5 12L4 10.5M12 5.5L13.5 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8 5C9.657 5 11 6.343 11 8C11 9.657 9.657 11 8 11C6.343 11 5 9.657 5 8C5 6.343 6.343 5 8 5Z" stroke="currentColor" stroke-width="1.5"/></svg>
+            Pipeline configuration
+          </button>
         </div>
 
         <button class="sidebar-section-toggle" data-section="auditlog">
@@ -147,6 +167,25 @@
           </div>
         </div>
         <div class="admin-header-right">
+          <!-- Notification bell -->
+          <div class="notif-wrap" id="notif-wrap">
+            <button type="button" class="notif-bell-btn" id="notif-bell-btn" aria-label="Notifications" aria-haspopup="true" aria-expanded="false" onclick="toggleNotifPanel()">
+              <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M10 2a6 6 0 0 0-6 6v3l-1.5 2.5A1 1 0 0 0 3.5 15h13a1 1 0 0 0 .866-1.5L16 11V8a6 6 0 0 0-6-6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                <path d="M8.5 17a1.5 1.5 0 0 0 3 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <span class="notif-badge" id="notif-badge" hidden></span>
+            </button>
+            <div class="notif-panel" id="notif-panel" hidden>
+              <div class="notif-panel-header">
+                <span class="notif-panel-title">Notifications</span>
+                <button type="button" class="notif-clear-btn" id="notif-clear-btn" onclick="clearDoneNotifications()">Clear done</button>
+              </div>
+              <div class="notif-list" id="notif-list">
+                <div class="notif-empty-msg">No active processes</div>
+              </div>
+            </div>
+          </div>
           <span class="admin-header-powered">Powered by <strong>WATHBAH</strong></span>
         </div>
       </header>
@@ -529,74 +568,373 @@
           <div class="page-container">
             <div class="page-header">
               <h1 class="page-title">Data Studio</h1>
-              <p class="page-subtitle">Import applied controls and structured data from Excel workbooks</p>
+              <p class="page-subtitle">Import applied controls, policies, and risk scenarios from structured data</p>
             </div>
 
-            <div class="admin-card">
-              <div class="admin-card-header">
-                <div class="admin-card-header-left">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H7L9 4H13C13.6 4 14 4.4 14 5V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  <h2>Upload spreadsheet</h2>
+            <div class="ds-shell">
+
+            <nav class="ds-hub-grid" aria-label="Data Studio imports">
+              <button type="button" class="ds-hub-card is-active" data-ds-pane="applied" id="ds-hub-applied" aria-current="page">
+                <div class="ds-hub-card-icon stat-bg-primary">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 11H15M9 15H15M9 19H15M14 21H8C6.89543 21 6 20.1046 6 19V5C6 3.89543 6.89543 3 8 3H13L18 8V19C18 20.1046 17.1046 21 16 21H14" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </div>
-              </div>
-              <p class="ds-intro">Drop an Excel file here or click to browse. The first sheet is parsed; column headers come from row 1.</p>
-              <input type="file" id="ds-file-input" class="ds-file-input" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv">
-              <div id="ds-dropzone" class="ds-dropzone" role="button" tabindex="0">
-                <svg width="36" height="36" viewBox="0 0 24 24" fill="none"><path d="M12 15V3M12 3L8 7M12 3L16 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 14V18C4 19.1 4.9 20 6 20H18C19.1 20 20 19.1 20 18V14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-                <p><strong>Excel or CSV</strong> — .xlsx, .xls, or .csv</p>
-                <p class="ds-dropzone-hint">Used for importing applied controls (and future structured imports).</p>
-              </div>
-              <p id="ds-status" class="ds-status" aria-live="polite"></p>
-              <div id="ds-preview" class="ds-preview" style="display:none">
-                <div id="ds-preview-meta" class="ds-preview-meta"></div>
-                <div class="ds-preview-scroll">
-                  <table class="ds-preview-table" id="ds-preview-table">
-                    <thead><tr id="ds-preview-thead"></tr></thead>
-                    <tbody></tbody>
-                  </table>
+                <div class="ds-hub-card-body">
+                  <span class="ds-hub-card-title">Applied controls</span>
+                  <span class="ds-hub-card-desc">Excel → GRC applied controls</span>
                 </div>
-              </div>
-              <div id="ds-import-panel" class="ds-import-panel" style="display:none">
-                <h3 class="ds-import-title">Import to GRC</h3>
-                <div class="ds-import-row">
-                  <label class="ds-label" for="ds-folder-select">Folder (domain) <span class="ds-req">*</span></label>
-                  <select id="ds-folder-select" class="ds-select">
-                    <option value="">Select after loading…</option>
-                  </select>
+              </button>
+              <button type="button" class="ds-hub-card" data-ds-pane="policies" id="ds-hub-policies">
+                <div class="ds-hub-card-icon stat-bg-violet">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 3H8C6.89543 3 6 3.89543 6 5V19C6 20.1046 6.89543 21 8 21H16C17.1046 21 18 20.1046 18 19V8L14 3Z" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 3V9H18M10 13H14M10 17H14" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>
                 </div>
-                <div class="ds-import-row">
-                  <label class="ds-label" for="ds-compliance-assessment">Audit UUID (for linking requirement assessments)</label>
-                  <input type="text" id="ds-compliance-assessment" class="ds-select" placeholder="optional if auto-pick is on — paste MHRSD audit UUID to force a specific assessment" autocomplete="off">
+                <div class="ds-hub-card-body">
+                  <span class="ds-hub-card-title">Policies</span>
+                  <span class="ds-hub-card-desc">Policy catalog import</span>
                 </div>
-                <div class="ds-import-row" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-                  <label class="ds-label" for="ds-framework-select" style="margin:0">Framework (used by Auto-create + Create audit):</label>
-                  <select id="ds-framework-select" class="ds-select" style="flex:1;min-width:240px">
-                    <option value="">— Choose framework —</option>
-                  </select>
-                  <input type="text" id="ds-audit-name" class="ds-select" placeholder="Audit name (default: '<framework> – Controls Catalog')" style="flex:1;min-width:240px" autocomplete="off">
-                  <button type="button" class="btn-admin-ghost" id="ds-btn-create-audit" title="POST /api/compliance-assessments/ — RAs are auto-generated by GRC on insert">Create audit</button>
+              </button>
+              <button type="button" class="ds-hub-card" data-ds-pane="risk-scenarios" id="ds-hub-risk-scenarios">
+                <div class="ds-hub-card-icon stat-bg-amber">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 9V13M12 17H12.01M21 12C21 16.9706 16.9706 21 12 21C7.02944 21 3 16.9706 3 12C3 7.02944 7.02944 3 12 3C16.9706 3 21 7.02944 21 12Z" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>
                 </div>
-                <div class="ds-import-row" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-                  <label class="ds-label" for="ds-perimeter-uuid" style="margin:0">Perimeter UUID (optional — auto-discovered for the chosen folder if blank):</label>
-                  <input type="text" id="ds-perimeter-uuid" class="ds-select" placeholder="optional — paste a perimeter UUID to override; needed only if your GRC has no perimeter in the chosen folder" style="flex:1;min-width:280px" autocomplete="off">
+                <div class="ds-hub-card-body">
+                  <span class="ds-hub-card-title">Risk scenarios</span>
+                  <span class="ds-hub-card-desc">Matrix → folder → assessment → scenarios</span>
                 </div>
-                <div class="ds-import-actions" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px">
-                  <button type="button" class="btn-admin-primary" id="ds-btn-import-grc" disabled>Import all rows to GRC</button>
+              </button>
+            </nav>
+
+            <div class="ds-pane ds-pane-active" id="ds-pane-applied" data-ds-pane="applied" aria-hidden="false">
+              <div class="admin-card">
+                <div class="admin-card-header">
+                  <div class="admin-card-header-left">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H7L9 4H13C13.6 4 14 4.4 14 5V13C14 13.6 13.6 14 13 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <h2>Upload spreadsheet</h2>
+                  </div>
                 </div>
-                <pre id="ds-import-log" class="ds-import-log" style="display:none"></pre>
+                <p class="ds-intro">Drop an Excel file here or click to browse. The first sheet is parsed; column headers come from row 1.</p>
+                <p class="ds-intro"><a href="/templates/data-studio-applied-controls-import-template.xlsx" download class="admin-link-btn">Download template (.xlsx)</a> — CISO Assistant <strong>POST /api/applied-controls/</strong> format: <strong>name</strong> + <strong>ref_id</strong> (recommended), optional <strong>description</strong> with Arabic context columns; see <strong>Instructions</strong> for the full field list.</p>
+                <input type="file" id="ds-file-input" class="ds-file-input" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv">
+                <div id="ds-dropzone" class="ds-dropzone" role="button" tabindex="0">
+                  <div class="ds-dropzone-inner">
+                    <div class="ds-dropzone-visual" aria-hidden="true">
+                      <svg width="32" height="32" viewBox="0 0 24 24" fill="none"><path d="M12 15V3M12 3L8 7M12 3L16 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 14V18C4 19.1 4.9 20 6 20H18C19.1 20 20 19.1 20 18V14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    </div>
+                    <p class="ds-dropzone-title"><strong>Excel or CSV</strong> — .xlsx, .xls, or .csv</p>
+                    <p class="ds-dropzone-hint">Used for importing applied controls (and future structured imports).</p>
+                    <div class="ds-dropzone-actions">
+                      <span class="ds-upload-chip ds-upload-chip--primary">Browse files</span>
+                    </div>
+                  </div>
+                </div>
+                <p id="ds-status" class="ds-status" aria-live="polite"></p>
+                <div id="ds-preview" class="ds-preview" style="display:none">
+                  <div id="ds-preview-meta" class="ds-preview-meta"></div>
+                  <div class="ds-preview-scroll">
+                    <table class="ds-preview-table" id="ds-preview-table">
+                      <thead><tr id="ds-preview-thead"></tr></thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                </div>
+                <div id="ds-import-panel" class="ds-import-panel" style="display:none">
+                  <h3 class="ds-import-title">Import to GRC</h3>
+                  <div class="ds-import-row">
+                    <label class="ds-label" for="ds-folder-select">Folder (domain) <span class="ds-req">*</span></label>
+                    <select id="ds-folder-select" class="ds-select">
+                      <option value="">Select after loading…</option>
+                    </select>
+                  </div>
+                  <div class="ds-import-row">
+                    <label class="ds-label" for="ds-compliance-assessment">Audit UUID (for linking requirement assessments)</label>
+                    <input type="text" id="ds-compliance-assessment" class="ds-select" placeholder="optional if auto-pick is on — paste MHRSD audit UUID to force a specific assessment" autocomplete="off">
+                  </div>
+                  <div class="ds-import-row" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                    <label class="ds-label" for="ds-framework-select" style="margin:0">Framework (used by Auto-create + Create audit):</label>
+                    <select id="ds-framework-select" class="ds-select" style="flex:1;min-width:240px">
+                      <option value="">— Choose framework —</option>
+                    </select>
+                    <input type="text" id="ds-audit-name" class="ds-select" placeholder="Audit name (default: '<framework> – Controls Catalog')" style="flex:1;min-width:240px" autocomplete="off">
+                    <button type="button" class="btn-admin-ghost" id="ds-btn-create-audit" title="POST /api/compliance-assessments/ — RAs are auto-generated by GRC on insert">Create audit</button>
+                  </div>
+                  <div class="ds-import-row" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                    <label class="ds-label" for="ds-perimeter-uuid" style="margin:0">Perimeter UUID (optional — auto-discovered for the chosen folder if blank):</label>
+                    <input type="text" id="ds-perimeter-uuid" class="ds-select" placeholder="optional — paste a perimeter UUID to override; needed only if your GRC has no perimeter in the chosen folder" style="flex:1;min-width:280px" autocomplete="off">
+                  </div>
+                  <div class="ds-import-actions" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px">
+                    <button type="button" class="btn-admin-primary" id="ds-btn-import-grc" disabled>Import all rows to GRC</button>
+                  </div>
+                  <pre id="ds-import-log" class="ds-import-log" style="display:none"></pre>
+                </div>
               </div>
             </div>
+
+            <div class="ds-pane" id="ds-pane-policies" data-ds-pane="policies" aria-hidden="true">
+              <div class="admin-card">
+                <div class="admin-card-header">
+                  <div class="admin-card-header-left">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2h5l2 2h3v9a1 1 0 01-1 1H4a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/></svg>
+                    <h2>Import policies</h2>
+                  </div>
+                </div>
+                <p class="ds-intro">Each row is sent as the JSON body for <strong>POST /api/policies/</strong> (plus <strong>folder</strong>, which you choose below — not a column). Headers must match writable field names (<strong>name</strong> is required; <strong>description</strong> and others are optional).</p>
+                <p class="ds-intro"><a href="/templates/data-studio-policies-import-template.xlsx" download class="admin-link-btn">Download template (.xlsx)</a> — minimal example: <strong>name</strong> + <strong>description</strong> only; see <strong>Instructions</strong> for extra fields (first sheet is imported).</p>
+                <input type="file" id="dsp-file-input" class="ds-file-input" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv">
+                <div id="dsp-dropzone" class="ds-dropzone" role="button" tabindex="0">
+                  <div class="ds-dropzone-inner">
+                    <div class="ds-dropzone-visual" aria-hidden="true">
+                      <svg width="32" height="32" viewBox="0 0 24 24" fill="none"><path d="M12 15V3M12 3L8 7M12 3L16 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 14V18C4 19.1 4.9 20 6 20H18C19.1 20 20 19.1 20 18V14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    </div>
+                    <p class="ds-dropzone-title"><strong>Excel or CSV</strong> — first sheet only; headers in row 1</p>
+                    <p class="ds-dropzone-hint">Requires a <strong>name</strong> per row — empty rows skipped.</p>
+                    <div class="ds-dropzone-actions">
+                      <span class="ds-upload-chip ds-upload-chip--primary">Browse files</span>
+                    </div>
+                  </div>
+                </div>
+                <p id="dsp-status" class="ds-status" aria-live="polite"></p>
+                <div id="dsp-preview" class="ds-preview" style="display:none">
+                  <div id="dsp-preview-meta" class="ds-preview-meta"></div>
+                  <div class="ds-preview-scroll">
+                    <table class="ds-preview-table" id="dsp-preview-table">
+                      <thead><tr id="dsp-preview-thead"></tr></thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                </div>
+                <div id="dsp-import-panel" class="ds-import-panel" style="display:none">
+                  <h3 class="ds-import-title">Import to GRC</h3>
+                  <div class="ds-import-row">
+                    <label class="ds-label" for="dsp-folder-select">Folder (domain) <span class="ds-req">*</span></label>
+                    <select id="dsp-folder-select" class="ds-select">
+                      <option value="">Select after loading…</option>
+                    </select>
+                  </div>
+                  <div class="ds-import-actions" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px">
+                    <button type="button" class="btn-admin-primary" id="dsp-btn-import-grc" disabled>Import rows as policies</button>
+                  </div>
+                  <pre id="dsp-import-log" class="ds-import-log" style="display:none"></pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="ds-pane" id="ds-pane-risk-scenarios" data-ds-pane="risk-scenarios" aria-hidden="true">
+              <div class="admin-card">
+                <div class="admin-card-header">
+                  <div class="admin-card-header-left">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 14A6 6 0 108 2a6 6 0 000 12zM8 7v3M8 11h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    <h2>Risk assessments &amp; scenarios</h2>
+                  </div>
+                </div>
+                <p class="ds-intro"><strong>Risk matrix</strong> is its own first step — then <strong>folder</strong> &amp; optional new perimeter → <strong>perimeter &amp; assessment</strong> (footer creates the assessment) → <strong>scenarios</strong> (manual or Excel). Proxies under <code>/api/grc/</code>. Session forwards <code>Authorization: Token …</code>. Shapes: <code>GET /api/schema/</code>.</p>
+
+                <div class="pup-stepper-card ds-rs-stepper">
+                  <nav class="pup-stepper-top" aria-label="Risk assessment wizard steps">
+                    <ol class="pup-stepper-labels" role="list">
+                      <li class="drs-step-label is-active" data-drs-step-label="0">
+                        <span class="drs-step-label-num">1</span>
+                        <span class="drs-step-label-text">Risk matrix</span>
+                      </li>
+                      <li class="drs-step-label" data-drs-step-label="1">
+                        <span class="drs-step-label-num">2</span>
+                        <span class="drs-step-label-text">Folder &amp; perimeter</span>
+                      </li>
+                      <li class="drs-step-label" data-drs-step-label="2">
+                        <span class="drs-step-label-num">3</span>
+                        <span class="drs-step-label-text">Risk assessment</span>
+                      </li>
+                      <li class="drs-step-label" data-drs-step-label="3">
+                        <span class="drs-step-label-num">4</span>
+                        <span class="drs-step-label-text">Risk scenarios</span>
+                      </li>
+                    </ol>
+                    <div class="pup-stepper-progress-rail" aria-hidden="true">
+                      <div class="pup-stepper-progress-fill" id="drs-stepper-progress-fill" style="width:25%"></div>
+                    </div>
+                  </nav>
+
+                  <div class="pup-stepper-panels">
+                    <div class="drs-step-panel" id="drs-step-panel-0" data-drs-step-index="0" role="tabpanel">
+                      <div class="ds-risk-section ds-risk-section--flush">
+                        <h3 class="ds-import-title ds-import-title--flush">Risk matrix <span class="ds-req">*</span></h3>
+                        <p class="ds-import-note ds-import-note--dense">Assessments require a matrix. Load from GRC libraries if needed — see OpenAPI/RiskMatrix — then choose one below. You will pick folder and perimeter on the next steps.</p>
+                        <div class="ds-risk-actions">
+                          <button type="button" class="btn-admin-ghost" id="dsr-btn-reload-matrices-only">Reload risk matrices</button>
+                        </div>
+                        <div class="ds-import-row">
+                          <label class="ds-label" for="dsr-matrix-select">Matrix for assessments</label>
+                          <select id="dsr-matrix-select" class="ds-select">
+                            <option value="">Loading…</option>
+                          </select>
+                        </div>
+
+                        <div class="ds-risk-split">
+                          <h3 class="ds-import-title">Upload risk matrix library (YAML)</h3>
+                          <p class="ds-import-note">Targets GRC <code>POST /api/stored-libraries/upload/</code> via the relay (raw YAML body + <code>Content-Disposition: attachment; filename=…</code>), matching Policy ingestion uploads. YAML root needs <code>urn</code>, <code>ref_id</code>, <code>name</code>, <code>version</code>, and <code>objects.risk_matrices</code> or legacy <code>objects.risk_matrix</code> — not both.</p>
+                          <p class="ds-intro ds-intro--risk-link"><a href="/templates/data-studio-risk-matrix-library-template.yaml" download class="admin-link-btn">Download YAML template</a> · Canonical full example in CISO Assistant: <code>backend/library/libraries/critical_risk_matrix_5x5.yaml</code></p>
+                          <div class="ds-import-row">
+                            <label class="ds-label" for="dsm-file-risk-yaml">Library YAML file</label>
+                            <div class="ds-upload-field">
+                              <input type="file" id="dsm-file-risk-yaml" class="ds-upload-input" accept=".yaml,.yml,text/yaml,text/x-yaml,application/yaml,.yaml,text/plain" tabindex="-1" aria-label="YAML risk matrix library file, .yaml or .yml">
+                              <div class="ds-upload-bar">
+                                <button type="button" class="ds-upload-browse" id="dsm-file-risk-yaml-browse">Choose file…</button>
+                                <span id="dsm-matrix-yaml-label" class="ds-upload-filename is-empty" aria-live="polite">No file selected</span>
+                              </div>
+                            </div>
+
+
+                          </div>
+                          <div class="ds-import-actions ds-rs-actions-top">
+                            <button type="button" class="btn-admin-primary" id="dsr-btn-create-matrix">Upload YAML library</button>
+                          </div>
+                          <p class="ds-import-note"><strong>Next step</strong> is folder &amp; scope — reload folders there.</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="drs-step-panel" id="drs-step-panel-1" data-drs-step-index="1" role="tabpanel" hidden>
+                      <div class="ds-risk-section ds-risk-section--flush">
+                        <h3 class="ds-import-title ds-import-title--flush">Folder &amp; new perimeter</h3>
+                        <p class="ds-import-note ds-import-note--dense">Choose the organizational folder that perimeters belong to; you can create a perimeter here before advancing.</p>
+                        <div class="ds-risk-actions">
+                          <button type="button" class="btn-admin-ghost" id="dsr-btn-reload-risk-folders">Reload folders</button>
+                        </div>
+                        <div class="ds-import-row">
+                          <label class="ds-label" for="dsr-folder-select">Folder (domain) <span class="ds-req">*</span></label>
+                          <select id="dsr-folder-select" class="ds-select">
+                            <option value="">Select…</option>
+                          </select>
+                        </div>
+                        <div class="ds-import-row ds-import-row-inline-flex">
+                          <label class="ds-label" for="dsr-perimeter-name">Create perimeter</label>
+                          <div class="ds-risk-inline">
+                            <input type="text" id="dsr-perimeter-name" class="ds-select" placeholder="Name (no /)" autocomplete="off">
+                            <button type="button" class="btn-admin-ghost" id="dsr-btn-create-perimeter"><code>POST</code> /api/perimeters/</button>
+                          </div>
+                        </div>
+                        <p class="ds-import-note ds-import-note--after-control"><strong>Next step</strong> loads perimeters for the selected folder, then you create or choose the assessment.</p>
+                      </div>
+                    </div>
+
+                    <div class="drs-step-panel" id="drs-step-panel-2" data-drs-step-index="2" role="tabpanel" hidden>
+                      <div class="ds-risk-section ds-risk-section--flush">
+                        <h3 class="ds-import-title ds-import-title--flush">Perimeter &amp; assessment</h3>
+                        <div class="ds-import-row">
+                          <label class="ds-label" for="dsr-perimeter-select">Perimeter <span class="ds-req">*</span></label>
+                          <select id="dsr-perimeter-select" class="ds-select">
+                            <option value="">Select a perimeter (list loads from folder on step 2)…</option>
+                          </select>
+                        </div>
+                        <p class="ds-import-note"><strong>Risk matrix</strong> comes from step 1 (Risk matrix).</p>
+                        <div class="ds-import-row">
+                          <label class="ds-label" for="dsr-ra-name">Assessment name <span class="ds-req">*</span></label>
+                          <input type="text" id="dsr-ra-name" class="ds-select" placeholder="e.g. Q2 2026 ICT risk assessment" autocomplete="off">
+                        </div>
+                        <div class="ds-import-row">
+                          <label class="ds-label" for="dsr-ra-description">Description</label>
+                          <input type="text" id="dsr-ra-description" class="ds-select" placeholder="Optional" autocomplete="off">
+                        </div>
+                        <div class="ds-import-row">
+                          <label class="ds-label" for="dsr-ra-ref-id">ref_id</label>
+                          <input type="text" id="dsr-ra-ref-id" class="ds-select" placeholder="Optional stable reference" autocomplete="off">
+                        </div>
+                        <p class="ds-import-note ds-import-note--after-control">Use the primary button below — <strong>Create assessment &amp; continue</strong> — to save this assessment in GRC and open the scenarios step.</p>
+                      </div>
+                    </div>
+
+                    <div class="drs-step-panel" id="drs-step-panel-3" data-drs-step-index="3" role="tabpanel" hidden>
+                      <div class="ds-risk-section ds-risk-section--flush">
+                        <div class="ds-import-row">
+                          <label class="ds-label" for="dsr-assessment-uuid">Risk assessment UUID</label>
+                          <input type="text" id="dsr-assessment-uuid" class="ds-select ds-input-mono" placeholder="Filled after Risk assessment step, or paste from GRC">
+                        </div>
+                        <p class="ds-intro ds-intro--risk-scenarios"><a href="/templates/data-studio-risk-scenarios-import-template.xlsx" download class="admin-link-btn">Download Excel template (.xlsx)</a> — columns <strong>name</strong> (+ <strong>description</strong>, <strong>ref_id</strong>). Optional column <strong>risk_assessment</strong> overrides the UUID above per row.</p>
+                        <input type="file" id="dsrs-file-input" class="ds-file-input" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv">
+                        <div id="dsrs-dropzone" class="ds-dropzone" role="button" tabindex="0">
+                          <div class="ds-dropzone-inner">
+                            <div class="ds-dropzone-visual" aria-hidden="true">
+                              <svg width="32" height="32" viewBox="0 0 24 24" fill="none"><path d="M12 15V3M12 3L8 7M12 3L16 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 14V18C4 19.1 4.9 20 6 20H18C19.1 20 20 19.1 20 18V14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                            </div>
+                            <p class="ds-dropzone-title"><strong>Excel or CSV</strong> — one scenario per row</p>
+                            <p class="ds-dropzone-hint">First sheet, headers row 1; each row <code>POST</code>s to /api/risk-scenarios/</p>
+                            <div class="ds-dropzone-actions">
+                              <span class="ds-upload-chip ds-upload-chip--primary">Browse files</span>
+                            </div>
+                          </div>
+                        </div>
+                        <p id="dsrs-status" class="ds-status" aria-live="polite"></p>
+                        <div id="dsrs-preview" class="ds-preview" style="display:none">
+                          <div id="dsrs-preview-meta" class="ds-preview-meta"></div>
+                          <div class="ds-preview-scroll">
+                            <table class="ds-preview-table" id="dsrs-preview-table">
+                              <thead><tr id="dsrs-preview-thead"></tr></thead>
+                              <tbody></tbody>
+                            </table>
+                          </div>
+                        </div>
+                        <div id="dsrs-import-panel" class="ds-import-panel" style="display:none">
+                          <h3 class="ds-import-title">Import to GRC</h3>
+                          <div class="ds-import-actions ds-rs-import-actions">
+                            <button type="button" class="btn-admin-primary" id="dsrs-btn-import-grc" disabled>Import all rows as risk scenarios</button>
+                          </div>
+                          <pre id="dsrs-import-log" class="ds-import-log ds-rs-import-log" style="display:none" aria-live="polite"></pre>
+                        </div>
+                        <div class="ds-import-row ds-import-row-inline-flex ds-rs-single-scenario-row">
+                          <label class="ds-label" for="dsr-scenario-name">Single scenario</label>
+                          <div class="ds-risk-inline">
+                            <input type="text" id="dsr-scenario-name" class="ds-select" placeholder="Name" autocomplete="off">
+                            <button type="button" class="btn-admin-primary" id="dsr-btn-create-scenario"><code>POST</code> one row</button>
+                          </div>
+                        </div>
+                        <div class="ds-import-actions">
+                          <button type="button" class="btn-admin-ghost" id="dsr-btn-action-plan"><code>GET</code> …/action-plan/</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="pup-stepper-actions">
+                    <button type="button" class="btn-admin-ghost" id="drs-step-back">Back</button>
+                    <div class="pup-stepper-actions-right">
+                      <span id="drs-step-status" class="ds-status" aria-live="polite"></span>
+                      <button type="button" class="btn-admin-primary" id="drs-step-next">Next step</button>
+                    </div>
+                  </div>
+                </div>
+
+                <pre id="dsr-log" class="ds-import-log" style="display:none;margin-top:16px" aria-live="polite"></pre>
+              </div>
+            </div>
+            </div>
+            <!-- end ds-shell -->
           </div>
         </section>
 
         <!-- =================== POLICY UPDATE PIPELINE =================== -->
-        <section class="admin-page" id="page-policy-update-pipeline">
-          <div class="page-container">
-            <div class="page-header">
-              <h1 class="page-title">Policy update pipeline</h1>
-              <p class="page-subtitle">F1 relevance → F2 extract policy points → F3 embedding match → F4 impact (Gemini). Uses <code>GEMINI_API_KEY</code> on the server.</p>
-            </div>
-            <div class="admin-card pup-stepper-card">
+        <section class="admin-page pup-page" id="page-policy-update-pipeline">
+          <div class="page-container pup-page-container">
+            <header class="pup-page-header">
+              <div class="pup-page-header-main">
+                <h1 class="page-title pup-page-title">Policy update pipeline</h1>
+                <button type="button" class="pup-history-btn" onclick="navigateTo('pipeline-history')">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.4"/><path d="M8 4.5V8l2.5 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  History
+                </button>
+              </div>
+              <div class="pup-stage-rail" aria-label="Pipeline stages" title="Stages run in order after you submit">
+                <span class="pup-stage-rail-label">Flow</span>
+                <ol class="pup-stage-rail-list">
+                  <li><span class="pup-stage-dot pup-stage-dot--f1">1</span><span class="pup-stage-name">Relevance</span></li>
+                  <li class="pup-stage-rail-chev" aria-hidden="true">→</li>
+                  <li><span class="pup-stage-dot pup-stage-dot--f2">2</span><span class="pup-stage-name">Points</span></li>
+                  <li class="pup-stage-rail-chev" aria-hidden="true">→</li>
+                  <li><span class="pup-stage-dot pup-stage-dot--f3">3</span><span class="pup-stage-name">Match</span></li>
+                  <li class="pup-stage-rail-chev" aria-hidden="true">→</li>
+                  <li><span class="pup-stage-dot pup-stage-dot--f4">4</span><span class="pup-stage-name">Impact</span></li>
+                </ol>
+              </div>
+            </header>
+
+            <div class="admin-card pup-stepper-card pup-stepper-card--modern">
               <nav class="pup-stepper-top" aria-label="Pipeline wizard steps">
                 <ol class="pup-stepper-labels" role="list">
                   <li class="pup-step-label is-active" data-pup-step-label="0">
@@ -615,77 +953,169 @@
                 <div class="pup-stepper-progress-rail" aria-hidden="true">
                   <div class="pup-stepper-progress-fill" id="pup-stepper-progress-fill"></div>
                 </div>
+                <p class="pup-step-caption" id="pup-step-caption" aria-live="polite">Step 1 of 3 · Organisation</p>
               </nav>
 
               <div class="pup-stepper-panels">
                 <div class="pup-step-panel" id="pup-step-panel-0" data-pup-step-index="0" role="tabpanel" aria-labelledby="pup-heading-0">
                   <div class="pup-step-intro">
                     <h2 class="pup-step-heading" id="pup-heading-0">Organisation context</h2>
-                    <p class="ds-import-note pup-step-intro-note">Sent to <strong>F1 relevance</strong> with the regulation excerpt. Use a sample dataset bundle so organisation, regulation, and policies stay in scope together, or pick <strong>Custom</strong> and edit freely.</p>
+                    <p class="ds-import-note pup-step-intro-note">This text is used together with a regulation excerpt for the initial <strong>relevance</strong> step. Load a sample bundle to keep all steps aligned, or choose <strong>Custom</strong> and edit freely.</p>
                   </div>
-                  <div class="ds-import-row pup-preset-bundle-row">
-                    <label class="ds-label" for="pup-preset-select">Sample dataset (bundled inputs)</label>
-                    <select id="pup-preset-select" class="ds-select">
-                      <option value="python-demo" selected>Fintech + financial-institution PDPL demo (matches Python example.py)</option>
-                      <option value="energy">Energy sector + OT/critical-infra regulation (internally aligned)</option>
-                      <option value="healthcare">Healthcare + clinical / EHR regulation (internally aligned)</option>
-                      <option value="dga-saudi">Saudi digital government — DGA‑style illustrative bundle (AR/EN synthetic)</option>
-                      <option value="custom">Custom — do not overwrite my fields</option>
-                    </select>
-                    <p class="ds-import-note pup-preset-bundle-hint">Loads all three wizard steps consistently. Selecting a preset clears <strong>Organization profile</strong> so nothing overwrites org context silently. To re-apply the same bundle after edits, switch to <strong>Custom</strong>, then choose the sample again.</p>
-                  </div>
-                  <div class="ds-import-row">
-                    <label class="ds-label" for="pup-org-select">Organization profile</label>
-                    <select id="pup-org-select" class="ds-select">
-                      <option value="">Loading contexts…</option>
-                    </select>
-                    <p class="ds-import-note" style="margin-top:8px">Selecting a profile <strong>replaces</strong> the context textarea (Organization Contexts). Use <strong>— Select organization context —</strong> with a sample dataset, or combine profile + dataset by choosing profile after loading a bundle only if you accept the mismatch.</p>
-                  </div>
-                  <div class="ds-import-row" style="margin-top:12px">
-                    <label class="ds-label" for="pup-org-context">Organisation context (sent to pipeline)</label>
-                    <textarea id="pup-org-context" class="admin-form-textarea" rows="8" placeholder="Industry, jurisdiction, activities, compliance scope…"></textarea>
+                  <div class="pup-step-grid pup-step-grid--split">
+                    <div class="pup-panel">
+                      <h3 class="pup-panel-title">Data source</h3>
+                      <p class="pup-panel-lead">Preset bundles fill organisation, regulation, and policies together.</p>
+                      <div class="pup-field-stack">
+                        <div class="ds-import-row pup-preset-bundle-row">
+                          <label class="ds-label" for="pup-preset-select">Sample dataset</label>
+                          <select id="pup-preset-select" class="ds-select pup-select">
+                            <option value="python-demo" selected>Fintech + financial-institution PDPL demo (matches Python example.py)</option>
+                            <option value="energy">Energy sector + OT/critical-infra regulation (internally aligned)</option>
+                            <option value="healthcare">Healthcare + clinical / EHR regulation (internally aligned)</option>
+                            <option value="dga-saudi">Saudi digital government — DGA‑style illustrative bundle (AR/EN synthetic)</option>
+                            <option value="custom">Custom — do not overwrite my fields</option>
+                          </select>
+                          <p class="ds-import-note pup-preset-bundle-hint">Selecting a preset clears <strong>Organization profile</strong> so the textarea is not overwritten silently. To reload a sample after edits, switch to <strong>Custom</strong>, then pick the sample again.</p>
+                        </div>
+                        <div class="ds-import-row">
+                          <label class="ds-label" for="pup-org-select">Organization profile</label>
+                          <select id="pup-org-select" class="ds-select pup-select">
+                            <option value="">Loading contexts…</option>
+                          </select>
+                          <p class="ds-import-note pup-field-hint">Choosing a profile <strong>replaces</strong> the organisation context below. Use <strong>— Select organization context —</strong> with a bundle, or apply a profile only if you accept mismatched inputs.</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="pup-panel pup-panel--emphasis">
+                      <h3 class="pup-panel-title">Organisation context</h3>
+                      <p class="pup-panel-lead">Industry, jurisdiction, scope, and activities the model should assume.</p>
+                      <div class="ds-import-row pup-field-flush">
+                        <label class="ds-label visually-hidden" for="pup-org-context">Organisation context (sent to pipeline)</label>
+                        <textarea id="pup-org-context" class="admin-form-textarea pup-textarea-comfort" rows="10" placeholder="Industry, jurisdiction, activities, compliance scope…"></textarea>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
                 <div class="pup-step-panel" id="pup-step-panel-1" data-pup-step-index="1" hidden role="tabpanel" aria-labelledby="pup-heading-1">
                   <div class="pup-step-intro">
                     <h2 class="pup-step-heading" id="pup-heading-1">Regulation text <span class="ds-req">*</span></h2>
-                    <p class="ds-import-note pup-step-intro-note">Filled by the sample dataset from step 1 (or paste your own). Required before <strong>Next</strong> / <strong>Run</strong>.</p>
+                    <p class="ds-import-note pup-step-intro-note">Supplied by your bundle or paste your own. Required before <strong>Next</strong> or <strong>Run pipeline</strong>.</p>
                   </div>
-                  <div class="ds-import-row">
-                    <label class="ds-label" for="pup-regulation">Regulation excerpt or document</label>
-                    <textarea id="pup-regulation" class="admin-form-textarea pup-step-tall-textarea" rows="14" placeholder="Full or partial regulation text to analyse…"></textarea>
+                  <div class="pup-panel pup-panel--single">
+                    <h3 class="pup-panel-title">Regulation excerpt</h3>
+                    <div class="ds-import-row pup-field-flush">
+                      <label class="ds-label visually-hidden" for="pup-regulation">Regulation excerpt or document</label>
+                      <textarea id="pup-regulation" class="admin-form-textarea pup-step-tall-textarea" rows="14" placeholder="Full or partial regulation text to analyse…"></textarea>
+                    </div>
                   </div>
                 </div>
 
                 <div class="pup-step-panel" id="pup-step-panel-2" data-pup-step-index="2" hidden role="tabpanel" aria-labelledby="pup-heading-2">
                   <div class="pup-step-intro">
-                    <h2 class="pup-step-heading" id="pup-heading-2">Policies (JSON)</h2>
-                    <p class="ds-import-note pup-step-intro-note">Indexed for F3/F4. Loaded with the bundle from step 1. Clear to <code>[]</code> if you only want F1/F2.</p>
+                    <h2 class="pup-step-heading" id="pup-heading-2">Policies &amp; optional rubric</h2>
+                    <p class="ds-import-note pup-step-intro-note">With policies in the list, the run will <strong>match them to the regulation</strong> and <strong>analyse impact</strong>. Use <code>[]</code> to stop after extracting points from the text (no matching or impact).</p>
                   </div>
-                  <div class="ds-import-row">
-                    <label class="ds-label" for="pup-policies-json">Policies JSON array</label>
-                    <p class="ds-import-note" style="margin-bottom:8px">Each item needs <code>id</code> and <code>content</code>; optional <code>title</code>. Example: <code>[{&quot;id&quot;:&quot;p1&quot;,&quot;title&quot;:&quot;Access&quot;,&quot;content&quot;:&quot;…&quot;}]</code></p>
-                    <textarea id="pup-policies-json" class="admin-form-textarea admin-form-textarea-mono pup-step-tall-textarea" rows="14" placeholder='[{"id":"pol-1","title":"Example policy","content":"Policy body text…"}]'></textarea>
+                  <div class="pup-step-stack">
+                    <div class="pup-panel pup-panel--single">
+                      <h3 class="pup-panel-title">Indexed policies <span class="pup-tag-muted">JSON</span></h3>
+                      <p class="pup-panel-lead">Each object needs <code>id</code> and <code>content</code>; <code>title</code> is optional.</p>
+                      <div class="pup-f4-toolbar" style="margin-bottom:8px">
+                        <button type="button" class="btn-admin-ghost pup-f4-toolbar-btn" id="pup-load-grc-policies">
+                          Load from GRC
+                        </button>
+                        <button type="button" class="btn-admin-ghost pup-f4-toolbar-btn pup-upload-extract-btn" id="pup-upload-extract-btn">
+                          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true"><path d="M6.5 1v7M3.5 3.5L6.5 1l3 2.5M2 9.5v1.5a.5.5 0 00.5.5h8a.5.5 0 00.5-.5V9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                          Upload &amp; Extract
+                        </button>
+                        <input type="file" id="pup-policy-file-input" accept=".pdf,.docx,.doc,.txt,.md" hidden aria-hidden="true">
+                        <span id="pup-grc-policies-status" class="pup-grc-status"></span>
+                      </div>
+                      <div class="ds-import-row pup-field-flush">
+                        <label class="ds-label visually-hidden" for="pup-policies-json">Policies JSON array</label>
+                        <textarea id="pup-policies-json" class="admin-form-textarea admin-form-textarea-mono pup-step-tall-textarea" rows="12" placeholder='[{"id":"pol-1","title":"Example policy","content":"Policy body text…"}]'></textarea>
+                      </div>
+                    </div>
+                    <div class="pup-panel pup-panel--f4 pup-f4-sev-block">
+                      <h3 class="pup-panel-title">Severity definitions <span class="pup-tag-optional">Optional</span></h3>
+                      <p class="pup-panel-lead">Leave empty for the base impact prompt. Use <strong>Fill suggested definitions</strong> for a ready-made rubric you can edit, or type your own.</p>
+                      <div class="pup-f4-toolbar">
+                        <button type="button" class="btn-admin-ghost pup-f4-toolbar-btn" id="pup-f4-fill-defaults">
+                          Fill suggested definitions
+                        </button>
+                      </div>
+                      <div class="pup-f4-sev-grid">
+                        <div class="pup-f4-sev-field pup-f4-sev-field--critical">
+                          <label class="pup-f4-sev-sublabel" for="pup-f4-sev-critical">Critical</label>
+                          <textarea id="pup-f4-sev-critical" class="admin-form-textarea" rows="2" autocomplete="off"></textarea>
+                        </div>
+                        <div class="pup-f4-sev-field pup-f4-sev-field--high">
+                          <label class="pup-f4-sev-sublabel" for="pup-f4-sev-high">High</label>
+                          <textarea id="pup-f4-sev-high" class="admin-form-textarea" rows="2" autocomplete="off"></textarea>
+                        </div>
+                        <div class="pup-f4-sev-field pup-f4-sev-field--medium">
+                          <label class="pup-f4-sev-sublabel" for="pup-f4-sev-medium">Medium</label>
+                          <textarea id="pup-f4-sev-medium" class="admin-form-textarea" rows="2" autocomplete="off"></textarea>
+                        </div>
+                        <div class="pup-f4-sev-field pup-f4-sev-field--low">
+                          <label class="pup-f4-sev-sublabel" for="pup-f4-sev-low">Low</label>
+                          <textarea id="pup-f4-sev-low" class="admin-form-textarea" rows="2" autocomplete="off"></textarea>
+                        </div>
+                        <div class="pup-f4-sev-field pup-f4-sev-field--none pup-f4-sev-field--span2">
+                          <label class="pup-f4-sev-sublabel" for="pup-f4-sev-none">None</label>
+                          <textarea id="pup-f4-sev-none" class="admin-form-textarea" rows="2" autocomplete="off"></textarea>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
 
               <div class="pup-stepper-actions">
-                <button type="button" class="btn-admin-ghost" id="pup-step-back">Back</button>
+                <button type="button" class="btn-admin-ghost pup-btn-back" id="pup-step-back">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M8 3L3 7L8 11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Back
+                </button>
                 <div class="pup-stepper-actions-right">
-                  <span id="pup-status" class="ds-status" aria-live="polite"></span>
-                  <button type="button" class="btn-admin-primary" id="pup-step-next">
+                  <button type="button" class="btn-admin-primary pup-btn-next" id="pup-step-next">
                     Next
                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M6 3L11 7L6 11M11 7H3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                   </button>
-                  <button type="button" class="btn-admin-primary" id="pup-run-btn" hidden>
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 7H11M8 4L11 7L8 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <button type="button" class="btn-admin-primary pup-btn-run" id="pup-run-btn" hidden>
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 3.5L12.5 8L4 12.5V3.5Z" fill="currentColor"/></svg>
                     Run pipeline
                   </button>
                 </div>
               </div>
-              <pre id="pup-result" class="ds-import-log" style="display:none;margin-top:16px;max-height:480px;overflow:auto"></pre>
+              <pre id="pup-result" class="ds-import-log pup-inline-log" style="display:none"></pre>
+            </div>
+          </div>
+
+          <div
+            class="pup-pipeline-loading-overlay"
+            id="pup-pipeline-loading-overlay"
+            hidden
+            aria-hidden="true"
+            aria-labelledby="pup-pipeline-loading-title"
+            role="dialog"
+          >
+            <div class="pup-pipeline-loading-panel">
+              <div class="pup-pipeline-loading-spinner" aria-hidden="true"></div>
+              <h2 class="pup-pipeline-loading-title" id="pup-pipeline-loading-title">Running pipeline</h2>
+              <p class="pup-pipeline-loading-stages">
+                <span class="pup-pipeline-stage pup-pipeline-stage--on">Relevance</span>
+                <span class="pup-pipeline-stage-sep" aria-hidden="true">→</span>
+                <span class="pup-pipeline-stage">Extraction</span>
+                <span class="pup-pipeline-stage-sep" aria-hidden="true">→</span>
+                <span class="pup-pipeline-stage">Matching</span>
+                <span class="pup-pipeline-stage-sep" aria-hidden="true">→</span>
+                <span class="pup-pipeline-stage">Impact</span>
+              </p>
+              <p class="pup-pipeline-loading-hint">This may take a minute. The server may keep working briefly after cancel.</p>
+              <button type="button" class="btn-admin-ghost pup-pipeline-cancel-btn" id="pup-pipeline-cancel-btn">
+                Cancel
+              </button>
             </div>
           </div>
         </section>
@@ -730,6 +1160,211 @@
             </div>
             <div class="fc-stats-grid" id="fc-stats"><!-- Populated by JS --></div>
             <div id="fc-collections-list"><!-- Populated by JS --></div>
+          </div>
+        </section>
+
+        <!-- =================== LEGISLATIVE — INTERNAL SOURCES =================== -->
+        <section class="admin-page lu-page" id="page-legislative-internal-sources">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header page-header-row">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">Internal sources</h1>
+                <p class="page-subtitle">Upload and manage legislative reference documents for your organisation</p>
+              </div>
+              <button type="button" class="btn-admin-primary lu-btn-add-source" id="lu-add-source-btn">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3V13M3 8H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                Add source
+              </button>
+            </header>
+
+            <!-- Tabs -->
+            <div class="lu-is-tabs-wrap">
+              <div class="lu-is-tabs" role="tablist" aria-label="Internal sources views">
+                <button type="button" class="lu-is-tab is-active" role="tab" id="lu-is-tab-files" data-lu-is-tab="files" aria-selected="true" aria-controls="lu-is-panel-files">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M8 1H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5L8 1zm0 0v4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Uploaded files
+                  <span class="lu-is-tab-count" id="lu-is-tab-files-count"></span>
+                </button>
+                <button type="button" class="lu-is-tab" role="tab" id="lu-is-tab-policies" data-lu-is-tab="policies" aria-selected="false" aria-controls="lu-is-panel-policies">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M2 4h10M2 7h7M2 10h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+                  Extracted regulations
+                  <span class="lu-is-tab-count" id="lu-is-tab-policies-count"></span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Tab panel: Uploaded Files -->
+            <div id="lu-is-panel-files" role="tabpanel" aria-labelledby="lu-is-tab-files">
+              <div class="admin-card lu-panel">
+                <div id="lu-internal-loading" class="lu-loading lu-loading-panel" style="display:none">
+                  <div class="spinner"></div>
+                  <span>Loading sources…</span>
+                </div>
+                <div id="lu-internal-empty" class="lu-empty-state" style="display:none">
+                  <div class="lu-empty-icon" aria-hidden="true">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8M14 2L20 8M14 2V8H20" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </div>
+                  <p class="lu-empty-title">No sources yet</p>
+                  <p class="lu-empty-desc">Add PDFs, Word, or other reference files. They are stored securely and listed here.</p>
+                </div>
+                <div class="lu-table-shell" id="lu-internal-table-wrap" style="display:none">
+                  <table class="lu-table lu-table-internal">
+                    <thead>
+                      <tr>
+                        <th class="lu-col-name">Name</th>
+                        <th class="lu-col-desc">Description</th>
+                        <th class="lu-col-user">Uploaded by</th>
+                        <th class="lu-col-date">Added</th>
+                        <th class="lu-col-actions" scope="col">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody id="lu-internal-tbody"></tbody>
+                  </table>
+                </div>
+                <p class="lu-error" id="lu-internal-error" role="alert" style="display:none"></p>
+              </div>
+            </div>
+
+            <!-- Tab panel: Extracted Regulations -->
+            <div id="lu-is-panel-policies" role="tabpanel" aria-labelledby="lu-is-tab-policies" hidden>
+              <div id="lu-ep-loading" class="lu-loading lu-loading-panel" style="display:none">
+                <div class="spinner"></div>
+                <span>Loading extracted regulations…</span>
+              </div>
+              <div id="lu-ep-empty" class="lu-empty-state" style="display:none">
+                <div class="lu-empty-icon" aria-hidden="true">
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M9 12h6M9 16h4M17 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7l-4-4z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
+                <p class="lu-empty-title">No extracted regulations yet</p>
+                <p class="lu-empty-desc">Upload a regulation or legislation document — articles will be extracted automatically and appear here.</p>
+              </div>
+              <div id="lu-ep-grid" class="lu-ep-grid"></div>
+              <p class="lu-error" id="lu-ep-error" role="alert" style="display:none"></p>
+            </div>
+          </div>
+        </section>
+
+        <!-- =================== LEGISLATIVE — EXTERNAL SOURCES =================== -->
+        <section class="admin-page lu-page" id="page-legislative-external-sources">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">External sources</h1>
+                <p class="page-subtitle">Connectors and feeds for portals outside your organisation</p>
+              </div>
+            </header>
+            <div class="lu-external-card">
+              <div class="lu-external-inner">
+                <span class="lu-badge-soon">Coming soon</span>
+                <h2 class="lu-external-heading">External integrations</h2>
+                <p class="lu-external-copy">Plug in official gazettes, regulator APIs, and third-party legislative feeds. This space will let you subscribe and sync external sources alongside your internal library.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- =================== PIPELINE HISTORY =================== -->
+        <section class="admin-page lu-page" id="page-pipeline-history">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">Pipeline history</h1>
+                <p class="page-subtitle">Past policy update pipeline runs — click a card to view the full result.</p>
+              </div>
+              <button type="button" class="btn-admin-primary" onclick="navigateTo('policy-update-pipeline')" style="flex-shrink:0">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 2.5L11 7L3 11.5V2.5Z" fill="currentColor"/></svg>
+                New run
+              </button>
+            </header>
+            <div id="ph-loading" class="lu-loading lu-loading-panel" style="display:none">
+              <div class="spinner"></div>
+              <span>Loading history…</span>
+            </div>
+            <div id="ph-empty" class="lu-empty-state" style="display:none">
+              <div class="lu-empty-icon" aria-hidden="true">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/><path d="M12 7v5l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              </div>
+              <p class="lu-empty-title">No runs yet</p>
+              <p class="lu-empty-desc">Run the pipeline at least once and results will appear here automatically.</p>
+            </div>
+            <p class="lu-error" id="ph-error" role="alert" style="display:none"></p>
+            <div id="ph-grid" class="ph-grid"></div>
+          </div>
+        </section>
+
+        <!-- =================== PIPELINE CONFIGURATION =================== -->
+        <section class="admin-page lu-page" id="page-pipeline-configuration">
+          <div class="page-container lu-page-container">
+            <header class="lu-page-header page-header">
+              <div class="lu-page-header-text">
+                <h1 class="page-title">Pipeline configuration</h1>
+                <p class="page-subtitle">Tune how the policy update pipeline assesses impact and which organisation context is used by default.</p>
+              </div>
+            </header>
+            <div class="pcfg-tabs-wrap">
+              <div class="pcfg-tabs" role="tablist" aria-label="Pipeline configuration sections">
+                <button type="button" class="pcfg-tab active" role="tab" id="pcfg-tab-impact" data-pcfg-tab="impact" aria-selected="true" aria-controls="pcfg-panel-impact">Impact criteria</button>
+                <button type="button" class="pcfg-tab" role="tab" id="pcfg-tab-default-org" data-pcfg-tab="default-org" aria-selected="false" aria-controls="pcfg-panel-default-org">Default org selection</button>
+              </div>
+            </div>
+            <div id="pcfg-panel-impact" class="pcfg-tab-panel" role="tabpanel" aria-labelledby="pcfg-tab-impact">
+              <div class="admin-card lu-panel pcfg-panel">
+                <div class="pcfg-panel-inner">
+                  <p class="pcfg-lead">Define how each severity level should be interpreted by the AI during impact analysis. These definitions are saved to the database and automatically applied to every pipeline run.</p>
+                  <div id="pcfg-impact-loading" class="lu-loading lu-loading-panel" style="display:none">
+                    <div class="spinner"></div>
+                    <span>Loading…</span>
+                  </div>
+                  <div id="pcfg-impact-form">
+                    <div class="pup-f4-sev-grid">
+                      <div class="pup-f4-sev-field pup-f4-sev-field--critical">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-critical">Critical</label>
+                        <textarea id="pcfg-sev-critical" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as a critical impact…"></textarea>
+                      </div>
+                      <div class="pup-f4-sev-field pup-f4-sev-field--high">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-high">High</label>
+                        <textarea id="pcfg-sev-high" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as a high impact…"></textarea>
+                      </div>
+                      <div class="pup-f4-sev-field pup-f4-sev-field--medium">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-medium">Medium</label>
+                        <textarea id="pcfg-sev-medium" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as a medium impact…"></textarea>
+                      </div>
+                      <div class="pup-f4-sev-field pup-f4-sev-field--low">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-low">Low</label>
+                        <textarea id="pcfg-sev-low" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as a low impact…"></textarea>
+                      </div>
+                      <div class="pup-f4-sev-field pup-f4-sev-field--none pup-f4-sev-field--span2">
+                        <label class="pup-f4-sev-sublabel" for="pcfg-sev-none">None</label>
+                        <textarea id="pcfg-sev-none" class="admin-form-textarea" rows="3" autocomplete="off" placeholder="Describe what qualifies as no impact (optional)…"></textarea>
+                      </div>
+                    </div>
+                    <div class="pcfg-impact-actions">
+                      <button type="button" class="btn-admin-ghost" id="pcfg-impact-fill-suggested">Fill suggested definitions</button>
+                      <button type="button" class="btn-admin-primary" id="pcfg-impact-save">Save</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="pcfg-panel-default-org" class="pcfg-tab-panel" role="tabpanel" hidden aria-labelledby="pcfg-tab-default-org">
+              <div class="admin-card lu-panel pcfg-panel">
+                <div class="pcfg-panel-inner">
+                  <p class="pcfg-lead">Select a default organisation — it will be pre-selected every time you open the Policy Update Pipeline.</p>
+                  <div id="pcfg-org-loading" class="lu-loading lu-loading-panel" style="display:none">
+                    <div class="spinner"></div>
+                    <span>Loading organisations…</span>
+                  </div>
+                  <div id="pcfg-org-empty" class="lu-empty-state" style="display:none">
+                    <div class="lu-empty-icon" aria-hidden="true">
+                      <svg width="38" height="38" viewBox="0 0 24 24" fill="none"><rect x="3" y="7" width="18" height="13" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M8 7V5a2 2 0 0 1 4 0v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    </div>
+                    <p class="lu-empty-title">No organisations yet</p>
+                    <p class="lu-empty-desc">Add organisation contexts first, then return here to set a default.</p>
+                  </div>
+                  <div id="pcfg-org-list" class="pcfg-org-list"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1414,19 +2049,118 @@
     </div>
   </div>
 
-  <!-- Policy update pipeline — result modal -->
-  <div class="admin-modal-overlay" id="pup-result-modal-overlay" aria-hidden="true">
-    <div class="admin-modal admin-modal-lg pup-result-modal-shell" role="dialog" aria-modal="true" aria-labelledby="pup-result-modal-title">
+  <!-- Legislative updates — add internal source -->
+  <div class="admin-modal-overlay" id="lu-add-modal-overlay" aria-hidden="true">
+    <div class="admin-modal lu-add-modal" role="dialog" aria-modal="true" aria-labelledby="lu-add-modal-title">
       <div class="admin-modal-header">
-        <h3 class="admin-modal-title" id="pup-result-modal-title">Pipeline result</h3>
-        <button type="button" class="admin-modal-close" id="pup-result-modal-close" aria-label="Close">
+        <h3 class="admin-modal-title" id="lu-add-modal-title">Add source</h3>
+        <button type="button" class="admin-modal-close" id="lu-add-modal-close" aria-label="Close">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         </button>
       </div>
-      <div class="admin-modal-body pup-result-modal-body" id="pup-result-modal-body"></div>
+      <div class="admin-modal-body">
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-input-name">Name <span class="required">*</span></label>
+          <input type="text" class="admin-form-input" id="lu-input-name" placeholder="Source title" autocomplete="off">
+        </div>
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-input-description">Description</label>
+          <textarea class="admin-form-textarea" id="lu-input-description" rows="3" placeholder="Short description (optional)"></textarea>
+        </div>
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-input-file">File <span class="required">*</span></label>
+          <input type="file" class="admin-form-input" id="lu-input-file">
+        </div>
+        <p class="lu-modal-hint" id="lu-modal-error" style="display:none;color:var(--admin-danger,#b91c1c);margin:0;font-size:0.85rem"></p>
+      </div>
       <div class="admin-modal-footer">
-        <button type="button" class="btn-admin-ghost" id="pup-result-modal-copy-json">Copy JSON</button>
-        <button type="button" class="btn-admin-primary" id="pup-result-modal-close-btn">Close</button>
+        <button type="button" class="btn-admin-ghost" id="lu-add-modal-cancel">Cancel</button>
+        <button type="button" class="btn-admin-primary" id="lu-add-modal-submit">
+          <span class="btn-text">Upload</span>
+          <span class="btn-loading hidden" id="lu-add-modal-loading">
+            <svg class="spinner" width="14" height="14" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="2" stroke-opacity="0.3"/><path d="M9 2C13 2 16 5 16 9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            Uploading…
+          </span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Legislative updates — edit internal source -->
+  <div class="admin-modal-overlay" id="lu-edit-modal-overlay" aria-hidden="true">
+    <div class="admin-modal lu-add-modal" role="dialog" aria-modal="true" aria-labelledby="lu-edit-modal-title">
+      <div class="admin-modal-header">
+        <h3 class="admin-modal-title" id="lu-edit-modal-title">Edit source</h3>
+        <button type="button" class="admin-modal-close" id="lu-edit-modal-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="admin-modal-body">
+        <input type="hidden" id="lu-edit-input-id" value="">
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-edit-input-name">Name <span class="required">*</span></label>
+          <input type="text" class="admin-form-input" id="lu-edit-input-name" placeholder="Source title" autocomplete="off">
+        </div>
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="lu-edit-input-description">Description</label>
+          <textarea class="admin-form-textarea" id="lu-edit-input-description" rows="3" placeholder="Short description (optional)"></textarea>
+        </div>
+        <div class="admin-form-row lu-edit-file-row">
+          <span class="admin-form-label">Attached file</span>
+          <p class="lu-edit-file-hint" id="lu-edit-file-hint">—</p>
+          <p class="lu-edit-file-note">Replace the file by deleting this entry and adding a new source.</p>
+        </div>
+        <p class="lu-modal-hint" id="lu-edit-modal-error" style="display:none;color:var(--admin-danger,#b91c1c);margin:0;font-size:0.85rem"></p>
+      </div>
+      <div class="admin-modal-footer">
+        <button type="button" class="btn-admin-ghost" id="lu-edit-modal-cancel">Cancel</button>
+        <button type="button" class="btn-admin-primary" id="lu-edit-modal-submit">
+          <span class="btn-text">Save changes</span>
+          <span class="btn-loading hidden" id="lu-edit-modal-loading">
+            <svg class="spinner" width="14" height="14" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="2" stroke-opacity="0.3"/><path d="M9 2C13 2 16 5 16 9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            Saving…
+          </span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Policy update pipeline — result modal -->
+  <div class="admin-modal-overlay" id="pup-result-modal-overlay" aria-hidden="true">
+    <div class="admin-modal admin-modal-lg pup-result-modal-shell" role="dialog" aria-modal="true" aria-labelledby="pup-result-modal-title">
+      <div class="admin-modal-header pup-result-modal-header">
+        <h3 class="admin-modal-title" id="pup-result-modal-title">Pipeline result</h3>
+        <div class="pup-result-modal-header-actions">
+          <button
+            type="button"
+            class="admin-modal-icon-btn pup-result-modal-expand-btn"
+            id="pup-result-modal-expand"
+            aria-expanded="false"
+            title="Expand"
+            aria-label="Expand result"
+          >
+            <span class="pup-result-expand-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 3H3V6M10 3H13V6M13 10V13H10M3 10V13H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <span class="pup-result-collapse-icon hidden" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 6H3V3M10 6H13V3M13 10V13H10M3 10V13H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+          </button>
+          <button type="button" class="admin-modal-close" id="pup-result-modal-close" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="admin-modal-body pup-result-modal-body" id="pup-result-modal-body"></div>
+      <div class="admin-modal-footer pup-result-modal-footer">
+        <button type="button" class="btn-admin-ghost" id="pup-result-modal-download-pdf">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><path d="M12 3v12M8 11l4 4 4-4M5 21h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Download PDF
+        </button>
+        <div class="pup-result-modal-footer-actions">
+          <button type="button" class="btn-admin-ghost" id="pup-result-modal-close-btn">Close</button>
+          <button type="button" class="btn-admin-primary" id="pup-result-modal-confirm-btn">Confirm</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1447,8 +2181,58 @@
     </div>
   </div>
 
+  <!-- ── Global: Raw extracted policies data modal ───────────── -->
+  <div class="lu-raw-modal-overlay" id="lu-raw-modal-overlay">
+    <div class="lu-raw-modal">
+      <div class="lu-raw-modal-header">
+        <span class="lu-raw-modal-title" id="lu-raw-modal-title">Raw extracted policies</span>
+        <button class="lu-raw-modal-close" onclick="closeLuRawModal()" title="Close">&#x2715;</button>
+      </div>
+      <div class="lu-raw-modal-body">
+        <pre id="lu-raw-modal-pre"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Global: Regulation extraction result modal ───────────── -->
+  <div class="pup-extract-modal-overlay" id="pup-extract-modal-overlay" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="pup-extract-modal-title">
+    <div class="pup-extract-modal">
+      <div class="pup-extract-modal-header">
+        <h2 class="pup-extract-modal-title" id="pup-extract-modal-title">Extracted regulation</h2>
+        <span class="pup-extract-modal-meta" id="pup-extract-modal-meta"></span>
+      </div>
+      <div class="pup-extract-modal-body" id="pup-extract-modal-body"></div>
+      <div class="pup-extract-modal-footer">
+        <button type="button" class="btn-admin-ghost" id="pup-extract-cancel-btn">Cancel</button>
+        <button type="button" class="btn-admin-primary" id="pup-extract-run-btn">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 2.5L11 7L3 11.5V2.5Z" fill="currentColor"/></svg>
+          <span id="pup-extract-run-label">Run pipeline</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Global: Extraction in-progress overlay ──────────────── -->
+  <div class="pup-extract-loading-overlay" id="pup-extract-loading-overlay" hidden aria-hidden="true" role="status">
+    <div class="pup-extract-loading-panel">
+      <div class="pup-extract-spinner-wrap" aria-hidden="true">
+        <div class="pup-extract-spinner-ring"></div>
+        <div class="pup-extract-spinner-dot"></div>
+      </div>
+      <p class="pup-extract-loading-title">Extracting regulation</p>
+      <p class="pup-extract-loading-label" id="pup-extract-loading-label">Reading document…</p>
+      <div class="pup-extract-stages" aria-hidden="true">
+        <span class="pup-extract-stage-pill" id="pup-extract-stage-0">Reading</span>
+        <span class="pup-extract-stage-sep"></span>
+        <span class="pup-extract-stage-pill" id="pup-extract-stage-1">Analysing</span>
+        <span class="pup-extract-stage-sep"></span>
+        <span class="pup-extract-stage-pill" id="pup-extract-stage-2">Extracting</span>
+      </div>
+    </div>
+  </div>
+
   <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
   <script src="/client-env.js"></script>
-  <script src="/admin.js"></script>
+  <script src="/admin.js?v=20260610-notif-dot-v1"></script>
 </body>
 </html>

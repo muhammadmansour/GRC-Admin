@@ -5,7 +5,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "generate:policy-import-template": "node scripts/generate-data-studio-policy-template.js",
+    "generate:risk-scenario-import-template": "node scripts/generate-data-studio-risk-scenario-template.js",
+    "generate:applied-controls-import-template": "node scripts/generate-data-studio-applied-controls-template.js"
   },
   "keywords": [
     "framework",
@@ -16,9 +19,11 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@google-cloud/storage": "^7.19.0",
     "@google/genai": "^1.41.0",
     "better-sqlite3": "^12.6.2",
     "js-yaml": "^4.1.0",
+    "puppeteer": "^24.43.1",
     "xlsx": "^0.18.5"
   }
 }

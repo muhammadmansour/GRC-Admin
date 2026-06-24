@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const { GoogleGenAI } = require('@google/genai');
 const Database = require('better-sqlite3');
@@ -47,6 +48,101 @@ const MURAJI_API_URL = String(
 )
   .trim()
   .replace(/\/+$/, '');
+
+/** GCS bucket for legislative internal documents (override with GCS_LEGISLATIVE_BUCKET). Uses GOOGLE_APPLICATION_CREDENTIALS or default credentials. */
+const GCS_LEGISLATIVE_BUCKET_NAME = String(
+  process.env.GCS_LEGISLATIVE_BUCKET || 'local-legislative-updates-docs'
+).replace(/\/+$/, '');
+
+/** GCS bucket for Policy Update Pipeline (PUP) artifacts — generated report PDFs.
+ *  Override with GCS_PUP_BUCKET. Bucket must exist; create with `gsutil mb -p <project> gs://<bucket>` or in the GCS console. */
+const GCS_PUP_BUCKET_NAME = String(
+  process.env.GCS_PUP_BUCKET || 'pup-data'
+).replace(/\/+$/, '');
+
+/** Lazy-init GCS client for legislative uploads (optional dependency at runtime). */
+let _legislativeGcsCache = null;
+function getLegislativeGcsClient() {
+  if (_legislativeGcsCache && _legislativeGcsCache.err)
+    return { ok: false, error: _legislativeGcsCache.err };
+  if (_legislativeGcsCache && _legislativeGcsCache.storage)
+    return { ok: true, storage: _legislativeGcsCache.storage };
+  try {
+    const { Storage } = require('@google-cloud/storage');
+    const storage = new Storage();
+    _legislativeGcsCache = { storage };
+    return { ok: true, storage };
+  } catch (e) {
+    const err = e.message || String(e);
+    _legislativeGcsCache = { err };
+    return { ok: false, error: `Google Cloud Storage: ${err}` };
+  }
+}
+
+function legislativeSafeObjectSegment(name) {
+  const base = path.basename(String(name || 'file')).replace(/[^a-zA-Z0-9._-]/g, '_');
+  return base.slice(0, 200) || 'file';
+}
+
+function legislativePublicUrl(bucketName, objectPath) {
+  const enc = objectPath
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  return `https://storage.googleapis.com/${bucketName}/${enc}`;
+}
+
+async function legislativeSignedDownloadUrl(storage, bucketName, objectPath, mimeType) {
+  const opts = {
+    version: 'v4',
+    action: 'read',
+    expires: Date.now() + 60 * 60 * 1000,
+  };
+  if (mimeType && /pdf/i.test(String(mimeType))) opts.responseDisposition = 'inline';
+  const [url] = await storage.bucket(bucketName).file(objectPath).getSignedUrl(opts);
+  return url;
+}
+
+/**
+ * Upload a buffer to GCS. Uses resumable upload + validation disabled to avoid
+ * "Cannot call write after a stream was destroyed" (HashStreamValidator) seen
+ * with resumable:false on some Windows / Node versions. Falls back to temp-file upload.
+ */
+async function legislativeUploadBuffer(storage, bucketName, objectPath, buf, mimeType, customMeta) {
+  const bucket = storage.bucket(bucketName);
+  const file = bucket.file(objectPath);
+  const saveOpts = {
+    resumable: true,
+    validation: false,
+    timeout: 180000,
+    contentType: mimeType || 'application/octet-stream',
+    metadata: { metadata: customMeta },
+  };
+  try {
+    await file.save(buf, saveOpts);
+    return;
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    if (!/stream was destroyed|write after a stream was destroyed/i.test(msg)) throw err;
+    console.warn('[Legislative] save() stream error, retrying via temp file:', msg.slice(0, 120));
+  }
+  const tmpPath = path.join(os.tmpdir(), `legislative_${crypto.randomUUID()}.upload`);
+  fs.writeFileSync(tmpPath, buf);
+  try {
+    await bucket.upload(tmpPath, {
+      destination: objectPath,
+      gzip: false,
+      metadata: {
+        contentType: mimeType || 'application/octet-stream',
+        metadata: customMeta,
+      },
+    });
+  } finally {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (_) { /* ignore */ }
+  }
+}
 
 // ==========================================
 // Authentication (via GRC IAM)
@@ -144,6 +240,15 @@ function isPublicPath(pathname) {
   if (pathname.endsWith('.woff2') || pathname.endsWith('.woff') || pathname === '/favicon.ico') return true;
   // Policy collections API is public for now
   if (pathname.startsWith('/api/policy-collections')) return true;
+  // Public portal feed for extracted legislative updates (mutations are still
+  // auth-checked inside their route handlers).
+  if (pathname.startsWith('/api/legislative-updates/extracted')) return true;
+  // Public read access to pipeline-run history and the portal-shaped
+  // projection over it. The POST /api/ai-tools/pipeline-runs write endpoint
+  // re-checks auth inside its handler, so the prefix bypass is read-only in
+  // practice.
+  if (pathname.startsWith('/api/ai-tools/pipeline-runs')) return true;
+  if (pathname.startsWith('/api/ai-tools/pipeline-legislative-updates')) return true;
   return false;
 }
 
@@ -164,6 +269,12 @@ const ADMIN_SPA_ROUTE_PREFIXES = [
   '/prompts',
   '/file-collections',
   '/workbench',
+  '/legislative-internal-sources',
+  '/legislative-external-sources',
+  '/legislative-updates',
+  '/pipeline-configuration',
+  '/pipeline-impact-criteria',
+  '/pipeline-default-org',
   '/audit-log',
 ];
 
@@ -176,6 +287,13 @@ function isAdminSpaPath(pathname) {
   while (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
   if (p === '/' || p === '') return true;
   return ADMIN_SPA_ROUTE_PREFIXES.some((prefix) => p === prefix || p.startsWith(`${prefix}/`));
+}
+
+/** Match `/api/grc/...` list proxies when deployed behind path-based gateways (path is `/prefix/api/grc/...`). */
+function grcProxyTailMatch(routePath, exactTail) {
+  const p = String(routePath || '/').replace(/\/{2,}/g, '/');
+  const t = String(exactTail || '');
+  return p === t || p.endsWith(t);
 }
 
 function getTokenFromRequest(req) {
@@ -340,6 +458,51 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_chain_org ON org_context_chain(org_context_id);
   CREATE INDEX IF NOT EXISTS idx_chain_fw  ON org_context_chain(framework_uuid);
+
+  CREATE TABLE IF NOT EXISTS legislative_internal_sources (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    original_file_name TEXT NOT NULL,
+    mime_type TEXT DEFAULT 'application/octet-stream',
+    size INTEGER DEFAULT 0,
+    gcs_bucket TEXT NOT NULL,
+    gcs_object_path TEXT NOT NULL,
+    public_url TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_legislative_internal_created ON legislative_internal_sources(created_at DESC);
+
+  /* Extracted legislative updates surfaced on the "المستجدات التشريعية" portal page.
+     Status values:  new | under_analysis | completed | archived
+     Impact values:  high | medium | low                                                    */
+  CREATE TABLE IF NOT EXISTS legislative_extracted_updates (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    source_id TEXT,
+    internal_source_id TEXT,
+    external_url TEXT DEFAULT '',
+    published_at TEXT,
+    status TEXT DEFAULT 'new',
+    status_label TEXT DEFAULT '',
+    impact_level TEXT DEFAULT 'medium',
+    impact_label TEXT DEFAULT '',
+    affected_policies_count INTEGER DEFAULT 0,
+    affected_policy_ids TEXT DEFAULT '[]',
+    tags TEXT DEFAULT '[]',
+    language TEXT DEFAULT 'ar',
+    raw_text TEXT DEFAULT '',
+    metadata TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_lu_extracted_published ON legislative_extracted_updates(published_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_lu_extracted_source    ON legislative_extracted_updates(source);
+  CREATE INDEX IF NOT EXISTS idx_lu_extracted_status    ON legislative_extracted_updates(status);
+  CREATE INDEX IF NOT EXISTS idx_lu_extracted_impact    ON legislative_extracted_updates(impact_level);
 `);
 
 // Migrate policy_generation_history: add extraction_data and policy_uuid columns if missing
@@ -384,6 +547,69 @@ try {
     db.exec(`ALTER TABLE cs_sessions ADD COLUMN exported_control_ids TEXT NOT NULL DEFAULT '[]'`);
   }
 } catch (migErr) { console.warn('CS sessions migration:', migErr.message); }
+
+// Create extracted_policies table (legacy — kept for backward compat)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extracted_policies (
+      id TEXT PRIMARY KEY,
+      source_file TEXT NOT NULL DEFAULT '',
+      policies TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL
+    )
+  `);
+} catch (migErr) { console.warn('extracted_policies table migration:', migErr.message); }
+
+// Create extracted_regulations table (regulation articles from uploaded files)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extracted_regulations (
+      id TEXT PRIMARY KEY,
+      source_file TEXT NOT NULL DEFAULT '',
+      articles TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL
+    )
+  `);
+} catch (migErr) { console.warn('extracted_regulations table migration:', migErr.message); }
+
+// Create pipeline_runs table (Policy Update Pipeline execution history)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pipeline_runs (
+      id TEXT PRIMARY KEY,
+      org_context TEXT NOT NULL DEFAULT '',
+      regulation_snippet TEXT NOT NULL DEFAULT '',
+      regulation_text TEXT NOT NULL DEFAULT '',
+      policy_count INTEGER NOT NULL DEFAULT 0,
+      stage_reached TEXT NOT NULL DEFAULT '',
+      result TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    )
+  `);
+} catch (migErr) { console.warn('pipeline_runs table migration:', migErr.message); }
+
+// Migrate pipeline_runs: add report-PDF columns if missing (older rows stay null →
+// 'unavailable' to the client, per design — only new runs get PDFs generated).
+try {
+  const cols = db.pragma('table_info(pipeline_runs)').map(c => c.name);
+  const addCol = (name, def) => { if (!cols.includes(name)) db.exec(`ALTER TABLE pipeline_runs ADD COLUMN ${name} ${def}`); };
+  addCol('report_pdf_status',       "TEXT DEFAULT NULL"); // 'pending' | 'ready' | 'failed' | null (unavailable)
+  addCol('report_pdf_object_path',  "TEXT DEFAULT NULL"); // GCS object key inside the pup bucket
+  addCol('report_pdf_bucket',       "TEXT DEFAULT NULL"); // bucket name at generation time
+  addCol('report_pdf_size_bytes',   "INTEGER DEFAULT NULL");
+  addCol('report_pdf_generated_at', "TEXT DEFAULT NULL");
+  addCol('report_pdf_error',        "TEXT DEFAULT NULL");
+} catch (migErr) { console.warn('pipeline_runs report-pdf migration:', migErr.message); }
+
+// Create pipeline_config table (key-value store for pipeline settings)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pipeline_config (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT ''
+    )
+  `);
+} catch (migErr) { console.warn('pipeline_config table migration:', migErr.message); }
 
 // Migrate org_contexts: add new profile columns if missing
 try {
@@ -432,6 +658,46 @@ const dbListSessions = db.prepare(`
 const dbDeleteSession = db.prepare(`DELETE FROM sessions WHERE id = ?`);
 const dbDeleteSessionMessages = db.prepare(`DELETE FROM messages WHERE session_id = ?`);
 
+// Extracted policies DB helpers (legacy)
+const dbInsertExtractedPolicies = db.prepare(`
+  INSERT INTO extracted_policies (id, source_file, policies, created_at)
+  VALUES (?, ?, ?, ?)
+`);
+const dbGetExtractedPolicies = db.prepare(`SELECT * FROM extracted_policies WHERE id = ?`);
+const dbListExtractedPolicies = db.prepare(`SELECT * FROM extracted_policies ORDER BY created_at DESC LIMIT 50`);
+
+// Extracted regulations DB helpers
+const dbInsertExtractedRegulations = db.prepare(`
+  INSERT INTO extracted_regulations (id, source_file, articles, created_at)
+  VALUES (?, ?, ?, ?)
+`);
+const dbGetExtractedRegulation = db.prepare(`SELECT * FROM extracted_regulations WHERE id = ?`);
+const dbListExtractedRegulations = db.prepare(`SELECT * FROM extracted_regulations ORDER BY created_at DESC LIMIT 50`);
+
+// Pipeline runs DB helpers
+const dbInsertPipelineRun = db.prepare(`
+  INSERT INTO pipeline_runs (id, org_context, regulation_snippet, regulation_text, policy_count, stage_reached, result, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const dbGetPipelineRun = db.prepare(`SELECT * FROM pipeline_runs WHERE id = ?`);
+const dbListPipelineRuns = db.prepare(`
+  SELECT id, org_context, regulation_snippet, regulation_text, policy_count, stage_reached, result, created_at
+  FROM pipeline_runs ORDER BY created_at DESC LIMIT 100
+`);
+const dbSetPipelineRunReportPdfStatus = db.prepare(`
+  UPDATE pipeline_runs SET report_pdf_status = ?, report_pdf_error = ? WHERE id = ?
+`);
+const dbSetPipelineRunReportPdfReady = db.prepare(`
+  UPDATE pipeline_runs
+     SET report_pdf_status = 'ready',
+         report_pdf_object_path = ?,
+         report_pdf_bucket = ?,
+         report_pdf_size_bytes = ?,
+         report_pdf_generated_at = ?,
+         report_pdf_error = NULL
+   WHERE id = ?
+`);
+
 // Local prompts DB helpers
 const dbGetLocalPrompt = db.prepare(`SELECT * FROM local_prompts WHERE id = ?`);
 const dbGetLocalPromptByKey = db.prepare(`SELECT * FROM local_prompts WHERE key = ?`);
@@ -457,6 +723,1033 @@ const dbUpdateOrgContext = db.prepare(`
 const dbDeleteOrgContext = db.prepare(`DELETE FROM org_contexts WHERE id = ?`);
 
 const dbUpdateOrgContextStoreId = db.prepare(`UPDATE org_contexts SET store_id = ?, updated_at = ? WHERE id = ?`);
+
+const dbInsertLegislativeInternal = db.prepare(`
+  INSERT INTO legislative_internal_sources (
+    id, name, description, original_file_name, mime_type, size,
+    gcs_bucket, gcs_object_path, public_url, uploaded_by, created_at
+  ) VALUES (
+    @id, @name, @description, @original_file_name, @mime_type, @size,
+    @gcs_bucket, @gcs_object_path, @public_url, @uploaded_by, @created_at
+  )
+`);
+const dbListLegislativeInternal = db.prepare(
+  `SELECT * FROM legislative_internal_sources ORDER BY datetime(created_at) DESC`
+);
+const dbGetLegislativeInternal = db.prepare(
+  `SELECT * FROM legislative_internal_sources WHERE id = ?`
+);
+const dbUpdateLegislativeInternalMeta = db.prepare(
+  `UPDATE legislative_internal_sources SET name = ?, description = ? WHERE id = ?`
+);
+const dbDeleteLegislativeInternal = db.prepare(`DELETE FROM legislative_internal_sources WHERE id = ?`);
+
+// ---- Legislative extracted updates DB helpers ----
+const dbInsertLegislativeExtracted = db.prepare(`
+  INSERT INTO legislative_extracted_updates (
+    id, title, description, source, source_id, internal_source_id, external_url,
+    published_at, status, status_label, impact_level, impact_label,
+    affected_policies_count, affected_policy_ids, tags, language, raw_text, metadata,
+    created_at, updated_at
+  ) VALUES (
+    @id, @title, @description, @source, @source_id, @internal_source_id, @external_url,
+    @published_at, @status, @status_label, @impact_level, @impact_label,
+    @affected_policies_count, @affected_policy_ids, @tags, @language, @raw_text, @metadata,
+    @created_at, @updated_at
+  )
+`);
+const dbGetLegislativeExtracted = db.prepare(
+  `SELECT * FROM legislative_extracted_updates WHERE id = ?`
+);
+const dbDeleteLegislativeExtracted = db.prepare(
+  `DELETE FROM legislative_extracted_updates WHERE id = ?`
+);
+const dbUpdateLegislativeExtracted = db.prepare(`
+  UPDATE legislative_extracted_updates SET
+    title = @title, description = @description, source = @source, source_id = @source_id,
+    internal_source_id = @internal_source_id, external_url = @external_url,
+    published_at = @published_at, status = @status, status_label = @status_label,
+    impact_level = @impact_level, impact_label = @impact_label,
+    affected_policies_count = @affected_policies_count, affected_policy_ids = @affected_policy_ids,
+    tags = @tags, language = @language, raw_text = @raw_text, metadata = @metadata,
+    updated_at = @updated_at
+  WHERE id = @id
+`);
+const dbCountLegislativeExtracted = db.prepare(
+  `SELECT COUNT(*) AS c FROM legislative_extracted_updates`
+);
+
+/** Map common Arabic / English aliases for status & impact onto the canonical enum used by the API. */
+const LU_STATUS_ALIASES = {
+  'new': 'new', 'جديد': 'new',
+  'under_analysis': 'under_analysis', 'analysis': 'under_analysis',
+  'in_progress': 'under_analysis', 'قيد التحليل': 'under_analysis',
+  'completed': 'completed', 'complete': 'completed', 'done': 'completed', 'مكتمل': 'completed',
+  'archived': 'archived', 'مؤرشف': 'archived',
+};
+const LU_IMPACT_ALIASES = {
+  'high': 'high', 'عالي': 'high',
+  'medium': 'medium', 'med': 'medium', 'متوسط': 'medium',
+  'low': 'low', 'منخفض': 'low',
+};
+const LU_DEFAULT_STATUS_LABELS = {
+  new: 'جديد',
+  under_analysis: 'قيد التحليل',
+  completed: 'مكتمل',
+  archived: 'مؤرشف',
+};
+const LU_DEFAULT_IMPACT_LABELS = {
+  high: 'عالي',
+  medium: 'متوسط',
+  low: 'منخفض',
+};
+function luNormalizeStatus(v) {
+  const k = String(v || '').trim().toLowerCase();
+  return LU_STATUS_ALIASES[k] || LU_STATUS_ALIASES[String(v || '').trim()] || null;
+}
+function luNormalizeImpact(v) {
+  const k = String(v || '').trim().toLowerCase();
+  return LU_IMPACT_ALIASES[k] || LU_IMPACT_ALIASES[String(v || '').trim()] || null;
+}
+function luSafeJsonParse(s, fallback) {
+  if (s == null) return fallback;
+  try { const v = JSON.parse(s); return v == null ? fallback : v; } catch (_) { return fallback; }
+}
+function luRowToApi(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description || '',
+    source: row.source || '',
+    source_id: row.source_id || null,
+    internal_source_id: row.internal_source_id || null,
+    external_url: row.external_url || '',
+    published_at: row.published_at || null,
+    status: row.status || 'new',
+    status_label: row.status_label || LU_DEFAULT_STATUS_LABELS[row.status] || row.status || '',
+    impact_level: row.impact_level || 'medium',
+    impact_label: row.impact_label || LU_DEFAULT_IMPACT_LABELS[row.impact_level] || row.impact_level || '',
+    affected_policies_count: row.affected_policies_count || 0,
+    affected_policy_ids: luSafeJsonParse(row.affected_policy_ids, []),
+    tags: luSafeJsonParse(row.tags, []),
+    language: row.language || 'ar',
+    metadata: luSafeJsonParse(row.metadata, {}),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+// ───────────────────────────────────────────────────────────────
+// Pipeline runs → legislative-update projection
+//
+// The portal renders legislative updates with luRowToApi-shaped objects (title,
+// description, source, status_label, impact_label, key changes, etc.). The
+// project surfaces the F1–F4 pipeline result for the same UI by deriving those
+// fields from a `pipeline_runs` row.
+//
+// Caveats — pipeline_runs has no curated title/source columns, so we infer:
+//   • title           → first non-empty line of regulationText (or fallback id)
+//   • description     → F1 reasoning (or a stage-based fallback)
+//   • source          → metadata.sourceFile if persisted by the caller, else ''
+//   • status          → derived from stage_reached (f1 not-relevant → archived,
+//                       f4 → completed, anything in between → under_analysis)
+//   • impact_level    → max F4 severity across all impacts, else 'medium'
+//   • tags            → unique F2 policy_point.category values
+//   • affected_policies_count / ids → unique F4 policy_id set (or F3 fallback)
+// ───────────────────────────────────────────────────────────────
+
+const PIPELINE_STAGE_STATUS = {
+  f1: 'under_analysis',
+  f2: 'under_analysis',
+  f3: 'under_analysis',
+  f4: 'completed',
+};
+
+const PIPELINE_SEVERITY_TO_IMPACT = {
+  critical: 'high',
+  high: 'high',
+  medium: 'medium',
+  low: 'low',
+  none: 'low',
+};
+
+/** Crude language sniff: Arabic if any Arabic codepoint appears in the first 1k chars. */
+function pipelineDetectLanguage(text) {
+  const s = String(text || '').slice(0, 1024);
+  return /[\u0600-\u06FF]/.test(s) ? 'ar' : 'en';
+}
+
+/** Best-effort title from raw regulation text. Trims to 160 chars and strips dashes/colons. */
+function pipelineDeriveTitle(regulationText, fallback) {
+  const t = String(regulationText || '').trim();
+  if (!t) return fallback;
+  for (const rawLine of t.split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^[\-—•·*]+\s*/, '');
+    if (line.length < 4) continue;
+    if (line.length <= 160) return line;
+    return line.slice(0, 157) + '…';
+  }
+  return fallback;
+}
+
+/** Worst → best ordering for F4's "severity" enum (used for sort + reduce). */
+const PIPELINE_SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, none: 4 };
+const PIPELINE_SEVERITY_LABELS = {
+  critical: 'Critical',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+  none: 'None',
+};
+
+/** Normalise an F4 impact entry's severity to a known enum value (default 'none'). */
+function pipelineNormalizeSeverity(sev) {
+  const s = (typeof sev === 'string' ? sev : '').trim().toLowerCase();
+  return PIPELINE_SEVERITY_RANK[s] != null ? s : 'none';
+}
+
+/**
+ * Re-shape F4's regulation-point-first impact tree into a policy-first tree so the
+ * portal can render an "Affected policies" group-by view (each policy expands to
+ * show every regulation point that touched it).
+ *
+ * Returned shape:
+ *   [
+ *     {
+ *       policy_id, policy_title,
+ *       is_affected, impact_level, impact_label, requires_amendment,
+ *       matched_points_count, affected_points_count,
+ *       matched_points: [
+ *         { point_id, point_text, impact_summary, severity, severity_label,
+ *           severity_reasoning, requires_amendment, similarity_score,
+ *           amendments, compliance_gap, is_affected }
+ *       ]
+ *     },
+ *   ]
+ *
+ * Sort order:
+ *   - Top-level: meaningfully-affected policies first, then by worst severity,
+ *     then by matched_points_count desc, then by policy_title.
+ *   - Inside each policy: regulation points by worst severity, then similarity desc.
+ */
+function pipelineGroupImpactsByPolicy(f4Impacts) {
+  if (!Array.isArray(f4Impacts) || !f4Impacts.length) return [];
+  const byPolicy = new Map();
+  for (const group of f4Impacts) {
+    const pointId = group && group.point_id != null ? group.point_id : null;
+    const pointText = group && typeof group.point_text === 'string' ? group.point_text : '';
+    const impacts = Array.isArray(group && group.impacts) ? group.impacts : [];
+    for (const imp of impacts) {
+      if (!imp || imp.policy_id == null) continue;
+      const pid = String(imp.policy_id);
+      const sev = pipelineNormalizeSeverity(imp.severity);
+      const requires = imp.requires_amendment === true;
+      const meaningful = requires || sev !== 'none';
+      const entry = {
+        point_id: pointId,
+        point_text: pointText,
+        impact_summary: typeof imp.impact_summary === 'string' ? imp.impact_summary : '',
+        severity: sev,
+        severity_label: PIPELINE_SEVERITY_LABELS[sev],
+        severity_reasoning: typeof imp.severity_reasoning === 'string' ? imp.severity_reasoning : '',
+        requires_amendment: requires,
+        similarity_score: typeof imp.similarity_score === 'number' ? imp.similarity_score : null,
+        amendments: Array.isArray(imp.amendments) ? imp.amendments : [],
+        compliance_gap: typeof imp.compliance_gap === 'string' ? imp.compliance_gap : '',
+        is_affected: meaningful,
+      };
+      const existing = byPolicy.get(pid);
+      if (existing) {
+        existing.matched_points.push(entry);
+        existing.policy_title = existing.policy_title || imp.policy_title || '';
+      } else {
+        byPolicy.set(pid, {
+          policy_id: pid,
+          policy_title: typeof imp.policy_title === 'string' ? imp.policy_title : '',
+          matched_points: [entry],
+        });
+      }
+    }
+  }
+
+  const policyImpactLevel = (sev) => PIPELINE_SEVERITY_TO_IMPACT[sev] || 'low';
+
+  const out = [];
+  for (const group of byPolicy.values()) {
+    group.matched_points.sort((a, b) => {
+      const da = PIPELINE_SEVERITY_RANK[a.severity] - PIPELINE_SEVERITY_RANK[b.severity];
+      if (da !== 0) return da;
+      const sa = a.similarity_score == null ? -1 : a.similarity_score;
+      const sb = b.similarity_score == null ? -1 : b.similarity_score;
+      return sb - sa;
+    });
+    let worstRank = PIPELINE_SEVERITY_RANK.none;
+    let isAffected = false;
+    let requiresAmendment = false;
+    let affectedPoints = 0;
+    for (const ent of group.matched_points) {
+      const r = PIPELINE_SEVERITY_RANK[ent.severity];
+      if (r < worstRank) worstRank = r;
+      if (ent.is_affected) {
+        isAffected = true;
+        affectedPoints += 1;
+      }
+      if (ent.requires_amendment) requiresAmendment = true;
+    }
+    // Worst rank → severity string (the one with this rank value).
+    const worstSev = Object.keys(PIPELINE_SEVERITY_RANK).find((k) => PIPELINE_SEVERITY_RANK[k] === worstRank) || 'none';
+    const impactLevel = policyImpactLevel(worstSev);
+    out.push({
+      policy_id: group.policy_id,
+      policy_title: group.policy_title || `Policy ${group.policy_id}`,
+      is_affected: isAffected,
+      impact_level: impactLevel,
+      impact_label: LU_DEFAULT_IMPACT_LABELS[impactLevel] || impactLevel,
+      // Carry the raw worst F4 severity too — the portal may want to show
+      // "Critical" rather than collapsing it to "High" via impact_level.
+      worst_severity: worstSev,
+      worst_severity_label: PIPELINE_SEVERITY_LABELS[worstSev],
+      requires_amendment: requiresAmendment,
+      matched_points_count: group.matched_points.length,
+      affected_points_count: affectedPoints,
+      matched_points: group.matched_points,
+    });
+  }
+
+  out.sort((a, b) => {
+    if (a.is_affected !== b.is_affected) return a.is_affected ? -1 : 1;
+    const da = PIPELINE_SEVERITY_RANK[a.worst_severity] - PIPELINE_SEVERITY_RANK[b.worst_severity];
+    if (da !== 0) return da;
+    if (b.matched_points_count !== a.matched_points_count) return b.matched_points_count - a.matched_points_count;
+    return String(a.policy_title).localeCompare(String(b.policy_title));
+  });
+
+  return out;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Policy Update Pipeline · Server-side PDF report generation
+//
+// The same report the user used to render client-side (admin.js) is now
+// produced on the server right after a pipeline run is saved, then uploaded
+// to GCS (GCS_PUP_BUCKET_NAME). The download endpoint just returns a fresh
+// signed URL — the user no longer waits for the browser to render the PDF.
+//
+// Engine: Puppeteer (headless Chrome) — perfect Arabic/RTL fidelity, reuses
+// the existing report HTML/CSS verbatim.
+// ───────────────────────────────────────────────────────────────────────────
+
+const PIPELINE_STAGE_LABELS = {
+  f1_relevance: 'Stage 1 · Relevance assessment',
+  f2_summary: 'Stage 2 · Regulation points extracted',
+  f3_matches: 'Stage 3 · Policy matching',
+  f4_impacts: 'Stage 4 · Impact analysis',
+};
+
+function pipelineStageLabel(stage) {
+  return PIPELINE_STAGE_LABELS[String(stage || '').toLowerCase()] || stage || '—';
+}
+
+function pipelineChangeTypeLabel(type) {
+  const t = String(type || '').toLowerCase();
+  if (t === 'add') return 'Add';
+  if (t === 'modify' || t === 'update') return 'Modify';
+  if (t === 'remove' || t === 'delete') return 'Remove';
+  return type || 'Change';
+}
+
+function pipelineReportSeverityClass(sev) {
+  const s = String(sev || '').toLowerCase();
+  if (s === 'critical' || s === 'high') return 'rpt-sev--high';
+  if (s === 'medium') return 'rpt-sev--med';
+  if (s === 'low') return 'rpt-sev--low';
+  return 'rpt-sev--none';
+}
+
+function pipelineSkippedStagesNote(data) {
+  const stage = String(data.stage_reached || '').toLowerCase();
+  if (stage === 'f4_impacts') return '';
+  if (stage === 'f1_relevance') return 'Stages 2–4 were skipped because the regulation was judged not relevant.';
+  if (stage === 'f2_summary') return 'Stage 3 (policy matching) and Stage 4 (impact analysis) were skipped.';
+  if (stage === 'f3_matches') return 'Stage 4 (impact analysis) was skipped.';
+  return '';
+}
+
+function htmlEscape(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** PDF report CSS — mirrored from admin.js PUP_REPORT_CSS (kept in sync intentionally). */
+const PIPELINE_REPORT_CSS = `
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Cairo',system-ui,-apple-system,'Segoe UI',sans-serif;color:#0f172a;background:#fff;font-size:13px;line-height:1.55;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .rpt-root{padding:24px 28px 36px;max-width:780px;margin:0 auto}
+  .rpt-cover{padding:28px 26px;border-radius:14px;margin-bottom:22px;page-break-inside:avoid}
+  .rpt-cover-title{margin:0 0 6px;font-size:24px;font-weight:800;letter-spacing:-0.01em}
+  .rpt-cover-sub{margin:0;font-size:13px;opacity:0.95}
+  .rpt-cover-meta{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px}
+  .rpt-chip{display:inline-flex;align-items:center;padding:5px 11px;border-radius:999px;background:rgba(255,255,255,0.22);font-size:11px;font-weight:600;letter-spacing:0.02em}
+  .rpt-kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:8px 0 22px}
+  .rpt-kpi{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px}
+  .rpt-kpi-label{font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#64748b;margin-bottom:6px}
+  .rpt-kpi-value{font-size:22px;font-weight:700;color:#0f172a;line-height:1.1}
+  .rpt-section{margin:0 0 22px;page-break-inside:auto}
+  .rpt-section-head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;font-size:14px;font-weight:700;margin:0 0 12px}
+  .rpt-section-icon{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,0.25);font-size:12px;font-weight:800}
+  .rpt-card{border:1px solid #e2e8f0;background:#fff;border-radius:10px;padding:12px 14px;margin:0 0 10px;page-break-inside:avoid}
+  .rpt-badge-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+  .rpt-badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:0.02em;border:1px solid transparent}
+  .rpt-badge--yes{background:#dcfce7;color:#166534;border-color:#bbf7d0}
+  .rpt-badge--no{background:#fee2e2;color:#991b1b;border-color:#fecaca}
+  .rpt-badge--confidence{background:#eef2ff;color:#3730a3;border-color:#c7d2fe}
+  .rpt-prose{margin:6px 0;color:#1e293b;font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-wrap:break-word}
+  .rpt-list{margin:6px 0 0;padding-left:18px;color:#334155;font-size:12.5px}
+  .rpt-list li{margin-bottom:4px}
+  .rpt-note{margin:8px 0 16px;padding:10px 14px;background:#fef3c7;border:1px solid #fde68a;border-radius:8px;color:#854d0e;font-size:12px}
+  .rpt-point-id{display:inline-flex;align-items:center;padding:2px 9px;border-radius:6px;background:#f1f5f9;color:#334155;font-size:11px;font-weight:700;font-family:'JetBrains Mono','Fira Code',Consolas,monospace;letter-spacing:0.01em}
+  .rpt-point-meta{font-size:11px;color:#64748b;margin:4px 0 8px}
+  .rpt-policy-card{border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin:0 0 14px;background:#fafbfc;page-break-inside:avoid}
+  .rpt-policy-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+  .rpt-policy-title{margin:0;font-size:14px;font-weight:700;color:#0f172a}
+  .rpt-sev{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600}
+  .rpt-sev--high{background:#fee2e2;color:#991b1b}
+  .rpt-sev--med{background:#fef3c7;color:#854d0e}
+  .rpt-sev--low{background:#e0f2fe;color:#075985}
+  .rpt-sev--none{background:#f1f5f9;color:#475569}
+  .rpt-impact-point{border-top:1px dashed #e2e8f0;padding-top:10px;margin-top:10px;page-break-inside:avoid}
+  .rpt-impact-point:first-child{border-top:none;padding-top:0;margin-top:0}
+  .rpt-impact-label{font-size:10.5px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#475569;margin:8px 0 4px}
+  .rpt-amend{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 11px;margin:6px 0}
+  .rpt-amend-type{display:inline-block;padding:1px 8px;border-radius:6px;background:#eef2ff;color:#3730a3;font-size:10.5px;font-weight:700;letter-spacing:0.04em;margin-right:6px}
+`;
+
+function renderPipelineReportSectionsHtml(data) {
+  const parts = [];
+  const f1 = data.f1_relevance;
+  const f2 = data.f2_summary;
+  const f3 = Array.isArray(data.f3_matches) ? data.f3_matches : null;
+  const f4 = Array.isArray(data.f4_impacts) ? data.f4_impacts : null;
+
+  if (typeof data.policy_count_indexed === 'number') {
+    const policies = f4 ? pipelineGroupImpactsByPolicy(f4) : [];
+    const affected = policies.filter((p) => p.is_affected).length;
+    parts.push('<div class="rpt-kpi-row">');
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Stage reached</div><div class="rpt-kpi-value" style="font-size:15px">' +
+        htmlEscape(pipelineStageLabel(data.stage_reached)) + '</div></div>'
+    );
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Indexed policies</div><div class="rpt-kpi-value">' +
+        htmlEscape(String(data.policy_count_indexed)) + '</div></div>'
+    );
+    parts.push(
+      '<div class="rpt-kpi"><div class="rpt-kpi-label">Affected policies</div><div class="rpt-kpi-value">' +
+        htmlEscape(String(affected)) + '</div></div>'
+    );
+    parts.push('</div>');
+  }
+
+  const skip = pipelineSkippedStagesNote(data);
+  if (skip) parts.push('<p class="rpt-note">' + htmlEscape(skip) + '</p>');
+
+  if (f1 && typeof f1 === 'object') {
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head" style="background:#047857;color:#fff"><span class="rpt-section-icon">1</span> Relevance assessment</h2>');
+    parts.push('<div class="rpt-card">');
+    if (typeof f1.is_relevant === 'boolean') {
+      parts.push('<div class="rpt-badge-row">');
+      parts.push(
+        '<span class="rpt-badge ' + (f1.is_relevant ? 'rpt-badge--yes' : 'rpt-badge--no') + '">' +
+          htmlEscape(f1.is_relevant ? 'Relevant to organisation' : 'Not relevant') +
+        '</span>'
+      );
+      if (typeof f1.confidence === 'number') {
+        const pct = Math.round(Math.min(1, Math.max(0, f1.confidence)) * 100);
+        parts.push('<span class="rpt-badge rpt-badge--confidence">Model confidence · ' + htmlEscape(String(pct)) + '%</span>');
+      }
+      parts.push('</div>');
+      if (f1.reasoning) parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(f1.reasoning) + '</p>');
+      const aspects = Array.isArray(f1.relevant_aspects) ? f1.relevant_aspects.filter(Boolean) : [];
+      if (aspects.length) {
+        parts.push('<ul class="rpt-list" dir="auto">');
+        for (const a of aspects) parts.push('<li>' + htmlEscape(a) + '</li>');
+        parts.push('</ul>');
+      }
+    } else {
+      parts.push('<p class="rpt-prose">Relevance step did not return a valid verdict.</p>');
+    }
+    parts.push('</div>');
+    parts.push('</section>');
+  }
+
+  if (f2 && typeof f2 === 'object') {
+    const pts = Array.isArray(f2.policy_points) ? f2.policy_points : [];
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head" style="background:#4f46e5;color:#fff"><span class="rpt-section-icon">2</span> Regulation points extracted</h2>');
+    if (!pts.length) {
+      parts.push('<div class="rpt-card"><p class="rpt-prose">No policy points returned.</p></div>');
+    } else {
+      for (const pt of pts) {
+        parts.push('<div class="rpt-card">');
+        parts.push('<span class="rpt-point-id">' + htmlEscape(pt.id || 'Point') + '</span>');
+        const metaBits = [];
+        if (pt.source_reference) metaBits.push('Reference: ' + pt.source_reference);
+        if (pt.category) metaBits.push(pt.category);
+        if (metaBits.length) parts.push('<div class="rpt-point-meta">' + htmlEscape(metaBits.join(' · ')) + '</div>');
+        parts.push('<p class="rpt-prose" dir="auto" style="margin:0">' + htmlEscape(pt.point || '') + '</p>');
+        parts.push('</div>');
+      }
+    }
+    parts.push('</section>');
+  }
+
+  if (f3 && f3.length) {
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head" style="background:#0d9488;color:#fff"><span class="rpt-section-icon">3</span> Policy matching</h2>');
+    for (const row of f3) {
+      const matches = Array.isArray(row.matches) ? row.matches : [];
+      parts.push('<div class="rpt-card">');
+      parts.push('<span class="rpt-point-id">' + htmlEscape(row.point_id || 'Point') + '</span>');
+      parts.push('<p class="rpt-prose" dir="auto" style="margin:8px 0 10px">' + htmlEscape(row.point_text || '') + '</p>');
+      if (!matches.length) {
+        parts.push('<p class="rpt-point-meta">No policy matches above threshold.</p>');
+      } else {
+        for (const m of matches) {
+          parts.push('<div style="border-top:1px dashed #e2e8f0;padding-top:8px;margin-top:8px">');
+          parts.push('<strong>' + htmlEscape(m.policy_title || m.policy_id || 'Policy') + '</strong>');
+          if (typeof m.similarity_score === 'number') {
+            parts.push(' <span class="rpt-point-meta">· Similarity ' + htmlEscape(String(m.similarity_score)) + '</span>');
+          }
+          if (m.content_excerpt) {
+            parts.push('<p class="rpt-prose" dir="auto" style="font-size:12px;margin:6px 0 0">' + htmlEscape(m.content_excerpt) + '</p>');
+          }
+          parts.push('</div>');
+        }
+      }
+      parts.push('</div>');
+    }
+    parts.push('</section>');
+  }
+
+  if (f4 && f4.length) {
+    const policies = pipelineGroupImpactsByPolicy(f4);
+    parts.push('<section class="rpt-section">');
+    parts.push('<h2 class="rpt-section-head" style="background:#c2410c;color:#fff"><span class="rpt-section-icon">4</span> Impact analysis</h2>');
+    for (const policy of policies) {
+      parts.push('<div class="rpt-policy-card">');
+      parts.push('<div class="rpt-policy-head">');
+      parts.push('<h3 class="rpt-policy-title">' + htmlEscape(policy.policy_title) + '</h3>');
+      parts.push(
+        '<span class="rpt-sev ' + pipelineReportSeverityClass(policy.worst_severity) + '">' +
+          htmlEscape(policy.worst_severity_label) + '</span>'
+      );
+      if (policy.requires_amendment) {
+        parts.push(' <span class="rpt-sev rpt-sev--high" style="margin-left:6px">Requires amendment</span>');
+      }
+      parts.push('</div>');
+      for (const pt of policy.matched_points) {
+        parts.push('<div class="rpt-impact-point">');
+        parts.push('<span class="rpt-point-id">' + htmlEscape(pt.point_id || 'Point') + '</span>');
+        parts.push('<p class="rpt-prose" dir="auto" style="margin:8px 0">' + htmlEscape(pt.point_text || '') + '</p>');
+        if (pt.impact_summary) {
+          parts.push('<div class="rpt-impact-label">Impact analysis</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(pt.impact_summary) + '</p>');
+        }
+        if (pt.severity_reasoning) {
+          parts.push('<div class="rpt-impact-label">Severity</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(pt.severity_reasoning) + '</p>');
+        }
+        if (pt.compliance_gap) {
+          parts.push('<div class="rpt-impact-label">Compliance gap</div>');
+          parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(pt.compliance_gap) + '</p>');
+        }
+        const amds = Array.isArray(pt.amendments) ? pt.amendments : [];
+        if (amds.length) {
+          parts.push('<div class="rpt-impact-label">Proposed amendments (' + htmlEscape(String(amds.length)) + ')</div>');
+          for (const a of amds) {
+            parts.push('<div class="rpt-amend">');
+            if (a.change_type) {
+              parts.push('<span class="rpt-amend-type">' + htmlEscape(pipelineChangeTypeLabel(a.change_type)) + '</span>');
+            }
+            if (a.policy_section) parts.push('<strong>' + htmlEscape(a.policy_section) + '</strong>');
+            if (a.current_text_summary) {
+              parts.push('<div class="rpt-impact-label">Current</div>');
+              parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(a.current_text_summary) + '</p>');
+            }
+            if (a.required_change) {
+              parts.push('<div class="rpt-impact-label">Required change</div>');
+              parts.push('<p class="rpt-prose" dir="auto">' + htmlEscape(a.required_change) + '</p>');
+            }
+            parts.push('</div>');
+          }
+        }
+        parts.push('</div>');
+      }
+      parts.push('</div>');
+    }
+    parts.push('</section>');
+  }
+
+  return parts.join('');
+}
+
+function buildPipelineReportFullHtml(data, meta) {
+  const sourceName = meta && meta.sourceName ? String(meta.sourceName) : 'Policy update pipeline';
+  const generatedAt = meta && meta.generatedAt ? new Date(meta.generatedAt).toLocaleString() : new Date().toLocaleString();
+  const stage = data && data.stage_reached ? pipelineStageLabel(data.stage_reached) : '—';
+  const runId = meta && meta.runId ? String(meta.runId) : '';
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${htmlEscape(sourceName)} — Policy update pipeline report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap">
+<style>${PIPELINE_REPORT_CSS}</style>
+</head>
+<body>
+<div class="rpt-root">
+  <header class="rpt-cover" style="background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 55%,#3b82f6 100%);color:#fff">
+    <h1 class="rpt-cover-title" style="color:#fff">${htmlEscape(sourceName)}</h1>
+    <p class="rpt-cover-sub">Policy update pipeline · impact report</p>
+    <div class="rpt-cover-meta">
+      <span class="rpt-chip">Generated: ${htmlEscape(generatedAt)}</span>
+      <span class="rpt-chip">Stage: ${htmlEscape(stage)}</span>
+      ${runId ? `<span class="rpt-chip">Run: ${htmlEscape(runId)}</span>` : ''}
+    </div>
+  </header>
+  <div class="rpt-body">${renderPipelineReportSectionsHtml(data || {})}</div>
+</div>
+</body>
+</html>`;
+}
+
+/** Lazy puppeteer import — keep the dep optional so the rest of the server still
+ *  boots in environments where the Chrome binary failed to install. */
+let _puppeteerCache = null;
+function getPuppeteer() {
+  if (_puppeteerCache && _puppeteerCache.err) return { ok: false, error: _puppeteerCache.err };
+  if (_puppeteerCache && _puppeteerCache.mod) return { ok: true, mod: _puppeteerCache.mod };
+  try {
+    const mod = require('puppeteer');
+    _puppeteerCache = { mod };
+    return { ok: true, mod };
+  } catch (e) {
+    const err = e && e.message ? e.message : String(e);
+    _puppeteerCache = { err };
+    return { ok: false, error: `puppeteer missing: ${err}` };
+  }
+}
+
+/** Cache a single browser process across requests — Chrome cold-start is ~1.5s. */
+let _puppeteerBrowserPromise = null;
+async function getSharedPuppeteerBrowser() {
+  const p = getPuppeteer();
+  if (!p.ok) throw new Error(p.error);
+  if (_puppeteerBrowserPromise) {
+    try {
+      const b = await _puppeteerBrowserPromise;
+      if (b && b.connected !== false && b.process && b.process()) return b;
+    } catch (_) { /* fall-through, relaunch */ }
+    _puppeteerBrowserPromise = null;
+  }
+  // Allow pointing at a system-installed Chrome (e.g. google-chrome-stable from
+  // apt, which pulls in all required shared libraries). Falls back to the
+  // browser Puppeteer downloaded into its cache when the env var is unset.
+  const launchOpts = {
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none'],
+  };
+  const execPath = (process.env.PUPPETEER_EXECUTABLE_PATH || '').trim();
+  if (execPath) launchOpts.executablePath = execPath;
+  _puppeteerBrowserPromise = p.mod.launch(launchOpts);
+  const b = await _puppeteerBrowserPromise;
+  b.on('disconnected', () => { if (_puppeteerBrowserPromise) _puppeteerBrowserPromise = null; });
+  return b;
+}
+
+/** Render an HTML string into a PDF buffer using a shared headless Chrome. */
+async function renderHtmlToPdfBuffer(html) {
+  const browser = await getSharedPuppeteerBrowser();
+  const page = await browser.newPage();
+  try {
+    await page.setContent(html, { waitUntil: ['load', 'networkidle0'], timeout: 60000 });
+    // Wait for Cairo to finish loading so glyphs match the live report.
+    await page.evaluateHandle('document.fonts.ready');
+    const pdf = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      preferCSSPageSize: false,
+      margin: { top: '10mm', right: '10mm', bottom: '12mm', left: '10mm' },
+    });
+    return pdf;
+  } finally {
+    try { await page.close({ runBeforeUnload: false }); } catch (_) { /* ignore */ }
+  }
+}
+
+function pipelinePdfObjectPath(runId) {
+  const safe = String(runId || 'run').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  return `pipeline-reports/${safe}/policy-update-report-${safe}-${ts}.pdf`;
+}
+
+function pipelinePdfDownloadFilename(runId, sourceName) {
+  const base = sourceName ? String(sourceName).replace(/[^\w\s.-]/g, '').trim().slice(0, 60) : '';
+  const stamp = new Date().toISOString().slice(0, 10);
+  const id = String(runId || 'run').slice(0, 80);
+  return (base ? `${base} — ` : '') + `Policy update report (${id}) ${stamp}.pdf`;
+}
+
+/** Background generator: PDF render + GCS upload + DB status update. Fire-and-forget. */
+async function kickPipelineReportPdfGeneration(runId, data, meta = {}) {
+  if (!runId || !data || typeof data !== 'object') return;
+  try {
+    dbSetPipelineRunReportPdfStatus.run('pending', null, runId);
+  } catch (_) { /* table may not have columns in legacy installs */ }
+
+  setImmediate(async () => {
+    const startedAt = Date.now();
+    try {
+      const html = buildPipelineReportFullHtml(data, { ...meta, runId });
+      const buf = await renderHtmlToPdfBuffer(html);
+      const gcs = getLegislativeGcsClient();
+      if (!gcs.ok) throw new Error(gcs.error || 'GCS unavailable');
+      const objectPath = pipelinePdfObjectPath(runId);
+      await legislativeUploadBuffer(
+        gcs.storage,
+        GCS_PUP_BUCKET_NAME,
+        objectPath,
+        buf,
+        'application/pdf',
+        { runId, generatedAt: new Date().toISOString(), source: meta.sourceName || '' }
+      );
+      const generatedAt = new Date().toISOString();
+      try {
+        dbSetPipelineRunReportPdfReady.run(objectPath, GCS_PUP_BUCKET_NAME, buf.length, generatedAt, runId);
+      } catch (e) { console.warn('[PupPdf] db update failed:', e.message); }
+      console.log(`[PupPdf] Run ${runId} report PDF ready (${buf.length} bytes, ${Date.now() - startedAt}ms) → gs://${GCS_PUP_BUCKET_NAME}/${objectPath}`);
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      try {
+        dbSetPipelineRunReportPdfStatus.run('failed', msg.slice(0, 500), runId);
+      } catch (_) { /* ignore */ }
+      console.error(`[PupPdf] Run ${runId} report PDF generation failed:`, msg);
+    }
+  });
+}
+
+/** Reduce F4 severities → the strongest impact level. Returns 'medium' when no impacts exist. */
+function pipelineDeriveImpactLevel(f4Impacts) {
+  if (!Array.isArray(f4Impacts) || !f4Impacts.length) return 'medium';
+  const order = ['high', 'medium', 'low'];
+  let best = null;
+  for (const group of f4Impacts) {
+    for (const imp of (group.impacts || [])) {
+      const sev = String(imp.severity || '').toLowerCase();
+      const mapped = PIPELINE_SEVERITY_TO_IMPACT[sev];
+      if (!mapped) continue;
+      if (best == null || order.indexOf(mapped) < order.indexOf(best)) best = mapped;
+      if (best === 'high') return 'high';
+    }
+  }
+  return best || 'medium';
+}
+
+/**
+ * @param {{ id:string, org_context:string, regulation_snippet:string, regulation_text:string,
+ *           policy_count:number, stage_reached:string, result:string|object, created_at:string }} row
+ * @param {{ includePipeline?: boolean }} [opts]
+ * @returns {object|null} luRowToApi-shaped object + optional `pipeline` extension
+ */
+function pipelineRunToLegislativeUpdate(row, opts = {}) {
+  if (!row) return null;
+  const result = typeof row.result === 'string'
+    ? (() => { try { return JSON.parse(row.result || '{}'); } catch { return {}; } })()
+    : (row.result && typeof row.result === 'object' ? row.result : {});
+
+  const stage = String(row.stage_reached || result.stage_reached || '').toLowerCase();
+  const f1 = result.f1_relevance || null;
+  const f2Points = Array.isArray(result.f2_summary?.policy_points) ? result.f2_summary.policy_points : [];
+  const f3Matches = Array.isArray(result.f3_matches) ? result.f3_matches : [];
+  const f4Impacts = Array.isArray(result.f4_impacts) ? result.f4_impacts : [];
+
+  // F1 short-circuit (not relevant): archive it; everything else maps via PIPELINE_STAGE_STATUS.
+  const status = (stage === 'f1' && f1 && f1.is_relevant === false)
+    ? 'archived'
+    : (PIPELINE_STAGE_STATUS[stage] || 'new');
+  const impactLevel = pipelineDeriveImpactLevel(f4Impacts);
+
+  // "Affected by this source" semantics:
+  //   F4 analyses every (regulation_point × similar_policy) pair returned by F3,
+  //   including pairs the model decides do NOT meaningfully affect the policy
+  //   (severity="none" + requires_amendment=false). Counting all of those was
+  //   misleading — the card needs the number of policies the regulation actually
+  //   impacts, not the number F4 happened to inspect.
+  //
+  //   A policy is considered actually affected when ANY of its F4 impact entries
+  //   satisfies either:
+  //     - requires_amendment === true, OR
+  //     - severity ∈ { critical, high, medium, low }   (i.e. not "none" / missing).
+  //
+  //   We dedupe across regulation points so one policy counts once even when
+  //   multiple regulation points hit it.
+  const NON_AFFECTING_SEVERITIES = new Set(['none', '', null, undefined]);
+  const analyzedIds = new Set();
+  const affectedIds = new Set();
+  let countingSource = 'none';
+  for (const group of f4Impacts) {
+    for (const imp of (group.impacts || [])) {
+      if (imp.policy_id == null) continue;
+      const pid = String(imp.policy_id);
+      analyzedIds.add(pid);
+      const sev = typeof imp.severity === 'string' ? imp.severity.trim().toLowerCase() : imp.severity;
+      const requires = imp.requires_amendment === true;
+      const meaningful = requires || !NON_AFFECTING_SEVERITIES.has(sev);
+      if (meaningful) affectedIds.add(pid);
+    }
+  }
+  if (analyzedIds.size) {
+    countingSource = 'f4_impacts';
+  } else {
+    // Fallback: pipeline never ran F4 (e.g. stopped at F3 due to no matches or
+    // an error). F3 only tells us semantic overlap, not impact — so we count
+    // F3 candidates as a best-effort proxy and flag the source as 'f3_matches'
+    // so the portal can render a softer label if it wants to.
+    for (const m of f3Matches) {
+      for (const x of (m.matches || [])) {
+        if (x.policy_id == null) continue;
+        const pid = String(x.policy_id);
+        analyzedIds.add(pid);
+        affectedIds.add(pid);
+      }
+    }
+    if (analyzedIds.size) countingSource = 'f3_matches';
+  }
+
+  // Tag set: prefer F1.document_tags when present, then merge in F2 categories.
+  // F1 tags are usually 1–3 word topical strings; F2 categories are taxonomy
+  // labels — together they cover both "what is this about" and "what compliance
+  // domain does each rule sit in".
+  const tagSet = new Set();
+  const f1Tags = (f1 && Array.isArray(f1.document_tags)) ? f1.document_tags : [];
+  for (const t of f1Tags) {
+    const s = String(t || '').trim();
+    if (s) tagSet.add(s);
+  }
+  for (const pt of f2Points) {
+    const c = String(pt.category || '').trim();
+    if (c) tagSet.add(c);
+  }
+
+  const regulationText = String(row.regulation_text || '');
+  const fallbackTitle = `Pipeline run · ${row.id}`;
+  // Prefer F1.document_title → heuristic first-line → static fallback. F1 may
+  // legitimately return null when the excerpt has no clear heading.
+  const f1Title = (f1 && typeof f1.document_title === 'string') ? f1.document_title.trim() : '';
+  const title = f1Title || pipelineDeriveTitle(regulationText, fallbackTitle);
+  // Prefer F1.document_summary (document-level) → F1.reasoning (relevance, but
+  // still a useful blurb) → regulation_snippet.
+  const f1Summary = (f1 && typeof f1.document_summary === 'string') ? f1.document_summary.trim() : '';
+  const description = f1Summary
+    || (f1 && typeof f1.reasoning === 'string' && f1.reasoning.trim() ? f1.reasoning.trim() : '')
+    || row.regulation_snippet
+    || regulationText.slice(0, 300);
+
+  const createdAt = row.created_at || new Date().toISOString();
+  // Prefer F1.document_published_at (the actual regulation publication date)
+  // over created_at (when the pipeline ran). Accept only well-formed YYYY-MM-DD
+  // to avoid leaking model hallucinations into a typed date field.
+  const f1Published = (f1 && typeof f1.document_published_at === 'string') ? f1.document_published_at.trim() : '';
+  const publishedAt = /^\d{4}-\d{2}-\d{2}$/.test(f1Published) ? f1Published : (createdAt ? String(createdAt).slice(0, 10) : null);
+  const f1Source = (f1 && typeof f1.document_source === 'string') ? f1.document_source.trim() : '';
+
+  const out = {
+    id: row.id,
+    title,
+    description,
+    source: f1Source,
+    source_id: null,
+    internal_source_id: null,
+    external_url: '',
+    published_at: publishedAt,
+    status,
+    status_label: LU_DEFAULT_STATUS_LABELS[status] || status,
+    impact_level: impactLevel,
+    impact_label: LU_DEFAULT_IMPACT_LABELS[impactLevel] || impactLevel,
+    // Policies the regulation actually impacts (F4: requires_amendment OR
+    // severity != "none"). This is the number the card should show.
+    affected_policies_count: affectedIds.size,
+    affected_policy_ids: Array.from(affectedIds),
+    // Sibling diagnostics: how many policies F4 inspected in total (or, when F4
+    // never ran, how many F3 candidates were considered). Useful for tooltips
+    // like "Analysed 7 policies · 4 actually affected".
+    analyzed_policies_count: analyzedIds.size,
+    analyzed_policy_ids: Array.from(analyzedIds),
+    tags: Array.from(tagSet),
+    language: pipelineDetectLanguage(regulationText),
+    metadata: {
+      stage_reached: stage || null,
+      policy_count_indexed: result.policy_count_indexed ?? null,
+      policy_count_input: row.policy_count ?? null,
+      f1_confidence: f1 && typeof f1.confidence === 'number' ? f1.confidence : null,
+      f1_relevant: f1 && typeof f1.is_relevant === 'boolean' ? f1.is_relevant : null,
+      regulation_chars: regulationText.length,
+      // Which sources actually populated the card-shaped fields. Useful for the
+      // portal to render a "verified by AI" badge vs. a "derived" footnote.
+      derived_from: {
+        title: f1Title ? 'f1' : 'heuristic',
+        description: f1Summary ? 'f1_summary' : (f1 && f1.reasoning ? 'f1_reasoning' : 'snippet'),
+        source: f1Source ? 'f1' : 'unknown',
+        published_at: /^\d{4}-\d{2}-\d{2}$/.test(f1Published) ? 'f1' : 'pipeline_run_date',
+        tags: f1Tags.length ? (f2Points.length ? 'f1+f2' : 'f1') : (f2Points.length ? 'f2' : 'none'),
+        // 'f4_impacts' = filtered by requires_amendment / severity != "none"
+        // 'f3_matches' = fallback when F4 never ran (count is candidates, not confirmed impacts)
+        // 'none'       = neither stage produced any candidate policies
+        affected_policies_count: countingSource,
+      },
+    },
+    created_at: createdAt,
+    updated_at: createdAt,
+  };
+
+  if (opts.includePipeline) {
+    out.pipeline = {
+      stage_reached: stage || null,
+      f1_relevance: f1,
+      key_changes: f2Points.map((pt) => ({
+        id: pt.id || null,
+        point: pt.point || '',
+        source_reference: pt.source_reference || null,
+        category: pt.category || null,
+      })),
+      f3_matches: f3Matches,
+      impact_analysis: f4Impacts.map((group) => ({
+        point_id: group.point_id || null,
+        point_text: group.point_text || '',
+        impacts: Array.isArray(group.impacts) ? group.impacts : [],
+      })),
+      // Same F4 data re-grouped by POLICY (each entry = one policy with the
+      // regulation points that touched it underneath). The portal renders the
+      // "Affected policies" group-by view from this, while `impact_analysis`
+      // above keeps the regulation-point-first view available.
+      impacts_by_policy: pipelineGroupImpactsByPolicy(f4Impacts),
+      policy_count_indexed: result.policy_count_indexed ?? null,
+    };
+  }
+
+  return out;
+}
+
+/**
+ * Seed the extracted updates table with the same five Arabic items shown on the
+ * "المستجدات التشريعية" portal page so the API has demo data on a fresh DB.
+ * Idempotent: only seeds when the table is empty.
+ */
+function seedLegislativeExtractedUpdates() {
+  try {
+    const { c } = dbCountLegislativeExtracted.get();
+    if (c > 0) return;
+    const now = new Date().toISOString();
+    const seed = [
+      {
+        id: 'lu-eng-license-update-2026',
+        title: 'تعديل لائحة مزاولة المهنة الهندسية',
+        description: 'صدرت تعديلات جوهرية على لائحة مزاولة المهنة الهندسية تتضمن تحديث اشتراطات الترخيص وإضافة فئات جديدة للتصنيف المهني.',
+        source: 'أم القرى',
+        published_at: '2026-03-05',
+        status: 'new',
+        impact_level: 'high',
+        affected_policies_count: 5,
+        tags: ['هندسة', 'ترخيص', 'تصنيف مهني'],
+      },
+      {
+        id: 'lu-engineering-safety-2026',
+        title: 'تحديث اشتراطات السلامة للمنشآت الهندسية',
+        description: 'تحديث للاشتراطات الفنية للسلامة في المنشآت الهندسية مع إضافة متطلبات جديدة لفحص المباني.',
+        source: 'وزارة الشؤون البلدية',
+        published_at: '2026-03-04',
+        status: 'under_analysis',
+        impact_level: 'medium',
+        affected_policies_count: 3,
+        tags: ['سلامة', 'منشآت', 'مباني'],
+      },
+      {
+        id: 'lu-cross-border-engineering-2026',
+        title: 'قرار تنظيم الاستشارات الهندسية العابرة للحدود',
+        description: 'قرار جديد ينظم عمل الشركات الهندسية الأجنبية داخل المملكة ويحدد شروط الترخيص والشراكة مع المكاتب المحلية.',
+        source: 'هيئة المهندسين',
+        published_at: '2026-03-04',
+        status: 'under_analysis',
+        impact_level: 'high',
+        affected_policies_count: 5,
+        tags: ['استشارات', 'شراكات أجنبية'],
+      },
+      {
+        id: 'lu-office-classification-2026',
+        title: 'تعميم بشأن تصنيف المكاتب الهندسية',
+        description: 'تعميم يوضح آلية إعادة تصنيف المكاتب الهندسية وفق المعايير الجديدة.',
+        source: 'وزارة التجارة',
+        published_at: '2026-03-05',
+        status: 'completed',
+        impact_level: 'low',
+        affected_policies_count: 1,
+        tags: ['تصنيف', 'مكاتب هندسية'],
+      },
+      {
+        id: 'lu-professional-accreditation-2026',
+        title: 'تحديث معايير الاعتماد المهني للمهندسين',
+        description: 'الهيئة السعودية للمهندسين تُحدِّث معايير الاعتماد المهني ومسارات التطوير المستمر للمهندسين.',
+        source: 'الهيئة السعودية للمهندسين',
+        published_at: '2026-03-03',
+        status: 'completed',
+        impact_level: 'medium',
+        affected_policies_count: 2,
+        tags: ['اعتماد مهني', 'تطوير'],
+      },
+    ];
+    const insertMany = db.transaction((items) => {
+      for (const it of items) {
+        dbInsertLegislativeExtracted.run({
+          id: it.id,
+          title: it.title,
+          description: it.description,
+          source: it.source,
+          source_id: null,
+          internal_source_id: null,
+          external_url: '',
+          published_at: it.published_at,
+          status: it.status,
+          status_label: LU_DEFAULT_STATUS_LABELS[it.status] || '',
+          impact_level: it.impact_level,
+          impact_label: LU_DEFAULT_IMPACT_LABELS[it.impact_level] || '',
+          affected_policies_count: it.affected_policies_count || 0,
+          affected_policy_ids: JSON.stringify([]),
+          tags: JSON.stringify(it.tags || []),
+          language: 'ar',
+          raw_text: '',
+          metadata: JSON.stringify({}),
+          created_at: now,
+          updated_at: now,
+        });
+      }
+    });
+    insertMany(seed);
+    console.log(`[Legislative] Seeded ${seed.length} sample extracted updates.`);
+  } catch (err) {
+    console.warn('[Legislative] seed extracted updates failed:', err.message);
+  }
+}
+seedLegislativeExtractedUpdates();
 
 // ---- CISO Entity Cache DB helpers ----
 const dbGetCachedEntity = db.prepare(`SELECT * FROM ciso_entity_cache WHERE id = ? AND entity_type = ?`);
@@ -1307,7 +2600,9 @@ const mimeTypes = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon'
+  '.ico': 'image/x-icon',
+  '.yaml': 'text/yaml; charset=utf-8',
+  '.yml': 'text/yaml; charset=utf-8',
 };
 
 // Safe JSON response helper — handles Unicode (Arabic, etc.) without ByteString errors
@@ -1319,6 +2614,50 @@ function sendJSON(res, statusCode, data) {
     'Content-Length': buf.length,
   });
   res.end(buf);
+}
+
+/**
+ * Recover complete {...} objects from a truncated JSON array string.
+ * Walks brace depth while respecting strings and escapes so it can salvage
+ * partial responses when an LLM hits its output token limit mid-array.
+ * Each recovered object is JSON.parsed individually; malformed ones are skipped.
+ */
+function salvageArticleObjects(rawJsonArrayStr) {
+  if (typeof rawJsonArrayStr !== 'string' || !rawJsonArrayStr.length) return [];
+  const s = rawJsonArrayStr;
+  const out = [];
+  let i = s.indexOf('[');
+  if (i < 0) i = 0; else i++;
+  while (i < s.length) {
+    while (i < s.length && /\s|,/.test(s[i])) i++;
+    if (i >= s.length || s[i] !== '{') break;
+    const start = i;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (; i < s.length; i++) {
+      const c = s[i];
+      if (esc) { esc = false; continue; }
+      if (inStr) {
+        if (c === '\\') { esc = true; continue; }
+        if (c === '"')  { inStr = false; continue; }
+        continue;
+      }
+      if (c === '"') { inStr = true; continue; }
+      if (c === '{') depth++;
+      else if (c === '}') {
+        depth--;
+        if (depth === 0) {
+          const candidate = s.slice(start, i + 1);
+          try { out.push(JSON.parse(candidate)); } catch (_) { /* skip malformed */ }
+          i++;
+          break;
+        }
+      }
+    }
+    if (depth !== 0) break; // truncated mid-object — done
+  }
+  return out;
 }
 
 // Parse JSON body from request
@@ -2383,6 +3722,291 @@ function dsParseWorkbookToNormalizedRows(fileBuffer) {
   return { sheetName: sn[0], rows };
 }
 
+/** Policy rows for Data Studio: map spreadsheets → GRC Policy bodies (PolicyWriteSerializer ~ AppliedControl writable fields; category forced to policy upstream). */
+const DS_POLICY_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function dsPolicyTruncateRef(s, maxLen) {
+  maxLen = maxLen || 100;
+  if (s == null || s === '') return '';
+  const t = String(s).trim();
+  return t.length <= maxLen ? t : t.slice(0, maxLen);
+}
+
+function dsPolicyOptionalBoundedInt(raw, keys, lo, hi) {
+  let s = dsFirstString(raw, keys);
+  if (s === '' || s == null) {
+    for (const k of keys) {
+      if (raw[k] != null && typeof raw[k] === 'number' && Number.isFinite(raw[k])) {
+        const n = Math.trunc(raw[k]);
+        if (n >= lo && n <= hi) return n;
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+  const n = parseInt(String(s).trim(), 10);
+  if (!Number.isFinite(n) || n < lo || n > hi) return undefined;
+  return n;
+}
+
+function dsPolicyOptionalDate(raw, keys) {
+  const s = dsFirstString(raw, keys);
+  if (!s) return undefined;
+  const m = String(s).trim().match(/^(\d{4}-\d{2}-\d{2})\b/);
+  return m ? m[1] : undefined;
+}
+
+function dsPolicyNormalizeStatus(raw) {
+  const s = dsFirstString(raw, ['status', 'Status', 'الحالة']);
+  if (!s) return undefined;
+  const norm = String(s).trim().toLowerCase().replace(/\s+/g, '_');
+  const map = new Map([
+    ['to_do', 'to_do'],
+    ['todo', 'to_do'],
+    ['in_progress', 'in_progress'],
+    ['inprogress', 'in_progress'],
+    ['on_hold', 'on_hold'],
+    ['onhold', 'on_hold'],
+    ['active', 'active'],
+    ['deprecated', 'deprecated'],
+    ['--', '--'],
+    ['undefined', '--'],
+    ['undef', '--'],
+  ]);
+  if (norm === '−−' || norm === '-') return '--';
+  if (map.has(norm)) return map.get(norm);
+  const allowed = new Set(['to_do', 'in_progress', 'on_hold', 'active', 'deprecated', '--']);
+  if (allowed.has(norm)) return norm;
+  return undefined;
+}
+
+function dsPolicyNormalizeCsf(raw) {
+  const s = dsFirstString(raw, ['csf_function', 'CSF function', 'CSF Function', 'csf']);
+  if (!s) return undefined;
+  const t = String(s).trim().toLowerCase();
+  const allowed = ['govern', 'identify', 'protect', 'detect', 'respond', 'recover'];
+  return allowed.includes(t) ? t : undefined;
+}
+
+function dsPolicyNormalizeEffort(raw) {
+  const s = dsFirstString(raw, ['effort', 'Effort']);
+  if (!s) return undefined;
+  const u = String(s).trim().toUpperCase();
+  return ['XS', 'S', 'M', 'L', 'XL'].includes(u) ? u : undefined;
+}
+
+function dsPolicyOptionalUuid(raw, keys) {
+  const v = dsFirstString(raw, keys);
+  if (!v || !DS_POLICY_UUID_RE.test(v.trim())) return undefined;
+  return v.trim();
+}
+
+function dsPolicyNormalizePublished(raw) {
+  const s = dsFirstString(raw, ['is_published', 'Is published', 'published', 'Published']);
+  if (s === '' || s == null) return undefined;
+  const t = String(s).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'نعم'].includes(t)) return true;
+  if (['false', '0', 'no', 'n', 'لا'].includes(t)) return false;
+  return undefined;
+}
+
+/** Parsed workbook row — name required before import; folder UUID from POST body. */
+function dsNormalizePolicySheetRow(raw) {
+  const name = dsFirstString(raw, ['name', 'Name', 'title', 'Title', 'Policy name', 'policy_name', 'اسم السياسة']);
+  let description =
+    dsFirstString(raw, ['description', 'Description', 'summary', 'Summary', 'ملخص']) || '';
+  if (!description.trim() && raw && typeof raw === 'object') {
+    description = dsBuildDescriptionFromRow(raw);
+  }
+  const ref_id = dsPolicyTruncateRef(
+    dsFirstString(raw, ['ref_id', 'Ref ID', 'reference', 'Reference', 'كود', 'رمز']),
+    100
+  );
+  const observation = dsFirstString(raw, ['observation', 'Observation']);
+  const link = dsFirstString(raw, ['link', 'Link', 'url', 'URL']);
+
+  return {
+    name,
+    description: description.trim(),
+    ref_id,
+    observation: observation || undefined,
+    link: link || undefined,
+    status: dsPolicyNormalizeStatus(raw),
+    csf_function: dsPolicyNormalizeCsf(raw),
+    priority: dsPolicyOptionalBoundedInt(raw, ['priority', 'Priority'], 1, 4),
+    control_impact: dsPolicyOptionalBoundedInt(raw, ['control_impact', 'Control impact', 'impact'], 1, 5),
+    progress_field: dsPolicyOptionalBoundedInt(raw, ['progress_field', 'Progress', 'progress'], 0, 100),
+    effort: dsPolicyNormalizeEffort(raw),
+    reference_control: dsPolicyOptionalUuid(raw, ['reference_control', 'reference control', 'Reference control']),
+    start_date: dsPolicyOptionalDate(raw, ['start_date', 'Start date']),
+    eta: dsPolicyOptionalDate(raw, ['eta', 'Eta', 'ETA']),
+    expiry_date: dsPolicyOptionalDate(raw, ['expiry_date', 'Expiry date', 'expiry']),
+    is_published: dsPolicyNormalizePublished(raw),
+  };
+}
+
+/** Minimal POST body for each row — aligns with GRCPolicy create (omit undefined). */
+function dsBuildPolicyPostPayload(row, folderUuid) {
+  const body = { name: row.name, folder: folderUuid };
+  if (row.description) body.description = row.description;
+  if (row.ref_id) body.ref_id = row.ref_id;
+  if (row.observation) body.observation = row.observation;
+  if (row.link) body.link = row.link;
+  if (row.status) body.status = row.status;
+  if (row.csf_function) body.csf_function = row.csf_function;
+  if (row.priority != null) body.priority = row.priority;
+  if (row.reference_control) body.reference_control = row.reference_control;
+  if (row.effort) body.effort = row.effort;
+  if (row.control_impact != null) body.control_impact = row.control_impact;
+  if (row.start_date) body.start_date = row.start_date;
+  if (row.eta) body.eta = row.eta;
+  if (row.expiry_date) body.expiry_date = row.expiry_date;
+  if (row.progress_field != null) body.progress_field = row.progress_field;
+  if (row.is_published === true || row.is_published === false) body.is_published = row.is_published;
+  return body;
+}
+
+function dsParseWorkbookToPolicyRows(fileBuffer) {
+  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const sn = wb.SheetNames || [];
+  if (!sn.length) return { error: 'Workbook has no sheets.' };
+  const sheet = wb.Sheets[sn[0]];
+  const objects = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+  const rows = [];
+  let excelRowNum = 1;
+  let skippedEmptyName = 0;
+  for (const o of objects) {
+    excelRowNum++;
+    const n = dsNormalizePolicySheetRow(o);
+    if (!n.name) {
+      skippedEmptyName++;
+      continue;
+    }
+    rows.push({ ...n, excelRow: excelRowNum });
+  }
+  return { sheetName: sn[0], rows, skippedEmptyName };
+}
+
+/** Risk scenario rows → POST /api/risk-scenarios/ (row name required; risk_assessment from column or import default). */
+function dsNormalizeRiskScenarioSheetRow(raw) {
+  const name = dsFirstString(raw, [
+    'name',
+    'Name',
+    'title',
+    'Title',
+    'scenario',
+    'Scenario',
+    'risk_scenario',
+    'Risk scenario',
+  ]);
+  const description = dsFirstString(raw, ['description', 'Description', 'summary', 'Summary']) || '';
+  const ref_id = dsPolicyTruncateRef(
+    dsFirstString(raw, ['ref_id', 'Ref ID', 'reference', 'Reference', 'كود', 'رمز']),
+    100
+  );
+  const observation = dsFirstString(raw, ['observation', 'Observation']);
+  const raFromCol = dsFirstString(raw, [
+    'risk_assessment',
+    'Risk assessment',
+    'assessment',
+    'assessment_uuid',
+    'risk_assessment_id',
+  ]);
+  let risk_assessment;
+  if (raFromCol && DS_POLICY_UUID_RE.test(String(raFromCol).trim())) {
+    risk_assessment = String(raFromCol).trim();
+  }
+  return {
+    name,
+    description: description.trim(),
+    ref_id: ref_id || undefined,
+    observation: observation || undefined,
+    risk_assessment,
+  };
+}
+
+function dsBuildRiskScenarioPostPayload(row) {
+  const body = { name: row.name, risk_assessment: row.risk_assessment };
+  if (row.description) body.description = row.description;
+  if (row.ref_id) body.ref_id = row.ref_id;
+  if (row.observation) body.observation = row.observation;
+  return body;
+}
+
+function dsParseWorkbookToRiskScenarioRows(fileBuffer) {
+  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const sn = wb.SheetNames || [];
+  if (!sn.length) return { error: 'Workbook has no sheets.' };
+  const sheet = wb.Sheets[sn[0]];
+  const objects = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+  const rows = [];
+  let excelRowNum = 1;
+  let skippedEmptyName = 0;
+  for (const o of objects) {
+    excelRowNum++;
+    const n = dsNormalizeRiskScenarioSheetRow(o);
+    if (!n.name) {
+      skippedEmptyName++;
+      continue;
+    }
+    rows.push({ ...n, excelRow: excelRowNum });
+  }
+  return { sheetName: sn[0], rows, skippedEmptyName };
+}
+
+/** Basename suitable for HTTP Content-Disposition filename= (ASCII, rejects path tricks). */
+function dsDispositionFilenameAscii(name, fallback = 'risk-matrix-library.yaml') {
+  let base = fallback;
+  try {
+    base = path.basename(String(name || '').trim()) || fallback;
+  } catch (_) { /* keep fallback */ }
+  if (!base || base === '.' || base === '..') base = fallback;
+  let out = base.replace(/[^\w.\-()+@]/g, '_');
+  if (!out.endsWith('.yaml') && !out.endsWith('.yml')) {
+    const stem = out.replace(/\.+$/, '') || 'library';
+    out = `${stem.slice(0, 180)}.yaml`;
+  }
+  return out.slice(0, 200);
+}
+
+/** Light validation before forwarding YAML to POST /api/stored-libraries/upload/ (risk-matrix library envelope). */
+function dsValidateRiskMatrixStoredLibraryYaml(yamlStr) {
+  let doc;
+  try {
+    doc = yaml.load(yamlStr);
+  } catch (e) {
+    return { error: `YAML parse error: ${e.message}` };
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { error: 'YAML root must be a mapping (object).' };
+  }
+  if (!String(doc.urn ?? '').trim()) return { error: 'Library YAML requires urn.' };
+  if (!String(doc.name ?? '').trim()) return { error: 'Library YAML requires name.' };
+  if (doc.version === undefined || doc.version === null) {
+    return { error: 'Library YAML requires version (integer).' };
+  }
+  if (!String(doc.ref_id ?? '').trim()) {
+    return { error: 'Library YAML requires ref_id (stored library creation).' };
+  }
+  if (!doc.objects || typeof doc.objects !== 'object' || Array.isArray(doc.objects)) {
+    return { error: 'Library YAML requires objects mapping.' };
+  }
+  const o = doc.objects;
+  if (o.risk_matrices != null && o.risk_matrix != null) {
+    return { error: 'Define only one of objects.risk_matrices or objects.risk_matrix.' };
+  }
+  const list = o.risk_matrices;
+  const legacy = o.risk_matrix;
+  if (list != null) {
+    if (!Array.isArray(list)) return { error: 'objects.risk_matrices must be a YAML list.' };
+    if (!list.length) return { error: 'objects.risk_matrices must not be empty.' };
+  } else if (legacy == null) {
+    return { error: 'Provide objects.risk_matrices or objects.risk_matrix.' };
+  }
+  return { doc };
+}
+
 // ==========================================
 // Gemini Analysis API
 // ==========================================
@@ -3356,9 +4980,13 @@ const server = http.createServer(async (req, res) => {
 
   // Extract local token for GRC-authenticated fetch calls
   const reqToken = getTokenFromRequest(req);
+  /** Trailing slashes on /api/data-studio/** would skip strict matches; use `grcProxyTailMatch(routePath, …)` so path-prefixed gateways still match. */
+  const pathnameNorm =
+    typeof url.pathname === 'string' ? url.pathname.replace(/\/+$/, '') || '/' : '/';
+  const routePath = pathnameNorm.replace(/\/{2,}/g, '/');
 
   // ---- Data Studio: Excel preview (applied controls import path) ----
-  if (url.pathname === '/api/data-studio/preview-excel' && req.method === 'POST') {
+  if (grcProxyTailMatch(routePath, '/api/data-studio/preview-excel') && req.method === 'POST') {
     try {
       const body = await parseBody(req);
       const { fileName, data } = body;
@@ -3423,7 +5051,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (url.pathname === '/api/data-studio/create-audit' && req.method === 'POST') {
+  if (grcProxyTailMatch(routePath, '/api/data-studio/create-audit') && req.method === 'POST') {
     try {
       const body = await parseBody(req);
       const framework =
@@ -3529,7 +5157,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (url.pathname === '/api/data-studio/diagnose-grc-audits' && req.method === 'GET') {
+  if (grcProxyTailMatch(routePath, '/api/data-studio/diagnose-grc-audits') && req.method === 'GET') {
     try {
       // 1) every compliance assessment + a small sample of its requirement-assessment ref_ids
       const cas = await dsFetchAllComplianceAssessments(GRC_API_URL, reqToken, res);
@@ -3624,7 +5252,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (url.pathname === '/api/data-studio/import-applied-controls' && req.method === 'POST') {
+  if (grcProxyTailMatch(routePath, '/api/data-studio/import-applied-controls') && req.method === 'POST') {
     try {
       const body = await parseBody(req);
       const { fileName, data, folder, complianceAssessment } = body;
@@ -4167,6 +5795,699 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Data Studio → GRC POST /api/policies/ per workbook row (PolicyWriteSerializer; category forced upstream). */
+  if (grcProxyTailMatch(routePath, '/api/data-studio/import-policies') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const { fileName, data, folder } = body;
+      if (!folder || typeof folder !== 'string') {
+        sendJSON(res, 400, { error: 'folder (UUID) is required.' });
+        return;
+      }
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      const lower = String(fileName || '').toLowerCase();
+      if (!lower.endsWith('.xlsx') && !lower.endsWith('.xls') && !lower.endsWith('.csv')) {
+        sendJSON(res, 400, { error: 'Only Excel (.xlsx, .xls) or CSV files are supported.' });
+        return;
+      }
+      let fileBuffer;
+      try {
+        fileBuffer = Buffer.from(data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 payload.' });
+        return;
+      }
+      const parsed = dsParseWorkbookToPolicyRows(fileBuffer);
+      if (parsed.error) {
+        sendJSON(res, 400, { error: parsed.error });
+        return;
+      }
+      const { rows, sheetName, skippedEmptyName } = parsed;
+      const folderTrim = folder.trim();
+      const created = [];
+      const errors = [];
+
+      let rowIx = 0;
+      for (const row of rows) {
+        rowIx++;
+        const grcBody = dsBuildPolicyPostPayload(row, folderTrim);
+        const rowCtx = { row: row.excelRow, index: rowIx, name: row.name };
+
+        try {
+          const grcRes = await grcFetch(`${GRC_API_URL}/api/policies/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(grcBody),
+          }, reqToken);
+          if (!grcRes.ok) {
+            const errIn = await consumeGrcErrorBody(res, reqToken, grcRes);
+            if (errIn.aborted) return;
+            const eMsg = errIn.errText.slice(0, 800);
+            errors.push({ ...rowCtx, error: eMsg });
+            continue;
+          }
+          const createdObj = await grcRes.json();
+          const id = createdObj.id || createdObj.uuid;
+          created.push({ ...rowCtx, id, ref_id: row.ref_id || null });
+          console.log(
+            `[DataStudio] Policy row ${rowCtx.row} POST /api/policies/ → ${id ? String(id).slice(0, 8) + '…' : '(no id)'}`
+          );
+        } catch (e) {
+          errors.push({ ...rowCtx, error: e.message });
+        }
+      }
+
+      sendJSON(res, 200, {
+        success: true,
+        sheetName,
+        folder: folderTrim,
+        totalParsedRows: rows.length,
+        skippedEmptyName: skippedEmptyName || 0,
+        createdCount: created.length,
+        failedCount: errors.length,
+        created,
+        errors,
+        grcPoliciesApi: `${GRC_API_URL}/api/policies/`,
+      });
+    } catch (err) {
+      console.error('[DataStudio] import-policies:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Import failed.' });
+    }
+    return;
+  }
+
+  /** Data Studio → GRC POST /api/risk-scenarios/ per workbook row. */
+  if (grcProxyTailMatch(routePath, '/api/data-studio/import-risk-scenarios') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const { fileName, data, risk_assessment } = body;
+      const raDefault =
+        typeof risk_assessment === 'string' ? risk_assessment.trim() : '';
+
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      const lower = String(fileName || '').toLowerCase();
+      if (!lower.endsWith('.xlsx') && !lower.endsWith('.xls') && !lower.endsWith('.csv')) {
+        sendJSON(res, 400, { error: 'Only Excel (.xlsx, .xls) or CSV files are supported.' });
+        return;
+      }
+
+      let fileBuffer;
+      try {
+        fileBuffer = Buffer.from(data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 payload.' });
+        return;
+      }
+      const parsed = dsParseWorkbookToRiskScenarioRows(fileBuffer);
+      if (parsed.error) {
+        sendJSON(res, 400, { error: parsed.error });
+        return;
+      }
+      const { rows, sheetName, skippedEmptyName } = parsed;
+      const created = [];
+      const errors = [];
+
+      let rowIx = 0;
+      for (const row of rows) {
+        rowIx++;
+        const assessmentUuid =
+          typeof row.risk_assessment === 'string' ? row.risk_assessment.trim() || raDefault : raDefault;
+
+        const rowCtx = { row: row.excelRow, index: rowIx, name: row.name };
+        if (!assessmentUuid) {
+          errors.push({
+            ...rowCtx,
+            error:
+              'No risk_assessment UUID. Set Step 3 “Risk assessment UUID”, add a risk_assessment column, or omit per-row overrides only after a default exists.',
+          });
+          continue;
+        }
+        const merged = { ...row, risk_assessment: assessmentUuid };
+        const grcBody = dsBuildRiskScenarioPostPayload(merged);
+
+        try {
+          const grcRes = await grcFetch(
+            `${GRC_API_URL}/api/risk-scenarios/`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(grcBody),
+            },
+            reqToken
+          );
+          if (!grcRes.ok) {
+            const errIn = await consumeGrcErrorBody(res, reqToken, grcRes);
+            if (errIn.aborted) return;
+            const eMsg = errIn.errText.slice(0, 800);
+            errors.push({ ...rowCtx, error: eMsg });
+            continue;
+          }
+          const createdObj = await grcRes.json();
+          const id = createdObj.id || createdObj.uuid;
+          created.push({ ...rowCtx, id, ref_id: row.ref_id || null });
+          console.log(
+            `[DataStudio] Risk scenario row ${rowCtx.row} POST /api/risk-scenarios/ → ${id ? String(id).slice(0, 8) + '…' : '(no id)'}`
+          );
+        } catch (e) {
+          errors.push({ ...rowCtx, error: e.message });
+        }
+      }
+
+      sendJSON(res, 200, {
+        success: errors.length === 0,
+        sheetName,
+        risk_assessment_default: raDefault || null,
+        totalParsedRows: rows.length,
+        skippedEmptyName: skippedEmptyName || 0,
+        createdCount: created.length,
+        failedCount: errors.length,
+        created,
+        errors,
+        grcRiskScenariosApi: `${GRC_API_URL}/api/risk-scenarios/`,
+      });
+    } catch (err) {
+      console.error('[DataStudio] import-risk-scenarios:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Import failed.' });
+    }
+    return;
+  }
+
+  /**
+   * Data Studio · Risk-matrix stored library YAML → raw body + Content-Disposition (same as Policy Approve→GRC stored-libraries/upload).
+   */
+  if (grcProxyTailMatch(routePath, '/api/data-studio/upload-risk-matrix-library-yaml') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const yamlText = typeof body.yaml === 'string' ? body.yaml : '';
+      const fileHint = typeof body.fileName === 'string' ? body.fileName.trim() : '';
+      if (!yamlText.trim()) {
+        sendJSON(res, 400, { error: 'yaml (UTF-8 string) is required.' });
+        return;
+      }
+      const v = dsValidateRiskMatrixStoredLibraryYaml(yamlText);
+      if (v.error) {
+        sendJSON(res, 400, { error: v.error });
+        return;
+      }
+      const fileBuffer = Buffer.from(yamlText, 'utf8');
+      const dispositionFn = dsDispositionFilenameAscii(
+        fileHint || `${String(v.doc.ref_id).trim().replace(/\s+/g, '_')}.yaml`,
+      );
+
+      const grcRes = await grcFetch(
+        `${GRC_API_URL}/api/stored-libraries/upload/`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Disposition': `attachment; filename=${dispositionFn}`,
+            'Content-Length': String(fileBuffer.length),
+          },
+          body: fileBuffer,
+        },
+        reqToken
+      );
+      if (!grcRes.ok) {
+        const errIn = await consumeGrcErrorBody(res, reqToken, grcRes);
+        if (errIn.aborted) return;
+        const eMsg = errIn.errText.slice(0, 900);
+        sendJSON(res, grcRes.status >= 400 && grcRes.status < 600 ? grcRes.status : 502, {
+          success: false,
+          error: eMsg,
+          grcStoredLibrariesUpload: `${GRC_API_URL}/api/stored-libraries/upload/`,
+        });
+        return;
+      }
+      const createdObj = await grcRes.json().catch(() => ({}));
+      console.log(`[DataStudio] stored-libraries/upload (risk matrix YAML) → ok`);
+      sendJSON(res, 200, {
+        success: true,
+        result: createdObj,
+        grcStoredLibrariesUpload: `${GRC_API_URL}/api/stored-libraries/upload/`,
+      });
+    } catch (err) {
+      console.error('[DataStudio] upload-risk-matrix-library-yaml:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Upload failed.' });
+    }
+    return;
+  }
+
+  // ---- Legislative updates: internal sources (GCS + SQLite) ----
+  if (url.pathname === '/api/legislative-updates/internal-sources' && req.method === 'GET') {
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) {
+        sendJSON(res, 401, { error: 'Unauthorized.' });
+        return;
+      }
+      const rows = dbListLegislativeInternal.all();
+      const gcs = getLegislativeGcsClient();
+      const sources = [];
+      for (const row of rows) {
+        let download_url = row.public_url;
+        if (gcs.ok) {
+          try {
+            download_url = await legislativeSignedDownloadUrl(
+              gcs.storage,
+              row.gcs_bucket,
+              row.gcs_object_path,
+              row.mime_type
+            );
+          } catch (sigErr) {
+            console.warn('[Legislative] signed URL:', sigErr.message);
+          }
+        }
+        sources.push({
+          id: row.id,
+          name: row.name,
+          description: row.description,
+          original_file_name: row.original_file_name,
+          mime_type: row.mime_type,
+          size: row.size,
+          uploaded_by: row.uploaded_by,
+          created_at: row.created_at,
+          download_url,
+        });
+      }
+      sendJSON(res, 200, { success: true, sources });
+    } catch (err) {
+      console.error('[Legislative] list:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to list sources.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/legislative-updates/internal-sources' && req.method === 'POST') {
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) {
+        sendJSON(res, 401, { error: 'Unauthorized.' });
+        return;
+      }
+      const gcs = getLegislativeGcsClient();
+      if (!gcs.ok) {
+        sendJSON(res, 503, {
+          error: gcs.error,
+          hint: 'Install @google-cloud/storage and set GOOGLE_APPLICATION_CREDENTIALS (or run on GCP with a service account that can sign URLs and write to the bucket).',
+        });
+        return;
+      }
+      const body = await parseBody(req);
+      const name = String(body.name || '').trim();
+      const description = String(body.description != null ? body.description : '').trim();
+      const fileName = String(body.fileName || body.originalName || '').trim();
+      const mimeType = String(body.mimeType || 'application/octet-stream').trim();
+      if (!name) {
+        sendJSON(res, 400, { error: 'name is required.' });
+        return;
+      }
+      if (!body.data || typeof body.data !== 'string') {
+        sendJSON(res, 400, { error: 'File data (base64) is required.' });
+        return;
+      }
+      let buf;
+      try {
+        buf = Buffer.from(body.data, 'base64');
+      } catch {
+        sendJSON(res, 400, { error: 'Invalid base64 file payload.' });
+        return;
+      }
+      const MAX_LEGISLATIVE_FILE = 50 * 1024 * 1024;
+      if (!buf.length) {
+        sendJSON(res, 400, { error: 'Empty file.' });
+        return;
+      }
+      if (buf.length > MAX_LEGISLATIVE_FILE) {
+        sendJSON(res, 400, { error: 'File too large (max 50 MB).' });
+        return;
+      }
+
+      const id = crypto.randomUUID();
+      const safeSeg = legislativeSafeObjectSegment(fileName || 'document');
+      const objectPath = `internal/${id}/${safeSeg}`;
+      const bucketName = GCS_LEGISLATIVE_BUCKET_NAME;
+      const file = gcs.storage.bucket(bucketName).file(objectPath);
+
+      await legislativeUploadBuffer(
+        gcs.storage,
+        bucketName,
+        objectPath,
+        buf,
+        mimeType || 'application/octet-stream',
+        { uploaded_by: session.username, source_name: name }
+      );
+
+      const publicUrl = legislativePublicUrl(bucketName, objectPath);
+      const createdAt = new Date().toISOString();
+      const meta = {
+        id,
+        name,
+        description,
+        original_file_name: fileName || safeSeg,
+        mime_type: mimeType || 'application/octet-stream',
+        size: buf.length,
+        gcs_bucket: bucketName,
+        gcs_object_path: objectPath,
+        public_url: publicUrl,
+        uploaded_by: session.username,
+        created_at: createdAt,
+      };
+
+      try {
+        dbInsertLegislativeInternal.run(meta);
+      } catch (dbErr) {
+        try {
+          await file.delete({ ignoreNotFound: true });
+        } catch (_) { /* ignore */ }
+        throw dbErr;
+      }
+
+      let download_url = publicUrl;
+      try {
+        download_url = await legislativeSignedDownloadUrl(
+          gcs.storage,
+          bucketName,
+          objectPath,
+          mimeType || 'application/octet-stream'
+        );
+      } catch (_) { /* keep publicUrl */ }
+
+      sendJSON(res, 201, {
+        success: true,
+        source: {
+          id: meta.id,
+          name: meta.name,
+          description: meta.description,
+          original_file_name: meta.original_file_name,
+          mime_type: meta.mime_type,
+          size: meta.size,
+          uploaded_by: meta.uploaded_by,
+          created_at: meta.created_at,
+          download_url,
+        },
+      });
+    } catch (err) {
+      console.error('[Legislative] upload:', err);
+      sendJSON(res, 500, { error: err.message || 'Upload failed.' });
+    }
+    return;
+  }
+
+  const luInternalOneMatch = url.pathname.match(
+    /^\/api\/legislative-updates\/internal-sources\/([^/]+)$/
+  );
+  if (luInternalOneMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
+    const id = luInternalOneMatch[1];
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) {
+        sendJSON(res, 401, { error: 'Unauthorized.' });
+        return;
+      }
+      const row = dbGetLegislativeInternal.get(id);
+      if (!row) {
+        sendJSON(res, 404, { error: 'Source not found.' });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const gcs = getLegislativeGcsClient();
+        if (gcs.ok) {
+          try {
+            await gcs.storage.bucket(row.gcs_bucket).file(row.gcs_object_path).delete({ ignoreNotFound: true });
+          } catch (delErr) {
+            console.warn('[Legislative] GCS delete:', delErr.message);
+          }
+        }
+        dbDeleteLegislativeInternal.run(id);
+        sendJSON(res, 200, { success: true, deleted: true });
+        return;
+      }
+
+      const body = await parseBody(req);
+      const name = String(body.name != null ? body.name : '').trim();
+      const description = String(body.description != null ? body.description : '').trim();
+      if (!name) {
+        sendJSON(res, 400, { error: 'name is required.' });
+        return;
+      }
+      dbUpdateLegislativeInternalMeta.run(name, description, id);
+      const updated = dbGetLegislativeInternal.get(id);
+      let download_url = updated.public_url;
+      const gcs = getLegislativeGcsClient();
+      if (gcs.ok) {
+        try {
+          download_url = await legislativeSignedDownloadUrl(
+            gcs.storage,
+            updated.gcs_bucket,
+            updated.gcs_object_path,
+            updated.mime_type
+          );
+        } catch (sigErr) {
+          console.warn('[Legislative] signed URL (patch):', sigErr.message);
+        }
+      }
+      sendJSON(res, 200, {
+        success: true,
+        source: {
+          id: updated.id,
+          name: updated.name,
+          description: updated.description,
+          original_file_name: updated.original_file_name,
+          mime_type: updated.mime_type,
+          size: updated.size,
+          uploaded_by: updated.uploaded_by,
+          created_at: updated.created_at,
+          download_url,
+        },
+      });
+    } catch (err) {
+      console.error('[Legislative] patch/delete:', err);
+      sendJSON(res, 500, { error: err.message || 'Operation failed.' });
+    }
+    return;
+  }
+
+  // ---- Legislative updates: extracted updates (portal feed) ----
+  // GET  /api/legislative-updates/extracted        — list with filters & pagination
+  // GET  /api/legislative-updates/extracted/facets — distinct sources/statuses/impacts (for UI dropdowns)
+  // GET  /api/legislative-updates/extracted/:id    — single update
+  // POST /api/legislative-updates/extracted        — create (auth)
+  // PATCH /api/legislative-updates/extracted/:id   — update (auth)
+  // DELETE /api/legislative-updates/extracted/:id  — delete (auth)
+  if (url.pathname === '/api/legislative-updates/extracted/facets' && req.method === 'GET') {
+    try {
+      const sources = db
+        .prepare(`SELECT DISTINCT source FROM legislative_extracted_updates WHERE source <> '' ORDER BY source`)
+        .all()
+        .map((r) => r.source);
+      const statuses = db
+        .prepare(`SELECT DISTINCT status, status_label FROM legislative_extracted_updates WHERE status <> '' ORDER BY status`)
+        .all()
+        .map((r) => ({ value: r.status, label: r.status_label || LU_DEFAULT_STATUS_LABELS[r.status] || r.status }));
+      const impacts = db
+        .prepare(`SELECT DISTINCT impact_level, impact_label FROM legislative_extracted_updates WHERE impact_level <> '' ORDER BY impact_level`)
+        .all()
+        .map((r) => ({ value: r.impact_level, label: r.impact_label || LU_DEFAULT_IMPACT_LABELS[r.impact_level] || r.impact_level }));
+      sendJSON(res, 200, { success: true, sources, statuses, impacts });
+    } catch (err) {
+      console.error('[Legislative] facets:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to load facets.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/legislative-updates/extracted' && req.method === 'GET') {
+    try {
+      const q = String(url.searchParams.get('q') || '').trim();
+      const sourceFilter = String(url.searchParams.get('source') || '').trim();
+      const statusFilter = luNormalizeStatus(url.searchParams.get('status') || '');
+      const impactFilter = luNormalizeImpact(url.searchParams.get('impact_level') || url.searchParams.get('impact') || '');
+      const dateFrom = String(url.searchParams.get('date_from') || url.searchParams.get('dateFrom') || '').trim();
+      const dateTo = String(url.searchParams.get('date_to') || url.searchParams.get('dateTo') || '').trim();
+      let limit = parseInt(url.searchParams.get('limit') || '50', 10);
+      let offset = parseInt(url.searchParams.get('offset') || '0', 10);
+      if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+      if (limit > 200) limit = 200;
+      if (!Number.isFinite(offset) || offset < 0) offset = 0;
+
+      const where = [];
+      const params = [];
+      if (q) {
+        where.push(`(title LIKE ? OR description LIKE ? OR source LIKE ? OR tags LIKE ?)`);
+        const like = `%${q}%`;
+        params.push(like, like, like, like);
+      }
+      if (sourceFilter) { where.push(`source = ?`); params.push(sourceFilter); }
+      if (statusFilter) { where.push(`status = ?`); params.push(statusFilter); }
+      if (impactFilter) { where.push(`impact_level = ?`); params.push(impactFilter); }
+      if (dateFrom) { where.push(`(published_at IS NULL OR published_at >= ?)`); params.push(dateFrom); }
+      if (dateTo)   { where.push(`(published_at IS NULL OR published_at <= ?)`); params.push(dateTo); }
+
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const total = db
+        .prepare(`SELECT COUNT(*) AS c FROM legislative_extracted_updates ${whereSql}`)
+        .get(...params).c;
+      const rows = db
+        .prepare(
+          `SELECT * FROM legislative_extracted_updates ${whereSql}
+           ORDER BY datetime(COALESCE(published_at, created_at)) DESC, datetime(created_at) DESC
+           LIMIT ? OFFSET ?`
+        )
+        .all(...params, limit, offset);
+
+      sendJSON(res, 200, {
+        success: true,
+        total,
+        limit,
+        offset,
+        count: rows.length,
+        items: rows.map(luRowToApi),
+      });
+    } catch (err) {
+      console.error('[Legislative] extracted list:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to list extracted updates.' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/legislative-updates/extracted' && req.method === 'POST') {
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) { sendJSON(res, 401, { error: 'Unauthorized.' }); return; }
+      const body = await parseBody(req);
+      const title = String(body.title || '').trim();
+      if (!title) { sendJSON(res, 400, { error: 'title is required.' }); return; }
+      const status = luNormalizeStatus(body.status) || 'new';
+      const impact = luNormalizeImpact(body.impact_level || body.impact) || 'medium';
+      const id = String(body.id || '').trim() || crypto.randomUUID();
+      const now = new Date().toISOString();
+      const row = {
+        id,
+        title,
+        description: String(body.description || '').trim(),
+        source: String(body.source || '').trim(),
+        source_id: body.source_id ? String(body.source_id) : null,
+        internal_source_id: body.internal_source_id ? String(body.internal_source_id) : null,
+        external_url: String(body.external_url || '').trim(),
+        published_at: body.published_at ? String(body.published_at).trim() : null,
+        status,
+        status_label: String(body.status_label || LU_DEFAULT_STATUS_LABELS[status] || ''),
+        impact_level: impact,
+        impact_label: String(body.impact_label || LU_DEFAULT_IMPACT_LABELS[impact] || ''),
+        affected_policies_count: Number.isFinite(+body.affected_policies_count)
+          ? Math.max(0, parseInt(body.affected_policies_count, 10))
+          : 0,
+        affected_policy_ids: JSON.stringify(Array.isArray(body.affected_policy_ids) ? body.affected_policy_ids : []),
+        tags: JSON.stringify(Array.isArray(body.tags) ? body.tags : []),
+        language: String(body.language || 'ar'),
+        raw_text: String(body.raw_text || ''),
+        metadata: JSON.stringify(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+        created_at: now,
+        updated_at: now,
+      };
+      try {
+        dbInsertLegislativeExtracted.run(row);
+      } catch (insErr) {
+        if (/UNIQUE|PRIMARY KEY/i.test(insErr.message)) {
+          sendJSON(res, 409, { error: 'An update with this id already exists.' });
+          return;
+        }
+        throw insErr;
+      }
+      sendJSON(res, 201, { success: true, item: luRowToApi(dbGetLegislativeExtracted.get(id)) });
+    } catch (err) {
+      console.error('[Legislative] extracted create:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to create extracted update.' });
+    }
+    return;
+  }
+
+  const luExtractedOneMatch = url.pathname.match(
+    /^\/api\/legislative-updates\/extracted\/([^/]+)$/
+  );
+  if (luExtractedOneMatch && req.method === 'GET') {
+    const id = luExtractedOneMatch[1];
+    try {
+      const row = dbGetLegislativeExtracted.get(id);
+      if (!row) { sendJSON(res, 404, { error: 'Update not found.' }); return; }
+      sendJSON(res, 200, { success: true, item: luRowToApi(row) });
+    } catch (err) {
+      console.error('[Legislative] extracted get:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to load update.' });
+    }
+    return;
+  }
+
+  if (luExtractedOneMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
+    const id = luExtractedOneMatch[1];
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) { sendJSON(res, 401, { error: 'Unauthorized.' }); return; }
+      const existing = dbGetLegislativeExtracted.get(id);
+      if (!existing) { sendJSON(res, 404, { error: 'Update not found.' }); return; }
+
+      if (req.method === 'DELETE') {
+        dbDeleteLegislativeExtracted.run(id);
+        sendJSON(res, 200, { success: true, deleted: true, id });
+        return;
+      }
+
+      const body = await parseBody(req);
+      const status = body.status != null ? (luNormalizeStatus(body.status) || existing.status) : existing.status;
+      const impact = (body.impact_level != null || body.impact != null)
+        ? (luNormalizeImpact(body.impact_level || body.impact) || existing.impact_level)
+        : existing.impact_level;
+      const merged = {
+        id,
+        title: body.title != null ? String(body.title).trim() : existing.title,
+        description: body.description != null ? String(body.description).trim() : (existing.description || ''),
+        source: body.source != null ? String(body.source).trim() : (existing.source || ''),
+        source_id: body.source_id !== undefined ? (body.source_id ? String(body.source_id) : null) : existing.source_id,
+        internal_source_id: body.internal_source_id !== undefined
+          ? (body.internal_source_id ? String(body.internal_source_id) : null)
+          : existing.internal_source_id,
+        external_url: body.external_url != null ? String(body.external_url).trim() : (existing.external_url || ''),
+        published_at: body.published_at !== undefined
+          ? (body.published_at ? String(body.published_at).trim() : null)
+          : existing.published_at,
+        status,
+        status_label: body.status_label != null
+          ? String(body.status_label)
+          : (status !== existing.status ? (LU_DEFAULT_STATUS_LABELS[status] || '') : (existing.status_label || '')),
+        impact_level: impact,
+        impact_label: body.impact_label != null
+          ? String(body.impact_label)
+          : (impact !== existing.impact_level ? (LU_DEFAULT_IMPACT_LABELS[impact] || '') : (existing.impact_label || '')),
+        affected_policies_count: body.affected_policies_count != null && Number.isFinite(+body.affected_policies_count)
+          ? Math.max(0, parseInt(body.affected_policies_count, 10))
+          : existing.affected_policies_count,
+        affected_policy_ids: Array.isArray(body.affected_policy_ids)
+          ? JSON.stringify(body.affected_policy_ids)
+          : existing.affected_policy_ids,
+        tags: Array.isArray(body.tags) ? JSON.stringify(body.tags) : existing.tags,
+        language: body.language != null ? String(body.language) : existing.language,
+        raw_text: body.raw_text != null ? String(body.raw_text) : existing.raw_text,
+        metadata: body.metadata && typeof body.metadata === 'object'
+          ? JSON.stringify(body.metadata)
+          : existing.metadata,
+        updated_at: new Date().toISOString(),
+      };
+      if (!merged.title) { sendJSON(res, 400, { error: 'title cannot be empty.' }); return; }
+      dbUpdateLegislativeExtracted.run(merged);
+      sendJSON(res, 200, { success: true, item: luRowToApi(dbGetLegislativeExtracted.get(id)) });
+    } catch (err) {
+      console.error('[Legislative] extracted patch/delete:', err);
+      sendJSON(res, 500, { error: err.message || 'Operation failed.' });
+    }
+    return;
+  }
+
   // ---- AI Tools: Policy update pipeline (F1–F4, Gemini) ----
   if (url.pathname === '/api/ai-tools/policy-update-pipeline' && req.method === 'POST') {
     try {
@@ -4183,17 +6504,408 @@ const server = http.createServer(async (req, res) => {
         sendJSON(res, 400, { error: 'regulationText is required.' });
         return;
       }
+      // Use request-provided defs; fall back to DB-stored impact criteria
+      let f4SeverityDefinitions =
+        body.f4SeverityDefinitions && typeof body.f4SeverityDefinitions === 'object'
+          ? body.f4SeverityDefinitions
+          : undefined;
+      if (!f4SeverityDefinitions || !Object.keys(f4SeverityDefinitions).some(k => f4SeverityDefinitions[k])) {
+        try {
+          const dbDefs = {};
+          for (const k of ['critical', 'high', 'medium', 'low', 'none']) {
+            const row = db.prepare('SELECT value FROM pipeline_config WHERE key = ?').get(`f4_sev_${k}`);
+            if (row && row.value) dbDefs[k] = row.value;
+          }
+          if (Object.keys(dbDefs).length) f4SeverityDefinitions = dbDefs;
+        } catch (dbErr) {
+          console.warn('[PolicyUpdatePipeline] Could not load impact criteria from DB:', dbErr.message);
+        }
+      }
       const result = await runPolicyUpdatePipeline({
         apiKey,
         orgContext,
         regulationText,
         policies,
         overrides: body.overrides && typeof body.overrides === 'object' ? body.overrides : undefined,
+        f4SeverityDefinitions,
       });
       sendJSON(res, 200, { success: true, data: result });
     } catch (err) {
       console.error('[PolicyUpdatePipeline]', err);
       sendJSON(res, 500, { error: err.message || 'Pipeline failed.' });
+    }
+    return;
+  }
+
+  // ---- AI Tools: Extract policies from uploaded file (Gemini 2.5 Pro → [{title, content}]) ----
+  if (url.pathname === '/api/ai-tools/extract-policies-from-file' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const apiKey = GEMINI_API_KEY || req.headers['x-api-key'];
+      if (!apiKey) {
+        sendJSON(res, 401, { error: 'API key not configured. Add GEMINI_API_KEY to .env file.' });
+        return;
+      }
+      const { fileName, mimeType, data } = body;
+      if (!data || typeof data !== 'string') {
+        sendJSON(res, 400, { error: 'data (base64) is required.' });
+        return;
+      }
+      if (!mimeType || typeof mimeType !== 'string') {
+        sendJSON(res, 400, { error: 'mimeType is required.' });
+        return;
+      }
+
+      if (!genai) genai = new GoogleGenAI({ apiKey });
+
+      const systemPrompt = `You are a legal and regulatory analyst specialising in extracting structured articles from legislation, regulations, standards, and policy documents.
+
+Your task is to read the uploaded document and extract every article, clause, section, or rule it contains.
+
+OUTPUT FORMAT — return ONLY a valid JSON array, no markdown fences, no commentary:
+[
+  {
+    "article": "The exact article/section label from the document (e.g. 'Article 1', 'Section 2.3', 'Clause 4', 'المادة الأولى')",
+    "title": "Short descriptive title for this article (3–8 words)",
+    "text": "The full verbatim or faithfully summarised text of this article. Preserve all obligations, conditions, actors, scope, and deadlines. Be comprehensive — do not truncate."
+  }
+]
+
+RULES:
+- Extract ALL articles, sections, clauses, and sub-clauses — do not sample.
+- article: use the exact label from the document. If no label exists, infer one (e.g. 'Section 1').
+- title: concise, specific, unique per entry. Derive from the article heading or its main subject.
+- text: faithful and complete. Preserve important legal language, obligations, and numeric thresholds.
+- Do NOT include: table of contents, preamble metadata, signature blocks, page numbers, or revision histories as separate entries unless they contain substantive obligations.
+- Preserve the source language (Arabic document → Arabic output, English document → English output).
+- Output MUST be a valid JSON array parseable by JSON.parse() with no trailing commas.`;
+
+      const userPrompt = `Extract all articles and regulatory clauses from the uploaded document "${fileName || 'document'}".
+Return a JSON array where each element has "article", "title", and "text" fields as described.`;
+
+      console.log(`[RegulationExtract] Calling Gemini 2.5 Pro for file "${fileName}" (${mimeType})`);
+      const startTime = Date.now();
+
+      const response = await genai.models.generateContent({
+        model: 'gemini-2.5-pro',
+        contents: [{
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType, data } },
+            { text: userPrompt },
+          ],
+        }],
+        config: {
+          systemInstruction: systemPrompt,
+          temperature: 0.1,
+          maxOutputTokens: 32768,
+          responseMimeType: 'application/json',
+        },
+      });
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      const textResponse = response.text || '';
+      if (!textResponse) throw new Error('No response from Gemini');
+
+      // Parse JSON array from response
+      let jsonStr = textResponse.trim();
+      const fenceMatch = textResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (fenceMatch) jsonStr = fenceMatch[1].trim();
+      // Trim to first [...] block if there's surrounding text
+      if (!jsonStr.startsWith('[')) {
+        const openIdx = jsonStr.indexOf('[');
+        if (openIdx >= 0) jsonStr = jsonStr.slice(openIdx);
+      }
+
+      let articles;
+      try {
+        articles = JSON.parse(jsonStr);
+      } catch (parseErr) {
+        // Salvage: JSON likely truncated mid-array (Gemini hit maxOutputTokens).
+        // Walk balanced braces and collect every COMPLETE {...} object.
+        const salvaged = salvageArticleObjects(jsonStr);
+        if (salvaged.length) {
+          console.warn(`[RegulationExtract] JSON truncated — salvaged ${salvaged.length} complete articles before parse error: ${parseErr.message}`);
+          articles = salvaged;
+        } else {
+          throw new Error(`Gemini returned unparseable JSON: ${parseErr.message}. Raw (first 500): ${jsonStr.slice(0, 500)}`);
+        }
+      }
+      if (!Array.isArray(articles)) throw new Error('Gemini response was not a JSON array.');
+
+      // Normalise: ensure each item has article + title + text
+      articles = articles.filter(a => a && (a.article || a.title || a.text)).map((a, i) => ({
+        article: String(a.article || `Article ${i + 1}`).trim(),
+        title:   String(a.title   || '').trim(),
+        text:    String(a.text    || a.content || a.description || '').trim(),
+      }));
+
+      console.log(`[RegulationExtract] ✅ Extracted ${articles.length} articles in ${elapsed}s`);
+      sendJSON(res, 200, { success: true, articles, sourceFile: fileName || '', elapsed });
+    } catch (err) {
+      console.error('[PolicyExtract]', err.message);
+      sendJSON(res, 500, { error: err.message || 'Extraction failed.' });
+    }
+    return;
+  }
+
+  // ---- AI Tools: List extracted regulations from DB ----
+  if (url.pathname === '/api/ai-tools/extracted-regulations' && req.method === 'GET') {
+    try {
+      const rows = dbListExtractedRegulations.all();
+      const data = rows.map(r => ({
+        id: r.id,
+        sourceFile: r.source_file || '',
+        articles: (() => { try { return JSON.parse(r.articles || '[]'); } catch { return []; } })(),
+        createdAt: r.created_at,
+      }));
+      sendJSON(res, 200, { success: true, data });
+    } catch (err) {
+      console.error('[ExtractedRegulations] list:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to list.' });
+    }
+    return;
+  }
+
+  // ---- AI Tools: Save extracted regulation to DB ----
+  if (url.pathname === '/api/ai-tools/extracted-regulations' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const articles = Array.isArray(body.articles) ? body.articles : [];
+      if (!articles.length) {
+        sendJSON(res, 400, { error: 'articles array is required and must not be empty.' });
+        return;
+      }
+      const id = 'er-' + crypto.randomUUID();
+      const now = new Date().toISOString();
+      dbInsertExtractedRegulations.run(id, String(body.sourceFile || ''), JSON.stringify(articles), now);
+      sendJSON(res, 201, { success: true, id, count: articles.length });
+    } catch (err) {
+      console.error('[ExtractedRegulations] save:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Save failed.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline Runs: Save ----
+  if (url.pathname === '/api/ai-tools/pipeline-runs' && req.method === 'POST') {
+    try {
+      // The /api/ai-tools/pipeline-runs prefix is whitelisted in isPublicPath
+      // for read access (portal feed), so we must re-check auth here for writes
+      // to prevent unauthenticated inserts into pipeline_runs.
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) { sendJSON(res, 401, { error: 'Unauthorized.' }); return; }
+      const body = await parseBody(req);
+      const result = body.result && typeof body.result === 'object' ? body.result : {};
+      const orgContext = String(body.orgContext || '');
+      const regulationText = String(body.regulationText || '');
+      const policyCount = Number.isFinite(body.policyCount) ? body.policyCount : 0;
+      const stageReached = String(result.stage_reached || body.stageReached || '');
+      const regulationSnippet = regulationText.slice(0, 300).replace(/\s+/g, ' ').trim();
+
+      if (!Object.keys(result).length) {
+        sendJSON(res, 400, { error: 'result object is required.' });
+        return;
+      }
+
+      const id = 'pr-' + crypto.randomUUID();
+      const now = new Date().toISOString();
+      dbInsertPipelineRun.run(
+        id,
+        orgContext,
+        regulationSnippet,
+        regulationText,
+        policyCount,
+        stageReached,
+        JSON.stringify(result),
+        now
+      );
+      console.log(`[PipelineRuns] Saved run ${id} (stage: ${stageReached}, policies: ${policyCount})`);
+
+      // Fire-and-forget: render the report HTML → PDF (puppeteer) → upload to
+      // pup-data bucket → update report_pdf_* columns. The client gets the
+      // run id back immediately and asks GET /report-pdf later.
+      kickPipelineReportPdfGeneration(id, result, {
+        sourceName: body.sourceName || body.sourceFile || '',
+        generatedAt: now,
+      });
+
+      sendJSON(res, 201, { success: true, id, reportPdfStatus: 'pending' });
+    } catch (err) {
+      console.error('[PipelineRuns] save:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Save failed.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline Runs: List ----
+  if (url.pathname === '/api/ai-tools/pipeline-runs' && req.method === 'GET') {
+    try {
+      const rows = dbListPipelineRuns.all();
+      const data = rows.map(r => ({
+        ...r,
+        result: (() => { try { return JSON.parse(r.result || '{}'); } catch { return {}; } })(),
+      }));
+      sendJSON(res, 200, { success: true, data });
+    } catch (err) {
+      console.error('[PipelineRuns] list:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to list.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline Runs: Get by ID ----
+  const pipelineRunMatch = url.pathname.match(/^\/api\/ai-tools\/pipeline-runs\/([^/]+)$/);
+  if (pipelineRunMatch && req.method === 'GET') {
+    try {
+      const row = dbGetPipelineRun.get(pipelineRunMatch[1]);
+      if (!row) { sendJSON(res, 404, { error: 'Run not found.' }); return; }
+      sendJSON(res, 200, {
+        success: true,
+        data: {
+          ...row,
+          result: (() => { try { return JSON.parse(row.result || '{}'); } catch { return {}; } })(),
+        },
+      });
+    } catch (err) {
+      console.error('[PipelineRuns] get:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to get.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline Runs: Report PDF download URL ----
+  // Returns the current PDF status for a run. When ready, includes a fresh
+  // 1-hour signed download URL pointing at the file in pup-data bucket.
+  //   { status: 'ready',  url, filename, generatedAt, sizeBytes }
+  //   { status: 'pending' }
+  //   { status: 'failed', error }
+  //   { status: 'unavailable' }       ← old run, never generated
+  const pipelinePdfMatch = url.pathname.match(/^\/api\/ai-tools\/pipeline-runs\/([^/]+)\/report-pdf$/);
+  if (pipelinePdfMatch && req.method === 'GET') {
+    try {
+      const row = dbGetPipelineRun.get(pipelinePdfMatch[1]);
+      if (!row) { sendJSON(res, 404, { error: 'Run not found.' }); return; }
+      const status = row.report_pdf_status || null;
+      if (!status) {
+        // Legacy run created before server-side PDF generation existed. Rather
+        // than reporting 'unavailable' forever, generate the PDF on demand from
+        // the stored result and return 'pending' so the client polls for it.
+        let storedResult = null;
+        try { storedResult = JSON.parse(row.result || '{}'); } catch { storedResult = null; }
+        if (storedResult && typeof storedResult === 'object' && Object.keys(storedResult).length) {
+          kickPipelineReportPdfGeneration(row.id, storedResult, {
+            sourceName: row.regulation_snippet || '',
+            generatedAt: row.created_at || new Date().toISOString(),
+          });
+          sendJSON(res, 200, { success: true, status: 'pending', runId: row.id });
+          return;
+        }
+        // Truly nothing to render from — keep the honest 'unavailable' signal.
+        sendJSON(res, 200, { success: true, status: 'unavailable', runId: row.id });
+        return;
+      }
+      if (status === 'pending') {
+        sendJSON(res, 200, { success: true, status: 'pending', runId: row.id });
+        return;
+      }
+      if (status === 'failed') {
+        sendJSON(res, 200, { success: true, status: 'failed', runId: row.id, error: row.report_pdf_error || 'unknown error' });
+        return;
+      }
+      if (status === 'ready') {
+        const bucket = row.report_pdf_bucket || GCS_PUP_BUCKET_NAME;
+        const objectPath = row.report_pdf_object_path;
+        if (!bucket || !objectPath) {
+          sendJSON(res, 500, { error: 'Report PDF marked ready but object path missing.' });
+          return;
+        }
+        const gcs = getLegislativeGcsClient();
+        if (!gcs.ok) { sendJSON(res, 500, { error: gcs.error || 'GCS unavailable' }); return; }
+        const filename = pipelinePdfDownloadFilename(row.id, row.regulation_snippet);
+        const [signedUrl] = await gcs.storage.bucket(bucket).file(objectPath).getSignedUrl({
+          version: 'v4',
+          action: 'read',
+          expires: Date.now() + 60 * 60 * 1000,
+          responseDisposition: `attachment; filename="${filename.replace(/"/g, '')}"`,
+          responseType: 'application/pdf',
+        });
+        sendJSON(res, 200, {
+          success: true,
+          status: 'ready',
+          runId: row.id,
+          url: signedUrl,
+          filename,
+          generatedAt: row.report_pdf_generated_at,
+          sizeBytes: row.report_pdf_size_bytes,
+        });
+        return;
+      }
+      sendJSON(res, 200, { success: true, status: String(status), runId: row.id });
+    } catch (err) {
+      console.error('[PipelineRuns] report-pdf:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to resolve report PDF.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline-derived Legislative Updates: list ----
+  // Projects rows from `pipeline_runs` into the same luRowToApi-shape consumed
+  // by the portal's legislative-update list/detail screens, with a `pipeline`
+  // extension on the detail endpoint carrying F2 key-changes & F4 impacts.
+  //
+  // Query params (all optional): q, status, impact_level/impact, limit, offset.
+  if (url.pathname === '/api/ai-tools/pipeline-legislative-updates' && req.method === 'GET') {
+    try {
+      const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
+      const statusFilter = luNormalizeStatus(url.searchParams.get('status') || '');
+      const impactFilter = luNormalizeImpact(url.searchParams.get('impact_level') || url.searchParams.get('impact') || '');
+      let limit = parseInt(url.searchParams.get('limit') || '50', 10);
+      let offset = parseInt(url.searchParams.get('offset') || '0', 10);
+      if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+      if (limit > 200) limit = 200;
+      if (!Number.isFinite(offset) || offset < 0) offset = 0;
+
+      const rows = dbListPipelineRuns.all();
+      const projected = rows.map((r) => pipelineRunToLegislativeUpdate(r, { includePipeline: false }));
+      const filtered = projected.filter((it) => {
+        if (statusFilter && it.status !== statusFilter) return false;
+        if (impactFilter && it.impact_level !== impactFilter) return false;
+        if (q) {
+          const hay = `${it.title}\n${it.description}\n${(it.tags || []).join(' ')}`.toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+      const total = filtered.length;
+      const items = filtered.slice(offset, offset + limit);
+
+      sendJSON(res, 200, {
+        success: true,
+        total,
+        limit,
+        offset,
+        count: items.length,
+        items,
+      });
+    } catch (err) {
+      console.error('[PipelineLegislative] list:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to list.' });
+    }
+    return;
+  }
+
+  // ---- Pipeline-derived Legislative Updates: get by id ----
+  const pipelineLuMatch = url.pathname.match(/^\/api\/ai-tools\/pipeline-legislative-updates\/([^/]+)$/);
+  if (pipelineLuMatch && req.method === 'GET') {
+    try {
+      const row = dbGetPipelineRun.get(pipelineLuMatch[1]);
+      if (!row) { sendJSON(res, 404, { error: 'Pipeline run not found.' }); return; }
+      const item = pipelineRunToLegislativeUpdate(row, { includePipeline: true });
+      sendJSON(res, 200, { success: true, item });
+    } catch (err) {
+      console.error('[PipelineLegislative] get:', err.message);
+      sendJSON(res, 500, { error: err.message || 'Failed to get.' });
     }
     return;
   }
@@ -4461,17 +7173,60 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ---- GRC Platform Proxy: List policies (applied controls) ----
+  // ---- GRC Platform Proxy: Policies (native /api/policies/ — not applied-controls list) ----
   if (url.pathname === '/api/grc/policies' && req.method === 'GET') {
     try {
       const qs = url.search || '';
-      const grcRes = await grcFetch(`${GRC_API_URL}/api/applied-controls/${qs ? qs + '&page_size=500' : '?page_size=500'}`, {}, reqToken);
+      const join = qs ? `${qs}&page_size=500` : '?page_size=500';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/policies/${join}`, {}, reqToken);
       if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
       const data = await grcRes.json();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, results: data.results || data }));
     } catch (error) {
-      console.error('[GRC] Policies error:', error.message);
+      console.error('[GRC] Policies list error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/grc/policies' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/policies/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create policy error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcPolicyIdMatch = url.pathname.match(/^\/api\/grc\/policies\/([^/]+)\/?$/);
+  if (grcPolicyIdMatch && req.method === 'PATCH') {
+    try {
+      const polId = grcPolicyIdMatch[1];
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/policies/${encodeURIComponent(polId)}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] PATCH policy error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }
@@ -4533,16 +7288,251 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ---- GRC Platform Proxy: Get risk scenarios ----
-  if (url.pathname === '/api/grc/risk-scenarios' && req.method === 'GET') {
+  // ---- GRC Platform Proxy: Risk scenarios (list + create; query passthrough) ----
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-scenarios') && req.method === 'GET') {
     try {
-      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-scenarios/`, {}, reqToken);
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : 'page_size=500';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-scenarios/?${q}`, {}, reqToken);
       if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
       const data = await grcRes.json();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, results: data.results || data }));
     } catch (error) {
       console.error('[GRC] Risk scenarios error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-scenarios') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-scenarios/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create risk scenario error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ---- GRC: Perimeters (folder scope for risk assessments) ----
+  if (grcProxyTailMatch(routePath, '/api/grc/perimeters') && req.method === 'GET') {
+    try {
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : 'page_size=200';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/perimeters/?${q}`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, results: data.results || data }));
+    } catch (error) {
+      console.error('[GRC] Perimeters list error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (grcProxyTailMatch(routePath, '/api/grc/perimeters') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/perimeters/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create perimeter error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ---- GRC: Risk matrices (required on RiskAssessment) ----
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-matrices') && req.method === 'GET') {
+    try {
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : 'page_size=200';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-matrices/?${q}`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, results: data.results || data }));
+    } catch (error) {
+      console.error('[GRC] Risk matrices error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-matrices') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-matrices/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create risk matrix error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ---- GRC: Risk assessments (CRUD + duplicate, sync, action-plan) ----
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-assessments') && req.method === 'GET') {
+    try {
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : 'page_size=200';
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-assessments/?${q}`, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, results: data.results || data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessments list error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+  if (grcProxyTailMatch(routePath, '/api/grc/risk-assessments') && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(`${GRC_API_URL}/api/risk-assessments/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Create risk assessment error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcRaOneMatch = routePath.match(/\/api\/grc\/risk-assessments\/([^/]+)$/);
+  if (grcRaOneMatch && (req.method === 'GET' || req.method === 'PATCH' || req.method === 'DELETE')) {
+    try {
+      const raId = grcRaOneMatch[1];
+      const grcRes = await grcFetch(
+        `${GRC_API_URL}/api/risk-assessments/${encodeURIComponent(raId)}/`,
+        req.method === 'GET'
+          ? { method: 'GET' }
+          : {
+              method: req.method,
+              headers: { 'Content-Type': 'application/json' },
+              body: req.method === 'PATCH' ? JSON.stringify(await parseBody(req)) : undefined,
+            },
+        reqToken
+      );
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      if (req.method === 'DELETE') {
+        if (grcRes.status === 204 || grcRes.status === 200) {
+          res.writeHead(grcRes.status === 204 ? 204 : grcRes.status);
+          res.end();
+          return;
+        }
+        const txt = await grcRes.text();
+        res.writeHead(grcRes.status, { 'Content-Type': 'application/json' });
+        res.end(txt || '{}');
+        return;
+      }
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessment single error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcRaDupMatch = routePath.match(/\/api\/grc\/risk-assessments\/([^/]+)\/duplicate$/);
+  if (grcRaDupMatch && req.method === 'POST') {
+    try {
+      const raId = grcRaDupMatch[1];
+      const body = await parseBody(req);
+      const grcRes = await grcFetch(
+        `${GRC_API_URL}/api/risk-assessments/${encodeURIComponent(raId)}/duplicate/`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+        reqToken
+      );
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status >= 400 ? grcRes.status : 201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessment duplicate error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcRaSyncMatch = routePath.match(/\/api\/grc\/risk-assessments\/([^/]+)\/sync_from_ebios_rm$/);
+  if (grcRaSyncMatch && req.method === 'POST') {
+    try {
+      const raId = grcRaSyncMatch[1];
+      let bodyStr = '{}';
+      try {
+        const body = await parseBody(req);
+        bodyStr = JSON.stringify(body && typeof body === 'object' ? body : {});
+      } catch (_) {
+        bodyStr = '{}';
+      }
+      const grcRes = await grcFetch(
+        `${GRC_API_URL}/api/risk-assessments/${encodeURIComponent(raId)}/sync_from_ebios_rm/`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: bodyStr },
+        reqToken
+      );
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(grcRes.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: grcRes.ok, result: data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessment sync EBIOS RM error:', error.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  const grcRaActionPlanMatch = routePath.match(/\/api\/grc\/risk-assessments\/([^/]+)\/action-plan$/);
+  if (grcRaActionPlanMatch && req.method === 'GET') {
+    try {
+      const raId = grcRaActionPlanMatch[1];
+      const q = url.search && url.search.length > 1 ? url.search.slice(1) : '';
+      const grcUrl = `${GRC_API_URL}/api/risk-assessments/${encodeURIComponent(raId)}/action-plan/${q ? `?${q}` : ''}`;
+      const grcRes = await grcFetch(grcUrl, {}, reqToken);
+      if (await finalizeGrcUpstreamError(res, reqToken, grcRes)) return;
+      const data = await grcRes.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, result: data }));
+    } catch (error) {
+      console.error('[GRC] Risk assessment action-plan error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }
@@ -7210,6 +10200,43 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ---- Pipeline Config API ----
+
+  const F4_SEV_KEYS = ['critical', 'high', 'medium', 'low', 'none'];
+
+  // GET /api/pipeline-config/impact-criteria — Return stored severity definitions
+  if (url.pathname === '/api/pipeline-config/impact-criteria' && req.method === 'GET') {
+    try {
+      const out = {};
+      for (const k of F4_SEV_KEYS) {
+        const row = db.prepare('SELECT value FROM pipeline_config WHERE key = ?').get(`f4_sev_${k}`);
+        out[k] = row ? row.value : '';
+      }
+      sendJSON(res, 200, { success: true, data: out });
+    } catch (err) {
+      sendJSON(res, 500, { error: err.message });
+    }
+    return;
+  }
+
+  // POST /api/pipeline-config/impact-criteria — Save severity definitions
+  if (url.pathname === '/api/pipeline-config/impact-criteria' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const upsert = db.prepare(`INSERT INTO pipeline_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+      const saveAll = db.transaction((defs) => {
+        for (const k of F4_SEV_KEYS) {
+          upsert.run(`f4_sev_${k}`, typeof defs[k] === 'string' ? defs[k].trim() : '');
+        }
+      });
+      saveAll(body);
+      sendJSON(res, 200, { success: true });
+    } catch (err) {
+      sendJSON(res, 500, { error: err.message });
+    }
+    return;
+  }
+
   // ---- Chain Resolution API ----
 
   // POST /api/chain/resolve/:orgContextId — Trigger full chain resolution
@@ -7352,6 +10379,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ---- Unmatched API (avoid ambiguous static ENOENT → "File not found") ----
+  if (pathnameNorm.startsWith('/api/')) {
+    sendJSON(res, 404, {
+      error: 'API route not found',
+      method: req.method,
+      path: pathnameNorm,
+      hint:
+        pathnameNorm.includes('policy') && pathnameNorm.includes('import')
+          ? `Expected POST ${pathnameNorm.replace(/\/+/g, '/').replace(/\/$/, '')} — restart the server after updating (Data Studio policy import ships with this app).`
+          : pathnameNorm.includes('grc') && pathnameNorm.includes('perimeters')
+            ? 'If requests go through a sub-path gateway, redeploy server.js with updated /api/grc/* routing; list routes match path suffix /api/grc/perimeters.'
+            : undefined,
+    });
+    return;
+  }
+
   // ---- Static Files ----
   let filePath = path.join(__dirname, url.pathname);
   serveStaticFile(res, filePath);
@@ -7375,6 +10418,11 @@ server.listen(PORT, () => {
 ║   • GET  /                        - Serve the app         ║
 ║   • POST /api/analyze             - Analyze requirements  ║
 ║   • POST /api/ai-tools/policy-update-pipeline - F1–F4     ║
+║   • GET/POST/PATCH/DELETE /api/legislative-updates/internal-sources ║
+║   • GET/POST/PATCH/DELETE /api/legislative-updates/extracted        ║
+║   • GET  /api/legislative-updates/extracted/facets                  ║
+║   • GET  /api/ai-tools/pipeline-legislative-updates       (list)    ║
+║   • GET  /api/ai-tools/pipeline-legislative-updates/:id   (detail)  ║
 ║   • GET  /api/collections         - List collections      ║
 ║   • POST /api/collections         - Create collection     ║
 ║   • DELETE /api/collections/:id   - Delete collection     ║

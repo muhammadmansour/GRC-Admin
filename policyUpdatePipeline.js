@@ -13,13 +13,33 @@ const DEFAULTS = {
   reasoningModel: 'gemini-2.5-pro',
   fastModel: 'gemini-2.5-flash',
   embeddingModel: 'gemini-embedding-001',
-  /** F1 needs room for bilingual JSON — outputs that hit MAX_TOKENS truncate mid-string and break strict JSON.parse. */
-  f1MaxOutputTokens: 16384,
+  /**
+   * F1 needs room for bilingual JSON — outputs that hit MAX_TOKENS truncate
+   * mid-string and break strict JSON.parse. Bumped from 16384 to 20480 to give
+   * the document_* card-metadata fields some headroom on top of the relevance
+   * verdict. salvageF1PartialJson still recovers the boolean + confidence on
+   * truncation, in which case the card fields fall back to derived values.
+   */
+  f1MaxOutputTokens: 20480,
   f1ExcerptLimit: 10000,
   f2ChunkSize: 24000,
   f2ChunkOverlap: 1000,
+  /**
+   * F2 with 2.5 Pro consumes most of `maxOutputTokens` on the thinking budget,
+   * so the visible JSON gets squeezed out when this is too small. Long policies
+   * (10K+ chars → ~20–30 policy points) need plenty of headroom — keep large.
+   */
+  f2MaxOutputTokens: 32768,
+  /** Trim F2's thinking budget so more of `maxOutputTokens` is available for the actual JSON output. */
+  f2ThinkingBudget: 2048,
+  f4MaxOutputTokens: 4096,
   f3SimilarityThreshold: 0.4,
   excerptLen: 500,
+  /**
+   * Gemini 2.5 thinking models reject thinkingBudget 0 and may require a positive budget.
+   * Set to null in overrides to omit thinkingConfig (e.g. non-thinking models).
+   */
+  geminiThinkingBudget: 8192,
 };
 
 function policyPipelineLogsEnabled() {
@@ -33,22 +53,41 @@ function policyPipelineLog(fields) {
   console.log('[PolicyUpdatePipeline]', { ts: new Date().toISOString(), ...fields });
 }
 
-const F1_SYSTEM = `You are a GRC regulatory-relevance analyst. You work fluently in both Arabic (العربية) and English.
+const F1_SYSTEM = `You are a GRC compliance-relevance analyst. You work fluently in both Arabic (العربية) and English.
 The input may be in Arabic, English, or a mix of both — handle all seamlessly.
-Always respond in the SAME language as the regulation text. If mixed, prefer the dominant language.
+Always respond in the SAME language as the document text. If mixed, prefer the dominant language.
 
 You will receive:
 - ORGANISATION CONTEXT: industry, jurisdiction, activities, compliance scope.
-- REGULATION EXCERPT: the beginning of a new regulation document.
+- DOCUMENT EXCERPT: the beginning of a GRC-related document. It MAY be an external regulation, a regulatory circular, a standard, a framework, an internal policy, a procedure, or a guideline — judge each on its content, not its type.
 
-Task: determine whether this regulation is relevant to the organisation.
+Tasks:
+1. Determine whether the TOPICS / SUBJECT MATTER of this document are relevant to the organisation's compliance scope, sector, activities, regulatory mandates, or governance.
+2. Extract a small set of "card-style" metadata fields about the document itself — purely from what is visible in the excerpt. Use null / empty array when a field is not stated or you are not confident. NEVER fabricate publishers, dates, or titles.
+
+Decision rules:
+- "is_relevant" should be true whenever the document's subject matter clearly overlaps the org's industry / mandates / activities (e.g. a vendor management policy is relevant to a bank with SAMA outsourcing obligations even if the document is the bank's own internal policy).
+- "is_relevant" should be false ONLY when the document is unambiguously outside the org's domain (e.g. a medical device labelling regulation for a pure software fintech, or a marketing brochure with no compliance content).
+- Do NOT reject on the basis of "this is an internal policy, not an external regulation" — internal policies still flow through the pipeline so we can map them to existing controls.
+
+Card-metadata rules:
+- "document_title": the official title as it appears at the top of the document (≤140 chars). If the top has only a generic header (e.g. "الفصل الأول"), prefer the regulation/standard name as written in the body.
+- "document_summary": ≤2 short sentences (≤280 chars total) describing what the document is and the key change it introduces, in the source language. This is a document-level summary, NOT the relevance reasoning.
+- "document_source": the publisher / gazette / authority as named in the document (e.g. "أم القرى", "وزارة التجارة", "SAMA"). null if not explicitly stated.
+- "document_published_at": ISO date "YYYY-MM-DD" if a publication / issuance date is explicit in the excerpt (Hijri OK to Gregorian-convert when unambiguous). null otherwise.
+- "document_tags": up to 5 short topical tags in the source language (each ≤24 chars). Empty array if you are unsure.
 
 Respond with ONLY a JSON object (keep "reasoning" brief — ≤400 characters — so JSON is not truncated):
 {
   "is_relevant": true | false,
   "confidence": 0.0-1.0,
-  "reasoning": "≤2 short sentences in the regulation's language",
-  "relevant_aspects": ["specific aspects that match, empty array if none"]
+  "reasoning": "≤2 short sentences in the document's language",
+  "relevant_aspects": ["specific topics / mandates / activities that match, empty array if none"],
+  "document_title": "string ≤140 chars, source language",
+  "document_summary": "string ≤280 chars, source language, document-level (not relevance)",
+  "document_source": "string or null",
+  "document_published_at": "YYYY-MM-DD or null",
+  "document_tags": ["≤5 short topical tags, source language, ≤24 chars each"]
 }`;
 
 const F2_SYSTEM = `You are a GRC policy analyst. You work fluently in both Arabic (العربية) and English.
@@ -105,6 +144,41 @@ Respond with ONLY a JSON object:
   ],
   "compliance_gap": "Description of the gap if the policy is not amended"
 }`;
+
+/** F4 severity labels (must match JSON "severity" enum). */
+const F4_SEVERITY_LEVELS = ['critical', 'high', 'medium', 'low', 'none'];
+
+/**
+ * @param {unknown} raw - e.g. from API body { critical?: string, high?: string, ... }
+ * @returns {Record<string, string>} only non-empty trimmed strings for keys the client supplied
+ */
+function normalizeF4SeverityDefinitions(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  const out = {};
+  for (const key of F4_SEVERITY_LEVELS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+    const v = raw[key];
+    if (v == null) continue;
+    const s = String(v).trim();
+    if (s) out[key] = s;
+  }
+  return out;
+}
+
+/**
+ * @param {Record<string, string>} defs - normalized map (subset of severity levels)
+ * @returns {string} F4 system instruction; identical to F4_SYSTEM when defs is empty
+ */
+function buildF4SystemInstruction(defs) {
+  const safe = defs && typeof defs === 'object' ? defs : {};
+  const order = F4_SEVERITY_LEVELS.filter((k) => safe[k]);
+  if (!order.length) return F4_SYSTEM;
+  const lines = order.map((k) => `- ${k}: ${safe[k]}`);
+  return `${F4_SYSTEM}
+
+Organisation-defined severity scale — use these meanings when choosing the "severity" field and align "severity_reasoning" with this scale:
+${lines.join('\n')}`;
+}
 
 function parseJsonFromLlm(raw) {
   if (raw == null) return { raw_response: String(raw) };
@@ -369,8 +443,9 @@ function cosineSimilarity(a, b) {
 
 /**
  * @param {{ includeJsonMimeType?: boolean, thinkingBudget?: number | null }} [genExtras]
- *   - thinkingBudget null/undefined: omit thinkingConfig (default for shared F2/F4 path).
- *   - thinkingBudget number: Gemini 2.x — 0 disables internal thinking budget so JSON/text can populate `parts`.
+ *   - thinkingBudget null/undefined: omit thinkingConfig (works for non-thinking models).
+ *   - thinkingBudget positive number: Gemini 2.5 thinking mode (required for thinking-only models).
+ *   Do not use 0 — the API returns 400 "Budget 0 is invalid" on thinking-only models.
  */
 async function geminiGenerateContent(apiKey, modelId, userText, systemInstruction, maxTokens, temperature, genExtras = {}) {
   const includeJsonMime = genExtras.includeJsonMimeType !== false;
@@ -442,8 +517,8 @@ async function geminiGenerateContent(apiKey, modelId, userText, systemInstructio
   return extractGeminiTextOrThrow(data, txt);
 }
 
-async function geminiJson(apiKey, modelId, systemPrompt, userText, maxTokens, temperature) {
-  const raw = await geminiGenerateContent(apiKey, modelId, userText, systemPrompt, maxTokens, temperature);
+async function geminiJson(apiKey, modelId, systemPrompt, userText, maxTokens, temperature, genExtras = {}) {
+  const raw = await geminiGenerateContent(apiKey, modelId, userText, systemPrompt, maxTokens, temperature, genExtras);
   return parseJsonFromLlm(raw);
 }
 
@@ -521,16 +596,17 @@ function matchPolicyPointsToStore(policyPoints, policyRows, threshold, excerptLe
 
 async function f1Relevance(apiKey, cfg, orgContext, regulationText) {
   const excerpt = regulationText.slice(0, cfg.f1ExcerptLimit);
-  const user = `=== ORGANISATION CONTEXT ===\n${orgContext}\n\n=== REGULATION EXCERPT ===\n${excerpt}`;
-  /** F1 needs headroom — low maxOutputTokens can truncate JSON mid-field (esp. bilingual / long excerpts). */
-  /** Same argument order as geminiJson/F2: user payload first, system instruction second. */
-  /** JSON MIME + thinking-heavy models intermittently yield empty `parts`; retry plain text then parse. */
-  const attempts = [
-    { includeJsonMimeType: true, thinkingBudget: 0 },
-    { includeJsonMimeType: true, thinkingBudget: null },
-    { includeJsonMimeType: false, thinkingBudget: 0 },
-    { includeJsonMimeType: false, thinkingBudget: null },
-  ];
+  const user = `=== ORGANISATION CONTEXT ===\n${orgContext}\n\n=== DOCUMENT EXCERPT ===\n${excerpt}`;
+  /** JSON MIME + thinking models: try positive thinking budget first, then omit (for non-thinking models). */
+  const tb = cfg.geminiThinkingBudget;
+  const thinkingVariants =
+    tb != null && typeof tb === 'number' ? [tb, null] : [null];
+  const attempts = [];
+  for (const thinkingBudget of thinkingVariants) {
+    for (const includeJsonMimeType of [true, false]) {
+      attempts.push({ includeJsonMimeType, thinkingBudget });
+    }
+  }
 
   const runId = cfg._pupRunId ?? null;
   let lastErr;
@@ -632,17 +708,25 @@ function cloneF2WithoutEmbeddings(f2) {
 
 async function f2Summarize(apiKey, cfg, regulationText) {
   const chunks = chunkText(regulationText, cfg.f2ChunkSize, cfg.f2ChunkOverlap);
+  const f2MaxTokens     = cfg.f2MaxOutputTokens ?? DEFAULTS.f2MaxOutputTokens;
+  const f2ThinkingBudget = cfg.f2ThinkingBudget ?? DEFAULTS.f2ThinkingBudget;
   policyPipelineLog({
     event: 'f2_start',
     runId: cfg._pupRunId ?? null,
     chunks: chunks.length,
     regulationChars: regulationText.length,
     modelId: cfg.reasoningModel,
+    maxOutputTokens: f2MaxTokens,
+    thinkingBudget: f2ThinkingBudget,
   });
   const allPoints = [];
   for (let i = 0; i < chunks.length; i++) {
     const user = `=== REGULATION TEXT (part ${i + 1}/${chunks.length}) ===\n${chunks[i]}`;
-    const result = await geminiJson(apiKey, cfg.reasoningModel, F2_SYSTEM, user, 8192, 0.15);
+    const f2Extras = {};
+    if (f2ThinkingBudget != null && typeof f2ThinkingBudget === 'number') {
+      f2Extras.thinkingBudget = f2ThinkingBudget;
+    }
+    const result = await geminiJson(apiKey, cfg.reasoningModel, F2_SYSTEM, user, f2MaxTokens, 0.15, f2Extras);
     const pts = result.policy_points;
     const took = Array.isArray(pts) ? pts.length : 0;
     policyPipelineLog({
@@ -685,7 +769,8 @@ async function f4Impact(apiKey, cfg, ragMatchesWithPoints) {
       const user =
         `=== NEW REGULATION POINT ===\n${item.point_text}\n\n` +
         `=== EXISTING POLICY (${match.policy_title}) ===\n${match.content_excerpt}`;
-      const analysis = await geminiJson(apiKey, cfg.fastModel, F4_SYSTEM, user, 2048, 0.15);
+      const system = cfg.f4SystemInstruction || F4_SYSTEM;
+      const analysis = await geminiJson(apiKey, cfg.fastModel, system, user, cfg.f4MaxOutputTokens ?? DEFAULTS.f4MaxOutputTokens, 0.15);
       impacts.push({
         policy_id: match.policy_id,
         policy_title: match.policy_title,
@@ -714,10 +799,13 @@ async function f4Impact(apiKey, cfg, ragMatchesWithPoints) {
  * @param {string} opts.regulationText
  * @param {Array<{ id: string, title: string, content: string }>} opts.policies
  * @param {object} [opts.overrides] - optional model names / thresholds
+ * @param {object} [opts.f4SeverityDefinitions] - optional per-level impact rubric (critical/high/medium/low/none); empty values ignored
  */
 async function runPolicyUpdatePipeline(opts) {
   const apiKey = opts.apiKey;
   if (!apiKey) throw new Error('apiKey is required');
+
+  const f4SevDefs = normalizeF4SeverityDefinitions(opts.f4SeverityDefinitions);
 
   const cfg = {
     reasoningModel: opts.overrides?.reasoningModel || DEFAULTS.reasoningModel,
@@ -727,8 +815,20 @@ async function runPolicyUpdatePipeline(opts) {
     f1ExcerptLimit: opts.overrides?.f1ExcerptLimit ?? DEFAULTS.f1ExcerptLimit,
     f2ChunkSize: opts.overrides?.f2ChunkSize ?? DEFAULTS.f2ChunkSize,
     f2ChunkOverlap: opts.overrides?.f2ChunkOverlap ?? DEFAULTS.f2ChunkOverlap,
+    f2MaxOutputTokens: opts.overrides?.f2MaxOutputTokens ?? DEFAULTS.f2MaxOutputTokens,
+    f2ThinkingBudget:
+      opts.overrides && Object.prototype.hasOwnProperty.call(opts.overrides, 'f2ThinkingBudget')
+        ? opts.overrides.f2ThinkingBudget
+        : DEFAULTS.f2ThinkingBudget,
+    f4MaxOutputTokens: opts.overrides?.f4MaxOutputTokens ?? DEFAULTS.f4MaxOutputTokens,
     f3SimilarityThreshold: opts.overrides?.f3SimilarityThreshold ?? DEFAULTS.f3SimilarityThreshold,
     excerptLen: opts.overrides?.excerptLen ?? DEFAULTS.excerptLen,
+    geminiThinkingBudget:
+      opts.overrides && Object.prototype.hasOwnProperty.call(opts.overrides, 'geminiThinkingBudget')
+        ? opts.overrides.geminiThinkingBudget
+        : DEFAULTS.geminiThinkingBudget,
+    f4SystemInstruction: buildF4SystemInstruction(f4SevDefs),
+    skipF1: opts.overrides?.skipF1 === true,
   };
 
   const runId = `pup_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -753,6 +853,7 @@ async function runPolicyUpdatePipeline(opts) {
     fastModel: cfg.fastModel,
     embeddingModel: cfg.embeddingModel,
     hasOverrides: !!(opts.overrides && typeof opts.overrides === 'object'),
+    f4SeverityDefinitionLevels: Object.keys(f4SevDefs).length,
   });
 
   // Embed all organisation policies once (same as wathbah_grc upload_policies → query)
@@ -774,31 +875,37 @@ async function runPolicyUpdatePipeline(opts) {
     embeddingModel: cfg.embeddingModel,
   });
 
-  // F1
-  const f1 = await f1Relevance(apiKey, cfg, orgContext, regulationText);
-  if (!isValidF1Envelope(f1)) {
-    const raw =
-      typeof f1?.raw_response === 'string' && f1.raw_response.trim() ? f1.raw_response.trim().slice(0, 900) : null;
-    throw new Error(
-      `F1 response was missing a boolean is_relevant (model did not return valid JSON). ${raw ? `Model text (truncated): ${raw}` : 'Often caused by Gemini returning no candidates, safety blocks, or empty output under JSON MIME mode — see server logs.'}`,
-    );
-  }
-  if (!f1.is_relevant) {
-    policyPipelineLog({
-      event: 'pipeline_complete',
-      runId,
-      stage_reached: 'f1',
-      reason: 'not_relevant_to_org',
-      policy_count_indexed: policyRows.length,
-    });
-    return {
-      stage_reached: 'f1',
-      f1_relevance: f1,
-      f2_summary: null,
-      f3_matches: null,
-      f4_impacts: null,
-      policy_count_indexed: policyRows.length,
-    };
+  // F1 — can be skipped via overrides.skipF1 (e.g. internal-sources background runs)
+  let f1;
+  if (cfg.skipF1) {
+    f1 = { is_relevant: true, confidence: 1, reasoning: 'Relevance check skipped — document assumed relevant by caller.', relevant_aspects: [], _skipped: true };
+    policyPipelineLog({ event: 'f1_skipped', runId, reason: 'skipF1_override' });
+  } else {
+    f1 = await f1Relevance(apiKey, cfg, orgContext, regulationText);
+    if (!isValidF1Envelope(f1)) {
+      const raw =
+        typeof f1?.raw_response === 'string' && f1.raw_response.trim() ? f1.raw_response.trim().slice(0, 900) : null;
+      throw new Error(
+        `F1 response was missing a boolean is_relevant (model did not return valid JSON). ${raw ? `Model text (truncated): ${raw}` : 'Often caused by Gemini returning no candidates, safety blocks, or empty output under JSON MIME mode — see server logs.'}`,
+      );
+    }
+    if (!f1.is_relevant) {
+      policyPipelineLog({
+        event: 'pipeline_complete',
+        runId,
+        stage_reached: 'f1',
+        reason: 'not_relevant_to_org',
+        policy_count_indexed: policyRows.length,
+      });
+      return {
+        stage_reached: 'f1',
+        f1_relevance: f1,
+        f2_summary: null,
+        f3_matches: null,
+        f4_impacts: null,
+        policy_count_indexed: policyRows.length,
+      };
+    }
   }
 
   // F2
@@ -904,4 +1011,6 @@ module.exports = {
   DEFAULTS,
   parseJsonFromLlm,
   cosineSimilarity,
+  normalizeF4SeverityDefinitions,
+  buildF4SystemInstruction,
 };

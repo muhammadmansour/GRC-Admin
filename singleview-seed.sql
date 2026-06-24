@@ -1,0 +1,13 @@
+-- ─── SingleView seed for org_contexts ──────────────────────────────────
+-- Source DB : C:\Users\manso\projects\wathba-porjects\prompt\sessions.db
+-- Source id : c014b882-0120-4979-89c8-6b8c3005afc5
+-- Generated : 2026-06-02T16:21:42.021Z
+-- Idempotent: re-running the file replaces the row if the id already exists
+-- ────────────────────────────────────────────────────────────────────────
+BEGIN TRANSACTION;
+INSERT OR REPLACE INTO org_contexts (
+  id, name_en, name_ar, sector, sector_custom, size, compliance_maturity, regulatory_mandates, governance_structure, data_classification, geographic_scope, it_infrastructure, strategic_objectives, obligatory_frameworks, policies, tracking_metrics, risk_scenarios, objective_framework_map, notes, is_active, store_id, created_at, updated_at
+) VALUES (
+  'c014b882-0120-4979-89c8-6b8c3005afc5', 'SingleView Financial Services', 'سنجل فيو للخدمات المالية', 'banking', '', 'medium', 3, '["SAMA Cybersecurity Framework","SAMA Outsourcing Regulations","PDPL","AML/CFT Regulations"]', 'Centralized governance with board-level Risk Committee and dedicated Compliance, IT Risk, and Internal Audit functions', 'Confidential / Restricted (customer financial data, KYC records, transaction history)', 'Saudi Arabia (Kingdom-wide), MENA region', 'Hybrid cloud (private datacenter + AWS Middle East), core banking on-prem', '["Maintain full SAMA regulatory compliance","Strengthen third-party / vendor risk management","Achieve 99.95% core banking availability","Expand digital banking products to MENA"]', '["SAMA CSF","ISO 27001","PCI-DSS","PDPL"]', '[]', '[{"name":"Vendor risk assessment completion rate"},{"name":"Number of critical third-party incidents per quarter"},{"name":"Time-to-onboard new vendor (days)"}]', '[{"name":"Critical vendor service disruption affecting core banking"},{"name":"Third-party data breach exposing customer PII"},{"name":"SAMA non-compliance finding during audit"}]', '{}', 'Saudi-licensed financial services entity regulated by the Saudi Central Bank (SAMA). Heavy reliance on third-party vendors for payments processing, KYC, and cloud infrastructure. Subject to SAMA Outsourcing Regulations and Cybersecurity Framework. Activities: Digital banking, payments, KYC/AML processing, vendor management.', 1, '', '2026-05-19T11:06:48.084Z', '2026-05-19T11:06:48.084Z'
+);
+COMMIT;
