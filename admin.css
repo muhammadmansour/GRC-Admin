@@ -5688,6 +5688,57 @@ body.pup-pipeline-overlay-open {
 
 /* ---------- Admin Prompts ---------- */
 
+.ap-tabs-wrap {
+  margin-bottom: 16px;
+}
+.ap-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  background: #f1f5f9;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+}
+.ap-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.ap-tab:hover {
+  color: #334155;
+  background: rgba(255,255,255,0.65);
+}
+.ap-tab.is-active {
+  background: #fff;
+  color: #1e293b;
+  box-shadow: 0 1px 3px rgba(0,0,0,.08);
+}
+.ap-tab-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+.ap-tab.is-active .ap-tab-count {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
 .ap-section-header {
   display: flex;
   align-items: center;
@@ -5719,6 +5770,21 @@ body.pup-pipeline-overlay-open {
 }
 .ap-card-local {
   border-left: 3px solid #10b981;
+}
+.ap-card-inactive {
+  opacity: 0.82;
+  border-style: dashed;
+}
+.ap-card-desc {
+  font-size: 12px;
+  color: #64748b;
+  margin: 0 0 10px;
+  line-height: 1.45;
+}
+.ap-btn-delete:hover {
+  color: #dc2626;
+  border-color: #fecaca;
+  background: #fef2f2;
 }
 .ap-card-top {
   display: flex;
@@ -5802,6 +5868,18 @@ body.pup-pipeline-overlay-open {
 .badge-round { border-radius: 20px; }
 .badge-emerald { background: #d1fae5; color: #065f46; }
 .badge-gray { background: #f3f4f6; color: #6b7280; }
+.badge-slate { background: #e2e8f0; color: #334155; }
+.admin-form-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.admin-form-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--admin-primary, #0077cc);
+}
 
 @media (max-width: 600px) {
   .ap-grid { grid-template-columns: 1fr; }

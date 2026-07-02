@@ -1138,19 +1138,33 @@
             <div class="page-header page-header-row">
               <div>
                 <h1 class="page-title">Prompts</h1>
-                <p class="page-subtitle">Manage and edit prompt templates — local and API-synced</p>
+                <p class="page-subtitle">Local app prompts and Muraji API prompt templates</p>
               </div>
-              <div style="display:flex;gap:8px;align-items:center">
-                <button class="btn-admin-ghost btn-admin-sm" id="btn-prompts-clear-cache" title="Clear API cache">
+              <div class="ap-header-actions" id="ap-muraji-actions" style="display:flex;gap:8px;align-items:center">
+                <button class="btn-admin-ghost btn-admin-sm" id="btn-prompts-clear-cache" title="Clear Muraji prompt cache">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4H12M4 4V3C4 2.4 4.4 2 5 2H9C9.6 2 10 2.4 10 3V4M5 6.5V10.5M7 6.5V10.5M9 6.5V10.5M3 4L4 12H10L11 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
                   Clear Cache
                 </button>
                 <button class="btn-admin-primary" id="btn-new-prompt">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2V12M2 7H12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-                  New Prompt
+                  New Muraji Prompt
                 </button>
               </div>
             </div>
+
+            <div class="ap-tabs-wrap">
+              <div class="ap-tabs" role="tablist" aria-label="Prompt categories">
+                <button type="button" class="ap-tab is-active" role="tab" id="ap-tab-local" data-ap-tab="local" aria-selected="true">
+                  Local Prompts
+                  <span class="ap-tab-count" id="ap-tab-local-count"></span>
+                </button>
+                <button type="button" class="ap-tab" role="tab" id="ap-tab-muraji" data-ap-tab="muraji" aria-selected="false">
+                  Muraji' Prompts
+                  <span class="ap-tab-count" id="ap-tab-muraji-count"></span>
+                </button>
+              </div>
+            </div>
+
             <div class="admin-search-bar" style="margin-bottom:16px">
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4" stroke="currentColor" stroke-width="1.5"/><path d="M9 9L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
               <input type="text" placeholder="Search prompts..." id="admin-prompts-search">
@@ -2038,13 +2052,33 @@
         </button>
       </div>
       <div class="admin-modal-body" style="max-height:70vh;overflow-y:auto">
-        <div class="admin-form-row">
-          <label class="admin-form-label">Name <span class="required">*</span></label>
-          <input type="text" class="admin-form-input" id="prompt-edit-name" placeholder="e.g. Requirement Analyzer">
+        <div class="admin-form-row" id="prompt-edit-key-row" hidden>
+          <label class="admin-form-label" for="prompt-edit-key">Key <span class="required">*</span></label>
+          <input type="text" class="admin-form-input" id="prompt-edit-key" placeholder="e.g. audit_analyze" autocomplete="off" pattern="[a-z0-9_]+">
+          <p class="admin-form-hint">Unique identifier used by Muraji services (lowercase, underscores).</p>
+        </div>
+        <div class="admin-form-row" id="prompt-edit-key-readonly-row" hidden>
+          <label class="admin-form-label">Key</label>
+          <input type="text" class="admin-form-input" id="prompt-edit-key-readonly" readonly>
         </div>
         <div class="admin-form-row">
-          <label class="admin-form-label">Prompt Content <span class="required">*</span></label>
-          <textarea class="admin-form-textarea admin-prompt-textarea" id="prompt-edit-content" rows="20" placeholder="Enter the full prompt content..."></textarea>
+          <label class="admin-form-label" for="prompt-edit-name">Name <span class="required">*</span></label>
+          <input type="text" class="admin-form-input" id="prompt-edit-name" placeholder="e.g. Audit Analysis">
+        </div>
+        <div class="admin-form-row" id="prompt-edit-description-row" hidden>
+          <label class="admin-form-label" for="prompt-edit-description">Description</label>
+          <input type="text" class="admin-form-input" id="prompt-edit-description" placeholder="Optional short description">
+        </div>
+        <div class="admin-form-row">
+          <label class="admin-form-label" for="prompt-edit-content">Prompt Content <span class="required">*</span></label>
+          <textarea class="admin-form-textarea admin-prompt-textarea" id="prompt-edit-content" rows="20" placeholder="You are an expert...&#10;&#10;{{CONTEXT}}&#10;&#10;..."></textarea>
+        </div>
+        <div class="admin-form-row" id="prompt-edit-active-row" hidden>
+          <label class="admin-form-label admin-form-check">
+            <input type="checkbox" id="prompt-edit-active" checked>
+            Active
+          </label>
+          <p class="admin-form-hint">Inactive prompts are skipped when Muraji loads templates from the database.</p>
         </div>
       </div>
       <div class="admin-modal-footer">

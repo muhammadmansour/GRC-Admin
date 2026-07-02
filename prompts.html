@@ -39,12 +39,18 @@
         Dashboard
       </a>
     </div>
-    <div class="nav-actions">
+    <div class="nav-actions" id="prompts-muraji-actions">
+      <button class="nav-btn nav-btn-outlined" type="button" id="btn-clear-cache">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M2 4H14M5 4V3C5 2.4 5.4 2 6 2H10C10.6 2 11 2.4 11 3V4M6 7V12M8 7V12M10 7V12M3 4L4 14H12L13 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Clear Cache
+      </button>
       <button class="nav-btn nav-btn-outlined" type="button" id="btn-create-prompt">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
           <path d="M8 3V13M3 8H13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
         </svg>
-        New Prompt
+        New Muraji Prompt
       </button>
     </div>
   </nav>
@@ -54,7 +60,7 @@
     <div class="prompts-header">
       <div class="prompts-header-text">
         <h1 class="prompts-title">Prompts</h1>
-        <p class="prompts-subtitle">Manage and edit your prompt templates</p>
+        <p class="prompts-subtitle">Local app prompts and Muraji API prompt templates</p>
       </div>
       <div class="prompts-header-actions">
         <div class="prompts-search-wrapper">
@@ -64,10 +70,18 @@
           </svg>
           <input type="text" id="prompts-search" placeholder="Search prompts..." autocomplete="off" />
         </div>
-        <button class="btn-icon-action" id="btn-clear-cache" title="Clear cache">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M2 4H14M5 4V3C5 2.4 5.4 2 6 2H10C10.6 2 11 2.4 11 3V4M6 7V12M8 7V12M10 7V12M3 4L4 14H12L13 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+      </div>
+    </div>
+
+    <div class="prompts-tabs-wrap">
+      <div class="prompts-tabs" role="tablist" aria-label="Prompt categories">
+        <button type="button" class="prompts-tab is-active" role="tab" data-prompts-tab="local" aria-selected="true">
+          Local Prompts
+          <span class="prompts-tab-count" id="prompts-tab-local-count"></span>
+        </button>
+        <button type="button" class="prompts-tab" role="tab" data-prompts-tab="muraji" aria-selected="false">
+          Muraji' Prompts
+          <span class="prompts-tab-count" id="prompts-tab-muraji-count"></span>
         </button>
       </div>
     </div>
@@ -104,13 +118,32 @@
       </div>
       <div class="modal-body" id="prompt-modal-body">
         <div class="prompt-form">
+          <div class="prompt-form-group" id="prompt-key-row" hidden>
+            <label for="prompt-key">Key <span class="required">*</span></label>
+            <input type="text" id="prompt-key" placeholder="e.g. audit_analyze" autocomplete="off" pattern="[a-z0-9_]+" />
+            <p class="prompt-form-hint">Unique identifier used by Muraji services.</p>
+          </div>
+          <div class="prompt-form-group" id="prompt-key-readonly-row" hidden>
+            <label for="prompt-key-readonly">Key</label>
+            <input type="text" id="prompt-key-readonly" readonly />
+          </div>
           <div class="prompt-form-group">
-            <label for="prompt-name">Name</label>
-            <input type="text" id="prompt-name" placeholder="e.g. Requirement Analyzer" autocomplete="off" />
+            <label for="prompt-name">Name <span class="required">*</span></label>
+            <input type="text" id="prompt-name" placeholder="e.g. Audit Analysis" autocomplete="off" />
+          </div>
+          <div class="prompt-form-group" id="prompt-description-row" hidden>
+            <label for="prompt-description">Description</label>
+            <input type="text" id="prompt-description" placeholder="Optional description" autocomplete="off" />
           </div>
           <div class="prompt-form-group prompt-form-group-full">
-            <label for="prompt-content">Prompt Content</label>
-            <textarea id="prompt-content" placeholder="Enter the full prompt content..." rows="20"></textarea>
+            <label for="prompt-content">Prompt Content <span class="required">*</span></label>
+            <textarea id="prompt-content" placeholder="You are an expert...&#10;&#10;{{CONTEXT}}&#10;&#10;..." rows="20"></textarea>
+          </div>
+          <div class="prompt-form-group" id="prompt-active-row" hidden>
+            <label class="prompt-form-check">
+              <input type="checkbox" id="prompt-active" checked />
+              Active
+            </label>
           </div>
         </div>
       </div>

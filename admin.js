@@ -292,7 +292,10 @@ function navigateTo(page, pushState = true, subId = null) {
   if (page === 'audit-studio') loadAuditStudio();
   if (page === 'file-collections') loadCollections();
   if (page === 'org-contexts') loadOrgContexts(subId);
-  if (page === 'prompts') loadPrompts();
+  if (page === 'prompts') {
+    setPromptsTab(promptsActiveTab);
+    loadPrompts();
+  }
   if (page === 'controls-studio') loadControlsStudio();
   if (page === 'merge-optimizer') loadMergeOptimizer();
   if (page === 'policy-ingestion') loadPolicyIngestion(subId);
@@ -3409,11 +3412,47 @@ let adminLocalPrompts = [];
 let adminApiPrompts = [];
 let promptEditId = null;
 let promptEditSource = null; // 'local' | 'api'
+let promptsActiveTab = 'local';
+
+function promptMatchesQuery(p, q) {
+  const hay = [
+    p.name,
+    p.key,
+    p.description,
+    p.content,
+  ].filter(Boolean).join(' ').toLowerCase();
+  return hay.includes(q);
+}
+
+function setPromptsTab(tab) {
+  promptsActiveTab = tab === 'muraji' ? 'muraji' : 'local';
+  document.querySelectorAll('[data-ap-tab]').forEach(btn => {
+    const active = btn.dataset.apTab === promptsActiveTab;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  const actions = document.getElementById('ap-muraji-actions');
+  if (actions) actions.style.display = promptsActiveTab === 'muraji' ? 'flex' : 'none';
+  const q = adminPromptsSearch?.value.toLowerCase().trim();
+  renderPromptsList(q || undefined);
+}
+
+document.querySelectorAll('[data-ap-tab]').forEach(btn => {
+  btn.addEventListener('click', () => setPromptsTab(btn.dataset.apTab));
+});
+
+function updatePromptTabCounts() {
+  const localCount = document.getElementById('ap-tab-local-count');
+  const murajiCount = document.getElementById('ap-tab-muraji-count');
+  if (localCount) localCount.textContent = adminLocalPrompts.length ? String(adminLocalPrompts.length) : '';
+  if (murajiCount) murajiCount.textContent = adminApiPrompts.length ? String(adminApiPrompts.length) : '';
+}
 
 async function loadPrompts() {
   const listEl = document.getElementById('admin-prompts-list');
   if (listEl) listEl.innerHTML = '<div class="studio-loading"><svg class="spinner" width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" stroke-opacity="0.2"/><path d="M12 2C17.5 2 22 6.5 22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Loading prompts...</span></div>';
   await Promise.all([fetchLocalPrompts(), fetchApiPrompts()]);
+  updatePromptTabCounts();
   renderPromptsList();
 }
 
@@ -3433,38 +3472,39 @@ async function fetchApiPrompts() {
     const d = await r.json();
     adminApiPrompts = Array.isArray(d) ? d : (d.data || d.prompts || []);
     adminApiPrompts = adminApiPrompts.filter(p => !PROMPTS_HIDDEN_IDS.includes(p._id || p.id));
-  } catch (e) { console.error('API prompts error:', e); adminApiPrompts = []; }
+  } catch (e) { console.error('Muraji prompts error:', e); adminApiPrompts = []; }
 }
 
 function renderPromptsList(q) {
   const listEl = document.getElementById('admin-prompts-list');
   if (!listEl) return;
 
-  let fLocal = adminLocalPrompts;
-  let fApi = adminApiPrompts;
-  if (q) {
-    fLocal = adminLocalPrompts.filter(p => (p.name || '').toLowerCase().includes(q) || (p.content || '').toLowerCase().includes(q));
-    fApi = adminApiPrompts.filter(p => (p.name || '').toLowerCase().includes(q) || (p.content || '').toLowerCase().includes(q));
-  }
-
   let html = '';
 
-  if (fLocal.length > 0) {
-    html += '<div class="ap-section-header"><h3 class="ap-section-title">Local Prompts</h3><span class="badge badge-primary badge-round">Used by App</span></div>';
-    html += '<div class="ap-grid">';
-    fLocal.forEach(p => { html += promptCard(p, 'local'); });
-    html += '</div>';
-  }
+  if (promptsActiveTab === 'local') {
+    let fLocal = adminLocalPrompts;
+    if (q) fLocal = adminLocalPrompts.filter(p => promptMatchesQuery(p, q));
 
-  if (fApi.length > 0) {
-    html += '<div class="ap-section-header" style="margin-top:20px"><h3 class="ap-section-title">API Prompts</h3><span class="badge badge-gray badge-round">From Muraji API</span></div>';
-    html += '<div class="ap-grid">';
-    fApi.forEach(p => { html += promptCard(p, 'api'); });
-    html += '</div>';
-  }
+    if (fLocal.length > 0) {
+      html += '<div class="ap-section-header"><h3 class="ap-section-title">Local Prompts</h3><span class="badge badge-primary badge-round">Used by App</span></div>';
+      html += '<div class="ap-grid">';
+      fLocal.forEach(p => { html += promptCard(p, 'local'); });
+      html += '</div>';
+    } else {
+      html = '<div class="admin-card empty-state-box" style="text-align:center;padding:40px"><h3>No local prompts found</h3><p style="color:#6b7280;font-size:12px">Local prompts are seeded from the app and can be edited here.</p></div>';
+    }
+  } else {
+    let fApi = adminApiPrompts;
+    if (q) fApi = adminApiPrompts.filter(p => promptMatchesQuery(p, q));
 
-  if (!html) {
-    html = '<div class="admin-card empty-state-box" style="text-align:center;padding:40px"><h3>No prompts found</h3><p style="color:#6b7280;font-size:12px">Create a new prompt or check your API connection.</p></div>';
+    if (fApi.length > 0) {
+      html += '<div class="ap-section-header"><h3 class="ap-section-title">Muraji\' Prompts</h3><span class="badge badge-gray badge-round">Muraji API</span></div>';
+      html += '<div class="ap-grid">';
+      fApi.forEach(p => { html += promptCard(p, 'api'); });
+      html += '</div>';
+    } else {
+      html = '<div class="admin-card empty-state-box" style="text-align:center;padding:40px"><h3>No Muraji prompts found</h3><p style="color:#6b7280;font-size:12px">Create a Muraji prompt or check your API connection.</p></div>';
+    }
   }
 
   listEl.innerHTML = html;
@@ -3473,34 +3513,40 @@ function renderPromptsList(q) {
 function promptCard(p, src) {
   const id = p._id || p.id;
   const nm = p.name || 'Untitled';
+  const key = p.key || '';
+  const desc = p.description || '';
   const v = p.version || 1;
   const ct = p.content || '';
   const prev = ct.substring(0, 180);
   const isL = src === 'local';
   const cAt = p.created_at || p.createdAt;
   const uAt = p.updated_at || p.updatedAt;
+  const isActive = p.is_active !== false;
 
   let note = '';
   if (id === '8c0a228d-1fa7-47f6-9df6-4354b72f8134') note = 'Used in both applied control and requirement evidence assessments';
   if (id === 'b596eb43-d411-4fe6-9d80-0ab113673678') note = 'Used in extracting entities from evidence in CISO version';
 
   return `
-    <div class="ap-card ${isL ? 'ap-card-local' : ''}">
+    <div class="ap-card ${isL ? 'ap-card-local' : ''} ${!isL && !isActive ? 'ap-card-inactive' : ''}">
       <div class="ap-card-top">
         <div class="ap-card-name-row">
           <span class="ap-card-name">${esc(nm)}</span>
           ${isL ? '<span class="badge badge-emerald" style="font-size:9px">LOCAL</span>' : ''}
-          ${!isL ? '<span class="badge badge-gray" style="font-size:9px">v' + v + '</span>' : ''}
+          ${!isL && key ? `<span class="badge badge-slate" style="font-size:9px">${esc(key)}</span>` : ''}
+          ${!isL ? `<span class="badge badge-gray" style="font-size:9px">v${v}</span>` : ''}
+          ${!isL ? `<span class="badge ${isActive ? 'badge-emerald' : 'badge-gray'}" style="font-size:9px">${isActive ? 'Active' : 'Inactive'}</span>` : ''}
         </div>
         <div class="ap-card-actions">
           <button class="btn-admin-ghost btn-admin-sm" onclick="adminEditPrompt('${esc(id)}','${src}')" title="Edit">
             <svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M10 2L12 4L5 11H3V9L10 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          ${!isL ? `<button class="btn-admin-ghost btn-admin-sm" onclick="adminDeletePrompt('${esc(id)}','${esc(nm).replace(/'/g, "\\\\'")}')" title="Delete">
+          ${!isL ? `<button class="btn-admin-ghost btn-admin-sm ap-btn-delete" onclick="adminDeletePrompt('${esc(id)}','${esc(nm).replace(/'/g, "\\\\'")}')" title="Delete">
             <svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M3 4H11M5 4V3C5 2.4 5.4 2 6 2H8C8.6 2 9 2.4 9 3V4M6 7V10M8 7V10M4 4L5 12H9L10 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>` : ''}
         </div>
       </div>
+      ${desc ? `<div class="ap-card-desc">${esc(desc)}</div>` : ''}
       ${prev ? `<div class="ap-card-preview"><pre>${esc(prev)}${ct.length > 180 ? '…' : ''}</pre></div>` : ''}
       <div class="ap-card-footer">
         ${uAt ? `<span class="ap-card-date">Updated ${fmtRelDate(uAt)}</span>` : ''}
@@ -3534,66 +3580,119 @@ const promptModalTitle = document.getElementById('prompt-modal-title');
 const promptModalClose = document.getElementById('prompt-modal-close');
 const promptModalCancel = document.getElementById('prompt-modal-cancel');
 const promptModalSave = document.getElementById('prompt-modal-save');
+const promptEditKeyRow = document.getElementById('prompt-edit-key-row');
+const promptEditKeyReadonlyRow = document.getElementById('prompt-edit-key-readonly-row');
+const promptEditDescriptionRow = document.getElementById('prompt-edit-description-row');
+const promptEditActiveRow = document.getElementById('prompt-edit-active-row');
+
+function clearPromptForm() {
+  document.getElementById('prompt-edit-key').value = '';
+  document.getElementById('prompt-edit-key-readonly').value = '';
+  document.getElementById('prompt-edit-name').value = '';
+  document.getElementById('prompt-edit-description').value = '';
+  document.getElementById('prompt-edit-content').value = '';
+  document.getElementById('prompt-edit-active').checked = true;
+}
+
+function configurePromptModalFields(source, isCreate) {
+  const isMuraji = source === 'api';
+  if (promptEditKeyRow) promptEditKeyRow.hidden = !isMuraji || !isCreate;
+  if (promptEditKeyReadonlyRow) promptEditKeyReadonlyRow.hidden = !isMuraji || isCreate;
+  if (promptEditDescriptionRow) promptEditDescriptionRow.hidden = !isMuraji;
+  if (promptEditActiveRow) promptEditActiveRow.hidden = !isMuraji || isCreate;
+}
+
+function fillPromptForm(p) {
+  document.getElementById('prompt-edit-key').value = p.key || '';
+  document.getElementById('prompt-edit-key-readonly').value = p.key || '';
+  document.getElementById('prompt-edit-name').value = p.name || '';
+  document.getElementById('prompt-edit-description').value = p.description || '';
+  document.getElementById('prompt-edit-content').value = p.content || '';
+  document.getElementById('prompt-edit-active').checked = p.is_active !== false;
+}
 
 function openPromptModal() { promptModal.classList.add('active'); document.body.style.overflow = 'hidden'; }
-function closePromptModal() { promptModal.classList.remove('active'); document.body.style.overflow = ''; promptEditId = null; promptEditSource = null; document.getElementById('prompt-edit-name').value = ''; document.getElementById('prompt-edit-content').value = ''; }
+function closePromptModal() {
+  promptModal.classList.remove('active');
+  document.body.style.overflow = '';
+  promptEditId = null;
+  promptEditSource = null;
+  clearPromptForm();
+  configurePromptModalFields('local', true);
+}
 
 promptModalClose?.addEventListener('click', closePromptModal);
 promptModalCancel?.addEventListener('click', closePromptModal);
 promptModal?.addEventListener('click', e => { if (e.target === promptModal) closePromptModal(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && promptModal?.classList.contains('active')) closePromptModal(); });
 
-// New prompt
+// New Muraji prompt
 document.getElementById('btn-new-prompt')?.addEventListener('click', () => {
   promptEditId = null;
   promptEditSource = 'api';
-  promptModalTitle.textContent = 'New Prompt';
-  document.getElementById('prompt-edit-name').value = '';
-  document.getElementById('prompt-edit-content').value = '';
+  promptModalTitle.textContent = 'New Muraji Prompt';
+  clearPromptForm();
+  configurePromptModalFields('api', true);
   openPromptModal();
-  document.getElementById('prompt-edit-name').focus();
+  document.getElementById('prompt-edit-key').focus();
 });
 
 // Edit prompt
 async function adminEditPrompt(id, src) {
   promptEditId = id;
   promptEditSource = src || 'api';
-  promptModalTitle.textContent = 'Edit Prompt';
-
-  const nameEl = document.getElementById('prompt-edit-name');
-  const contentEl = document.getElementById('prompt-edit-content');
+  promptModalTitle.textContent = src === 'local' ? 'Edit Local Prompt' : 'Edit Muraji Prompt';
+  clearPromptForm();
+  configurePromptModalFields(src || 'api', false);
 
   if (src === 'local') {
     const c = adminLocalPrompts.find(p => p.id === id);
-    nameEl.value = c?.name || '';
-    contentEl.value = c?.content || '';
+    fillPromptForm(c || {});
     openPromptModal();
     try {
       const r = await fetch(LOCAL_PROMPTS_URL + '/' + id);
-      if (r.ok) { const d = await r.json(); const p = d.prompt || d; nameEl.value = p.name || ''; contentEl.value = p.content || ''; }
+      if (r.ok) {
+        const d = await r.json();
+        fillPromptForm(d.prompt || d);
+      }
     } catch (e) { console.error(e); toast('error', 'Error', e.message); }
-  } else {
-    const c = adminApiPrompts.find(p => (p._id || p.id) === id);
-    nameEl.value = c?.name || '';
-    contentEl.value = c?.content || '';
-    openPromptModal();
-    try {
-      const r = await fetch(PROMPTS_API_URL + '/' + id);
-      if (r.ok) { const d = await r.json(); const p = d.data || d.prompt || d; nameEl.value = p.name || ''; contentEl.value = p.content || ''; }
-    } catch (e) { console.error(e); toast('error', 'Error', e.message); }
+    document.getElementById('prompt-edit-name').focus();
+    return;
   }
-  nameEl.focus();
+
+  const c = adminApiPrompts.find(p => (p._id || p.id) === id);
+  fillPromptForm(c || {});
+  openPromptModal();
+  try {
+    const r = await fetch(PROMPTS_API_URL + '/' + id);
+    if (r.ok) {
+      const d = await r.json();
+      fillPromptForm(d.data || d.prompt || d);
+    }
+  } catch (e) { console.error(e); toast('error', 'Error', e.message); }
+  document.getElementById('prompt-edit-name').focus();
 }
 window.adminEditPrompt = adminEditPrompt;
 
 // Save prompt
 promptModalSave?.addEventListener('click', async () => {
+  const key = document.getElementById('prompt-edit-key').value.trim();
   const nm = document.getElementById('prompt-edit-name').value.trim();
+  const desc = document.getElementById('prompt-edit-description').value.trim();
   const ct = document.getElementById('prompt-edit-content').value.trim();
+  const isActive = document.getElementById('prompt-edit-active').checked;
+
+  if (promptEditSource === 'api' && !promptEditId) {
+    if (!key) { toast('error', 'Validation', 'Key is required.'); document.getElementById('prompt-edit-key').focus(); return; }
+    if (!/^[a-z0-9_]+$/.test(key)) {
+      toast('error', 'Validation', 'Key must use lowercase letters, numbers, and underscores only.');
+      document.getElementById('prompt-edit-key').focus();
+      return;
+    }
+  }
   if (!nm) { toast('error', 'Validation', 'Name is required.'); document.getElementById('prompt-edit-name').focus(); return; }
   if (!ct) { toast('error', 'Validation', 'Content is required.'); document.getElementById('prompt-edit-content').focus(); return; }
 
-  const body = { name: nm, content: ct };
   const btnT = promptModalSave.querySelector('.btn-text');
   const btnL = promptModalSave.querySelector('.btn-loading');
 
@@ -3604,16 +3703,36 @@ promptModalSave?.addEventListener('click', async () => {
 
     let r;
     if (promptEditSource === 'local' && promptEditId) {
-      r = await fetch(LOCAL_PROMPTS_URL + '/' + promptEditId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      r = await fetch(LOCAL_PROMPTS_URL + '/' + promptEditId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: nm, content: ct }),
+      });
     } else if (promptEditId) {
-      r = await fetch(PROMPTS_API_URL + '/' + promptEditId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const body = { name: nm, content: ct, is_active: isActive };
+      if (desc) body.description = desc;
+      else body.description = '';
+      r = await fetch(PROMPTS_API_URL + '/' + promptEditId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
     } else {
-      r = await fetch(PROMPTS_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const body = { key, name: nm, content: ct };
+      if (desc) body.description = desc;
+      r = await fetch(PROMPTS_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
     }
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.message || e.error || 'HTTP ' + r.status); }
 
+    const savedSource = promptEditSource;
+    const wasEditing = !!promptEditId;
     closePromptModal();
-    toast('success', promptEditId ? 'Updated' : 'Created', 'Prompt "' + nm + '" saved.');
+    toast('success', wasEditing ? 'Updated' : 'Created', 'Prompt "' + nm + '" saved.');
+    setPromptsTab(savedSource === 'local' ? 'local' : 'muraji');
     await loadPrompts();
   } catch (e) {
     console.error(e);
@@ -3627,7 +3746,7 @@ promptModalSave?.addEventListener('click', async () => {
 
 // Delete prompt
 async function adminDeletePrompt(id, nm) {
-  if (!await showConfirm({ title: 'Delete Prompt', message: `Delete "${nm}"?`, confirmText: 'Delete' })) return;
+  if (!await showConfirm({ title: 'Delete Muraji Prompt', message: `Delete "${nm}"? This cannot be undone.`, confirmText: 'Delete' })) return;
   try {
     const r = await fetch(PROMPTS_API_URL + '/' + id, { method: 'DELETE' });
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.message || e.error || 'HTTP ' + r.status); }
@@ -3642,7 +3761,7 @@ document.getElementById('btn-prompts-clear-cache')?.addEventListener('click', as
   try {
     const r = await fetch(PROMPTS_API_URL + '/cache/clear', { method: 'POST' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    toast('success', 'Cache Cleared', 'API prompt cache cleared.');
+    toast('success', 'Cache Cleared', 'Muraji prompt cache cleared.');
     await loadPrompts();
   } catch (e) { console.error(e); toast('error', 'Failed', e.message); }
 });
