@@ -9640,6 +9640,54 @@ Return a JSON array where each element has "article", "title", and "text" fields
           }
         }
 
+        // ── Step 2.5: Create a GRC Policy from each generated reference control ──
+        // Each verified reference control becomes a Policy (status "to_do") in the
+        // user-selected folder, linked back via `reference_control`.
+        const policyResults = [];
+        const policyErrors = [];
+        const policyFolder = String(body.folder || '').trim();
+        if (libraryCreated && generationType !== 'framework' && grcResults.length > 0) {
+          if (!policyFolder) {
+            console.warn('[Policy Approve] No folder provided — skipping policy creation from reference controls.');
+          } else {
+            console.log(`[Policy Approve] Step 2.5: Creating policies from ${grcResults.length} reference controls in folder ${policyFolder}`);
+            for (const rc of grcResults) {
+              const rcName = rc.name || 'Reference control';
+              const polBody = {
+                name: rcName,
+                description: `Generated from reference control "${rcName}".`,
+                folder: policyFolder,
+                reference_control: rc.id,
+                status: 'to_do',
+              };
+              try {
+                const polRes = await grcFetch(`${GRC_API_URL}/api/policies/`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(polBody),
+                }, reqToken);
+                if (!polRes.ok) {
+                  const errIn = await consumeGrcErrorBody(res, reqToken, polRes);
+                  if (errIn.aborted) return;
+                  const eMsg = errIn.errText.slice(0, 500);
+                  policyErrors.push({ referenceControl: rc.id, name: rcName, error: eMsg });
+                  grcErrors.push({ name: rcName, error: `Policy creation failed: ${eMsg}` });
+                  console.warn(`[Policy Approve] ⚠ Policy creation failed for RC ${rc.id}: ${eMsg}`);
+                  continue;
+                }
+                const createdPol = await polRes.json();
+                const polId = createdPol.id || createdPol.uuid;
+                policyResults.push({ id: polId, name: createdPol.name || rcName, referenceControl: rc.id, success: true });
+                console.log(`[Policy Approve] ✅ Policy created from RC ${String(rc.id).slice(0, 8)}…: ${polId ? String(polId).slice(0, 8) + '…' : '(no id)'}`);
+              } catch (e) {
+                policyErrors.push({ referenceControl: rc.id, name: rcName, error: e.message });
+                grcErrors.push({ name: rcName, error: `Policy creation failed: ${e.message}` });
+              }
+            }
+            console.log(`[Policy Approve] Step 2.5 done: ${policyResults.length} policies created, ${policyErrors.length} failed`);
+          }
+        }
+
         // ── Step 3: Save approved state ──
         const now2 = new Date().toISOString();
         result.approved = true;
@@ -9649,6 +9697,9 @@ Return a JSON array where each element has "article", "title", and "text" fields
         result.libraryError = libraryError;
         result.grcResults = grcResults;
         result.grcErrors = grcErrors;
+        result.policyResults = policyResults;
+        result.policyErrors = policyErrors;
+        result.policiesCreated = policyResults.length;
         dbUpdatePolicyCollection.run(row.name, row.description, 'approved', row.config, JSON.stringify(result), now2, collId);
 
         // Update the generation history record with approve result
@@ -9676,6 +9727,10 @@ Return a JSON array where each element has "article", "title", and "text" fields
             total: totalItems,
             grcResults,
             grcErrors,
+            policiesCreated: policyResults.length,
+            policiesFailed: policyErrors.length,
+            policyResults,
+            policyErrors,
           }
         });
         return;

@@ -6988,6 +6988,7 @@ let piCollections = [];
 let piPhase = 'collections'; // collections | collection-detail | config-modal | generating | review | success
 let piSelectedCollectionId = null;
 let piSelectedFileIds = [];
+let piCfgFileIds = []; // files selected inside the generation config modal
 let piGenerationResult = null;
 let piReviewPolicies = [];
 let piReviewNodes = [];
@@ -7109,6 +7110,14 @@ function piRender() {
     if (piPhase === 'config-modal' && coll) {
       el.innerHTML += piRenderConfigModal(coll);
       piLoadFoldersForConfig(); // Load GRC folders into the selector
+      // Scroll to the top of the freshly opened modal
+      queueMicrotask(() => {
+        window.scrollTo({ top: 0, behavior: 'auto' });
+        const body = el.querySelector('.pi-modal-body');
+        if (body) body.scrollTop = 0;
+        const modal = el.querySelector('.pi-modal');
+        if (modal && modal.scrollIntoView) modal.scrollIntoView({ block: 'start', behavior: 'auto' });
+      });
     }
     if (coll && piActiveTab === 'files') {
       queueMicrotask(() => piAttachPolicyDropzone(coll.id));
@@ -7150,7 +7159,7 @@ function piRenderCollectionsList() {
     const sc = statusCfg[c.status] || statusCfg.empty;
     const genCount = c.generatedPoliciesCount != null ? ` (${c.generatedPoliciesCount} policies)` : '';
     return `<tr>
-      <td><div class="pi-coll-name"><div class="pi-coll-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H10L13 5V13C13 13.6 12.6 14 12 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5"/><path d="M5 8H10M5 10.5H8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div><div class="pi-coll-info"><div class="pi-coll-title">${esc(c.name)}</div>${c.description ? `<div class="pi-coll-desc">${esc(c.description)}</div>` : ''}</div></div></td>
+      <td><div class="pi-coll-name pi-coll-name-link" role="button" tabindex="0" onclick="piOpenCollection('${c.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();piOpenCollection('${c.id}')}" title="Open collection"><div class="pi-coll-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2H10L13 5V13C13 13.6 12.6 14 12 14H3C2.4 14 2 13.6 2 13V3C2 2.4 2.4 2 3 2Z" stroke="currentColor" stroke-width="1.5"/><path d="M5 8H10M5 10.5H8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div><div class="pi-coll-info"><div class="pi-coll-title">${esc(c.name)}</div>${c.description ? `<div class="pi-coll-desc">${esc(c.description)}</div>` : ''}</div></div></td>
       <td class="center"><span class="pi-files-count">${piCollectionFileCount(c)} ${piCollectionFileCount(c) === 1 ? 'file' : 'files'}</span></td>
       <td class="center"><span class="pi-status ${sc.cls}">${c.status === 'generated' ? '<svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M2 6L5 9L10 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg> ' : ''}${sc.label}${genCount}</span></td>
       <td class="center"><span class="pi-date">${esc(c.lastUpdated)}</span></td>
@@ -7238,6 +7247,9 @@ async function piStartGeneration(id) {
     toast('error', 'Load failed', err.message || 'Could not load collection for generation');
     piPhase = 'collections';
   }
+  // Default: all files in the collection are selected for generation
+  const genColl = piCollections.find(c => c.id === id);
+  piCfgFileIds = ((genColl && genColl.files) || []).map(f => f.id);
   piRender();
 }
 window.piStartGeneration = piStartGeneration;
@@ -8560,25 +8572,89 @@ async function piHandleFolderUpload(event) {
 window.piHandleFolderUpload = piHandleFolderUpload;
 
 function piGenerateFromDetail() {
+  // Carry the in-collection selection into the modal; if nothing was selected, default to all files.
+  const coll = piCollections.find(c => c.id === piSelectedCollectionId);
+  const allIds = ((coll && coll.files) || []).map(f => f.id);
+  piCfgFileIds = piSelectedFileIds.length > 0
+    ? piSelectedFileIds.filter(id => allIds.includes(id))
+    : allIds.slice();
   piPhase = 'config-modal';
   piRender();
 }
 window.piGenerateFromDetail = piGenerateFromDetail;
 
 // ─── Config Modal ──────────────────────────────────────
-function piRenderConfigModal(coll) {
+function piRenderCfgFilesSection(coll) {
+  const files = (coll && coll.files) || [];
   const total = piCollectionFileCount(coll);
-  let filesBlock = '';
-  if (piSelectedFileIds.length > 0) {
-    const files = (coll.files || []).filter(f => piSelectedFileIds.includes(f.id));
-    filesBlock = files.map(f => `
-    <div class="pi-included-file"><span>${esc(f.name)}</span><button onclick="piRemoveIncludedFile('${f.id}')"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M9 3L3 9M3 3L9 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button></div>
-  `).join('');
-  } else if (total > 0) {
-    filesBlock = `<div class="pi-included-all-hint">${esc(`All ${total} file${total !== 1 ? 's' : ''} in this collection will be included.`)}</div>`;
-  } else {
-    filesBlock = '<div style="text-align:center;padding:8px"><span style="font-size:10px;color:#9ca3af">No files in collection</span></div>';
+  if (!files.length) {
+    return '<div style="text-align:center;padding:8px"><span style="font-size:11px;color:#9ca3af">No files in collection</span></div>';
   }
+  const selectedSet = new Set(piCfgFileIds);
+  const selCount = files.filter(f => selectedSet.has(f.id)).length;
+  const moreHint = total > files.length
+    ? `<p class="pi-cfg-files-morehint">Showing ${files.length} of ${total} files (first page). Unlisted files are included when all are selected.</p>`
+    : '';
+  const checklist = files.map(f => `
+    <label class="pi-cfg-file-check">
+      <input type="checkbox" ${selectedSet.has(f.id) ? 'checked' : ''} onchange="piCfgToggleFile('${f.id}')">
+      <span class="pi-cfg-file-name">${esc(f.name)}</span>
+    </label>`).join('');
+  const selectedFiles = files.filter(f => selectedSet.has(f.id));
+  const tags = selectedFiles.length
+    ? selectedFiles.map(f => `<span class="pi-cfg-tag">${esc(f.name)}<button type="button" onclick="piCfgRemoveFile('${f.id}')" title="Remove"><svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M9 3L3 9M3 3L9 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button></span>`).join('')
+    : '<span class="pi-cfg-tags-empty">No files selected — select at least one above.</span>';
+  return `
+    <div class="pi-cfg-files-head">
+      <span class="pi-cfg-files-count">${selCount} of ${files.length} selected</span>
+      <div class="pi-cfg-files-actions">
+        <button type="button" class="pi-cfg-mini-btn" onclick="piCfgSelectAllFiles()">Select all</button>
+        <button type="button" class="pi-cfg-mini-btn" onclick="piCfgClearAllFiles()">Clear</button>
+      </div>
+    </div>
+    ${moreHint}
+    <div class="pi-cfg-files-checklist">${checklist}</div>
+    <div class="pi-cfg-selected-tags">${tags}</div>`;
+}
+
+function piCfgCurrentColl() {
+  return piCollections.find(c => c.id === piSelectedCollectionId) || null;
+}
+
+function piCfgRefreshFilesSection() {
+  const container = document.getElementById('pi-cfg-files');
+  const coll = piCfgCurrentColl();
+  if (container && coll) container.innerHTML = piRenderCfgFilesSection(coll);
+}
+
+function piCfgToggleFile(fileId) {
+  const i = piCfgFileIds.indexOf(fileId);
+  if (i === -1) piCfgFileIds.push(fileId); else piCfgFileIds.splice(i, 1);
+  piCfgRefreshFilesSection();
+}
+window.piCfgToggleFile = piCfgToggleFile;
+
+function piCfgRemoveFile(fileId) {
+  piCfgFileIds = piCfgFileIds.filter(id => id !== fileId);
+  piCfgRefreshFilesSection();
+}
+window.piCfgRemoveFile = piCfgRemoveFile;
+
+function piCfgSelectAllFiles() {
+  const coll = piCfgCurrentColl();
+  piCfgFileIds = ((coll && coll.files) || []).map(f => f.id);
+  piCfgRefreshFilesSection();
+}
+window.piCfgSelectAllFiles = piCfgSelectAllFiles;
+
+function piCfgClearAllFiles() {
+  piCfgFileIds = [];
+  piCfgRefreshFilesSection();
+}
+window.piCfgClearAllFiles = piCfgClearAllFiles;
+
+function piRenderConfigModal(coll) {
+  const filesBlock = piRenderCfgFilesSection(coll);
 
   return `
     <div class="pi-modal-overlay" onclick="piCloseConfigModal(event)">
@@ -8724,8 +8800,16 @@ function piStartGenerate() {
     linkedFrameworkIds.push(cb.value);
   });
 
-  // Collect selected file IDs from included files
-  const selectedFileIds = piSelectedFileIds.length > 0 ? piSelectedFileIds : undefined;
+  // Resolve selected files from the modal checklist.
+  // If every loaded file is selected (and no further pages), send undefined = "all files".
+  const cfgColl = piCfgCurrentColl();
+  const loadedFiles = (cfgColl && cfgColl.files) || [];
+  if (loadedFiles.length > 0 && piCfgFileIds.length === 0) {
+    toast('error', 'No Files Selected', 'Select at least one file to include in generation.');
+    return;
+  }
+  const someDeselected = loadedFiles.length > 0 && piCfgFileIds.length < loadedFiles.length;
+  const selectedFileIds = someDeselected ? piCfgFileIds.slice() : undefined;
 
   piCurrentConfig = { generationType, libraryName, provider, folder, language, detailLevel, linkedFrameworkIds };
 
@@ -9313,7 +9397,10 @@ async function piApprove() {
     if (data.data.libraryCreated) {
       const rcCount = data.data.created || 0;
       const rcMsg = rcCount > 0 ? ` ${rcCount} reference controls verified.` : '';
-      toast('success', 'Library Created!', `Library uploaded to GRC successfully.${rcMsg} Applied controls can be added manually in the GRC platform.`);
+      const polCount = data.data.policiesCreated || 0;
+      const polFailed = data.data.policiesFailed || 0;
+      const polMsg = polCount > 0 ? ` ${polCount} policies created from reference controls${polFailed > 0 ? ` (${polFailed} failed)` : ''}.` : '';
+      toast('success', 'Library Created!', `Library uploaded to GRC successfully.${rcMsg}${polMsg}`);
     } else {
       toast('error', 'Library Error', data.data.libraryError || 'Failed to upload library to GRC.');
     }
