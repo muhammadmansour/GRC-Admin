@@ -8664,6 +8664,7 @@ function piRenderConfigModal(coll) {
           <button class="pi-modal-close" onclick="piCloseConfig()"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
         </div>
         <div class="pi-modal-body">
+          <div><label class="pi-form-label">Included Files</label><div class="pi-included-files" id="pi-cfg-files">${filesBlock}</div></div>
           <div>
             <label class="pi-form-label">Generation Type <span style="color:#ef4444">*</span></label>
             <p class="pi-form-hint" style="margin-bottom:8px">Choose what to extract from the documents</p>
@@ -8711,7 +8712,6 @@ function piRenderConfigModal(coll) {
               <label class="pi-radio-option" id="pi-radio-summary" onclick="piSetDetailLevel('summary')"><input type="radio" name="pi-detail"><div><div class="pi-radio-title">Summary</div><div class="pi-radio-desc">Main sections only</div></div></label>
             </div>
           </div>
-          <div><label class="pi-form-label">Included Files</label><div class="pi-included-files" id="pi-cfg-files">${filesBlock}</div></div>
         </div>
         <div class="pi-modal-footer">
           <button class="pi-btn pi-btn-view" onclick="piCloseConfig()">Cancel</button>
