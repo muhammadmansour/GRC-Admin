@@ -7300,8 +7300,8 @@ function piRenderCollectionDetail(coll) {
   const pageIds = pageFiles.map(f => f.id);
   const allPageSelected = pageIds.length > 0 && pageIds.every(id => piSelectedFileIds.includes(id));
   const hasSelectedFiles = piSelectedFileIds.length > 0;
-  const genLabel = hasSelectedFiles ? `Generate (${piSelectedFileIds.length} selected)` : 'Generate (all files)';
-  const genDisabled = totalFiles === 0;
+  const genLabel = hasSelectedFiles ? `Generate (${piSelectedFileIds.length} selected)` : 'Generate';
+  const genDisabled = totalFiles === 0 || !hasSelectedFiles;
 
   // ── Files Tab Content ──
   let filesHtml = '';
@@ -7464,7 +7464,7 @@ function piRenderCollectionDetail(coll) {
         <div class="pi-detail-actions pi-detail-upload-actions">
           <button type="button" class="pi-btn pi-btn-view" onclick="piTriggerUpload()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M12 8V11C12 11.6 11.6 12 11 12H3C2.4 12 2 11.6 2 11V8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M9.5 4L7 1.5L4.5 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 1.5V8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg> Upload Files</button>
           <button type="button" class="pi-btn pi-btn-view" onclick="piTriggerFolderUpload()" title="Upload all supported files from a folder (including subfolders)"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4.5h3l1.2-1.5h5.8a1 1 0 011 1V11a1 1 0 01-1 1H2a1 1 0 01-1-1V5.5a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 6.5h10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".35"/></svg> Upload folder</button>
-          <button class="btn-admin-primary" onclick="piGenerateFromDetail()" ${genDisabled ? 'disabled' : ''} title="${genDisabled ? 'Upload files first' : (!hasSelectedFiles ? 'All files in this collection will be used' : '')}"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L8.5 4L12 4.5L9.5 7L10 10.5L7 9L4 10.5L4.5 7L2 4.5L5.5 4L7 1Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/></svg> ${genLabel}</button>
+          <button class="btn-admin-primary" onclick="piGenerateFromDetail()" ${genDisabled ? 'disabled' : ''} title="${totalFiles === 0 ? 'Upload files first' : (!hasSelectedFiles ? 'Select at least one file to generate' : '')}"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L8.5 4L12 4.5L9.5 7L10 10.5L7 9L4 10.5L4.5 7L2 4.5L5.5 4L7 1Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/></svg> ${genLabel}</button>
         </div>
       </div>
       <div id="pi-upload-progress-container"></div>
@@ -8625,6 +8625,8 @@ function piCfgRefreshFilesSection() {
   const container = document.getElementById('pi-cfg-files');
   const coll = piCfgCurrentColl();
   if (container && coll) container.innerHTML = piRenderCfgFilesSection(coll);
+  const startBtn = document.getElementById('pi-cfg-start-btn');
+  if (startBtn) startBtn.disabled = piCfgFileIds.length === 0;
 }
 
 function piCfgToggleFile(fileId) {
@@ -8715,7 +8717,7 @@ function piRenderConfigModal(coll) {
         </div>
         <div class="pi-modal-footer">
           <button class="pi-btn pi-btn-view" onclick="piCloseConfig()">Cancel</button>
-          <button class="btn-admin-primary" onclick="piStartGenerate()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L8.5 4L12 4.5L9.5 7L10 10.5L7 9L4 10.5L4.5 7L2 4.5L5.5 4L7 1Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/></svg> Start Generation</button>
+          <button class="btn-admin-primary" id="pi-cfg-start-btn" onclick="piStartGenerate()" ${piCfgFileIds.length === 0 ? 'disabled' : ''}><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L8.5 4L12 4.5L9.5 7L10 10.5L7 9L4 10.5L4.5 7L2 4.5L5.5 4L7 1Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/></svg> Start Generation</button>
         </div>
       </div>
     </div>`;
