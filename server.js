@@ -8074,31 +8074,9 @@ Return a JSON array where each element has "article", "title", and "text" fields
         }
       }
 
-      // Create Gemini cached content to store the session context on Gemini's servers
-      let cachedContentName = null;
-      try {
-        const cache = await genai.caches.create({
-          model: 'gemini-2.5-pro',
-          config: {
-            contents: [{
-              role: 'user',
-              parts: [{ text: `Session ${sessionId} initialized. Awaiting first query.` }]
-            }, {
-              role: 'model',
-              parts: [{ text: 'Session ready. I have loaded all the audit context and I am ready to analyze your requirements.' }]
-            }],
-            displayName: `wathbah-audit-${sessionId}`,
-            systemInstruction: systemPrompt,
-            ttl: '3600s' // 1 hour TTL
-          }
-        });
-        cachedContentName = cache.name;
-        console.log(`Gemini cache created: ${cachedContentName}`);
-      } catch (cacheErr) {
-        console.warn(`Cache creation failed (will use direct system instruction): ${cacheErr.message}`);
-      }
-
-      // Build File Search grounding tool from selected collections
+      // Build File Search grounding tool from selected collections (must be known BEFORE
+      // cache creation: Gemini forbids passing tools on a request that uses cachedContent,
+      // so any tools must be baked into the cache itself).
       const fileSearchStoreNames = [];
       if (context && context.collections && context.collections.length > 0) {
         context.collections.forEach(c => {
@@ -8119,8 +8097,42 @@ Return a JSON array where each element has "article", "title", and "text" fields
           }
         });
       }
+      const fileSearchTools = fileSearchStoreNames.length > 0
+        ? [{ fileSearch: { fileSearchStoreNames } }]
+        : null;
+      if (fileSearchTools) {
+        console.log(`[Audit Chat] File Search Stores attached:`, fileSearchStoreNames);
+      }
 
-      // Create SDK chat session — with cached content if available, otherwise system instruction
+      // Create Gemini cached content to store the session context (system prompt + tools)
+      // on Gemini's servers. Tools are baked in here so the chat request can reference the
+      // cache alone without re-sending systemInstruction/tools (which Gemini rejects).
+      let cachedContentName = null;
+      try {
+        const cache = await genai.caches.create({
+          model: 'gemini-2.5-pro',
+          config: {
+            contents: [{
+              role: 'user',
+              parts: [{ text: `Session ${sessionId} initialized. Awaiting first query.` }]
+            }, {
+              role: 'model',
+              parts: [{ text: 'Session ready. I have loaded all the audit context and I am ready to analyze your requirements.' }]
+            }],
+            displayName: `wathbah-audit-${sessionId}`,
+            systemInstruction: systemPrompt,
+            ...(fileSearchTools ? { tools: fileSearchTools } : {}),
+            ttl: '3600s' // 1 hour TTL
+          }
+        });
+        cachedContentName = cache.name;
+        console.log(`Gemini cache created: ${cachedContentName}`);
+      } catch (cacheErr) {
+        console.warn(`Cache creation failed (will use direct system instruction): ${cacheErr.message}`);
+      }
+
+      // Create SDK chat session. When a cache exists it already carries the system prompt
+      // AND tools, so we pass ONLY cachedContent. Otherwise fall back to sending them inline.
       const chatConfig = {
         temperature: 0.7,
         maxOutputTokens: 8192
@@ -8130,12 +8142,7 @@ Return a JSON array where each element has "article", "title", and "text" fields
         chatConfig.cachedContent = cachedContentName;
       } else {
         chatConfig.systemInstruction = systemPrompt;
-      }
-
-      // Add File Search grounding if collections were selected
-      if (fileSearchStoreNames.length > 0) {
-        chatConfig.tools = [{ fileSearch: { fileSearchStoreNames } }];
-        console.log(`[Audit Chat] File Search Stores attached:`, fileSearchStoreNames);
+        if (fileSearchTools) chatConfig.tools = fileSearchTools;
       }
 
       const createdAt = new Date().toISOString();

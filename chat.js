@@ -341,6 +341,28 @@ function removeTypingIndicator() {
   if (el) el.remove();
 }
 
+function addSessionSetupIndicator(text = 'Setting up your audit session…') {
+  if (document.getElementById('session-setup-indicator')) return;
+  const el = document.createElement('div');
+  el.className = 'chat-msg chat-msg-ai';
+  el.id = 'session-setup-indicator';
+  el.innerHTML = `
+    <div class="chat-bubble chat-bubble-ai typing">
+      <div class="session-setup-status">
+        <div class="typing-dots"><span></span><span></span><span></span></div>
+        <span class="session-setup-text">${escapeHtml(text)}</span>
+      </div>
+    </div>
+  `;
+  chatMessages.appendChild(el);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function removeSessionSetupIndicator() {
+  const el = document.getElementById('session-setup-indicator');
+  if (el) el.remove();
+}
+
 // ==========================================
 // Send Message
 // ==========================================
@@ -436,7 +458,9 @@ async function resumeSession(sessionId) {
 // ==========================================
 
 async function initSession() {
-  // Step 1: Create a new chat session on the server (gets UUID + Gemini cache)
+  // Step 1: Create a new chat session on the server (gets UUID + Gemini cache).
+  // This can take a few seconds (cache creation), so show a setup indicator meanwhile.
+  addSessionSetupIndicator();
   try {
     const createRes = await fetch(SESSION_API_URL, {
       method: 'POST',
@@ -470,9 +494,12 @@ async function initSession() {
     }
   } catch (e) {
     console.error('Session creation failed:', e);
+    removeSessionSetupIndicator();
     addMessage('ai', `⚠️ Could not create audit session: ${e.message}`);
     return;
   }
+
+  removeSessionSetupIndicator();
 
   // Step 2: Send the first message
   const reqCount = sessionContext.requirements.length;

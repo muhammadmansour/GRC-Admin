@@ -2951,6 +2951,17 @@ body.chat-page .navbar {
   30% { transform: translateY(-6px); opacity: 1; }
 }
 
+.session-setup-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.session-setup-text {
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+
 /* Chat Input Bar */
 .chat-input-bar {
   flex-shrink: 0;
