@@ -1,4 +1,4 @@
-const API_URL = 'https://muraji-api.wathbahs.com/api/libraries';
+const API_URL = 'https://muraji-api.wathbah.dev/api/libraries';
 const ANALYZE_API_URL = '/api/analyze';
 
 // DOM Elements
@@ -1222,7 +1222,7 @@ async function confirmAnalysis() {
     // Send updates to each library
     const results = await Promise.all(
       Object.entries(updatesByLibrary).map(async ([libraryId, updates]) => {
-        const apiUrl = `https://muraji-api.wathbahs.com/api/libraries/${libraryId}/controls`;
+        const apiUrl = `https://muraji-api.wathbah.dev/api/libraries/${libraryId}/controls`;
         const body = { updates };
         
         console.log('Sending to API:', apiUrl, body);
