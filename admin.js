@@ -790,11 +790,11 @@ if (sessionsSearch) {
 }
 
 function goToSession(id) {
-  // Find session and set context in sessionStorage, then redirect to chat page
+  // Resume the existing chat by passing its id via the ?session= param the chat page reads
   const s = sessions.find(x => (x.sessionId || x.id) === id);
   if (s) {
-    sessionStorage.setItem('chatSessionId', s.sessionId || s.id);
-    window.location.href = 'chat.html';
+    const sid = s.sessionId || s.id;
+    window.location.href = `chat.html?session=${encodeURIComponent(sid)}`;
   }
 }
 window.goToSession = goToSession;
