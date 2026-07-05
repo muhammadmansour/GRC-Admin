@@ -38,7 +38,7 @@ loadEnv();
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // GRC Platform configuration
-const GRC_API_URL = (process.env.GRC_API_URL || 'https://pp-grc.wathbah.dev').replace(/\/+$/, '');
+const GRC_API_URL = (process.env.GRC_API_URL || 'https://grc.wathbah.dev').replace(/\/+$/, '');
 
 /** GCS bucket for legislative internal documents (override with GCS_LEGISLATIVE_BUCKET). Uses GOOGLE_APPLICATION_CREDENTIALS or default credentials. */
 const GCS_LEGISLATIVE_BUCKET_NAME = String(
