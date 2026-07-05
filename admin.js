@@ -3406,7 +3406,6 @@ if (orgSearch) {
 
 const PROMPTS_API_URL = 'https://muraji-api.wathbah.dev/api/prompts';
 const LOCAL_PROMPTS_URL = '/api/local-prompts';
-const PROMPTS_HIDDEN_IDS = ['64d28cc6-e8c2-4de1-8842-e1f9c65e9173'];
 
 let adminLocalPrompts = [];
 let adminApiPrompts = [];
@@ -3471,7 +3470,6 @@ async function fetchApiPrompts() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     adminApiPrompts = Array.isArray(d) ? d : (d.data || d.prompts || []);
-    adminApiPrompts = adminApiPrompts.filter(p => !PROMPTS_HIDDEN_IDS.includes(p._id || p.id));
   } catch (e) { console.error('Muraji prompts error:', e); adminApiPrompts = []; }
 }
 

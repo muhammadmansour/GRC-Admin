@@ -33,7 +33,6 @@ let localPrompts = [];
 let editingPromptId = null;
 let editingSource = null;
 let activeTab = 'local';
-const HIDDEN_IDS = ['64d28cc6-e8c2-4de1-8842-e1f9c65e9173'];
 
 function promptMatchesQuery(p, q) {
   const hay = [p.name, p.key, p.description, p.content].filter(Boolean).join(' ').toLowerCase();
@@ -86,7 +85,6 @@ async function fetchApi() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     allPrompts = Array.isArray(d) ? d : (d.data || d.prompts || []);
-    allPrompts = allPrompts.filter(p => !HIDDEN_IDS.includes(p._id || p.id));
   } catch (e) { console.error('Muraji prompts error:', e); allPrompts = []; }
 }
 

@@ -157,7 +157,7 @@ function renderContextBar() {
   // Query summary — show full text, not truncated
   const querySummary = document.getElementById('ctx-query-summary');
   if (querySummary) {
-    querySummary.textContent = sessionContext.query || 'No query';
+    querySummary.textContent = sessionContext.query || 'None set';
     if (sessionContext.query) {
       querySummary.title = sessionContext.query; // full text on hover
     }
@@ -435,6 +435,40 @@ async function resumeSession(sessionId) {
 // Session Creation & Initial Message
 // ==========================================
 
+/** True when the Audit Studio query is a real audit question, not a greeting or filler. */
+function isSubstantiveAuditQuery(text) {
+  const t = (text || '').trim();
+  if (!t) return false;
+  if (t.length >= 20) return true;
+  const normalized = t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').trim();
+  if (/^(hi|hello|hey|thanks|thank you|ok|okay|yes|no|test|yo|salam|marhaba|مرحبا|السلام|اهلا|أهلا)(?:\s+\1)*$/.test(normalized)) {
+    return false;
+  }
+  const auditHints = /\b(audit|analy|assess|comply|compliance|gap|evidence|requirement|control|review|implement|policy|framework|قياس|تدقيق|تحليل|امتثال|فجوة|دليل)\b/i;
+  return auditHints.test(t);
+}
+
+function buildAuditSessionWelcome() {
+  const reqs = sessionContext.requirements || [];
+  const fw = reqs[0]?.frameworkName;
+  const reqLabel = reqs.length === 1
+    ? `**${reqs[0].refId || '1 requirement'}**${reqs[0].description || reqs[0].name ? ' — ' + (reqs[0].description || reqs[0].name) : ''}`
+    : `**${reqs.length} requirements**${fw ? ` from *${fw}*` : ''}`;
+
+  let msg = `Your audit session is ready with ${reqLabel}.\n\n`;
+  if (sessionContext.query && !isSubstantiveAuditQuery(sessionContext.query)) {
+    msg += `The note you entered ("${sessionContext.query}") is saved in **Query Context**, but it is not an audit question on its own.\n\n`;
+  } else if (!sessionContext.query) {
+    msg += `No audit focus was entered in Audit Studio — tell me what you want analyzed below.\n\n`;
+  }
+  msg += 'Examples:\n';
+  msg += '- "What evidence should we have for requirement P1?"\n';
+  msg += '- "Gap analysis for the selected requirements"\n';
+  msg += '- "Draft assessment questions for compliance review"\n\n';
+  msg += 'What would you like me to analyze?';
+  return msg;
+}
+
 async function initSession() {
   // Step 1: Create a new chat session on the server (gets UUID + Gemini cache)
   try {
@@ -479,28 +513,30 @@ async function initSession() {
   const fileCount = sessionContext.fileResources.length;
   const collCount = sessionContext.collections.length;
 
-  if (sessionContext.query || reqCount > 0) {
-    let initialMessage = '';
+  if (reqCount > 0) {
+    const query = (sessionContext.query || '').trim();
+    const substantiveQuery = isSubstantiveAuditQuery(query);
 
-    if (sessionContext.query) {
-      initialMessage = sessionContext.query;
+    // Trivial query (e.g. "hello") — wait for a real audit question; do not auto-run analysis
+    if (query && !substantiveQuery) {
+      addMessage('ai', buildAuditSessionWelcome());
+      return;
     }
 
-    // Auto-generate a message if no query was typed
-    const contextParts = [];
-    if (reqCount > 0) contextParts.push(`${reqCount} framework requirements`);
-    if (fileCount > 0) contextParts.push(`${fileCount} reference files`);
-    if (collCount > 0) contextParts.push(`${collCount} document collections`);
-
-    if (!initialMessage && contextParts.length > 0) {
+    let initialMessage = '';
+    if (substantiveQuery) {
+      initialMessage = query;
+    } else {
+      const contextParts = [];
+      if (reqCount > 0) contextParts.push(`${reqCount} framework requirement${reqCount !== 1 ? 's' : ''}`);
+      if (fileCount > 0) contextParts.push(`${fileCount} reference file${fileCount !== 1 ? 's' : ''}`);
+      if (collCount > 0) contextParts.push(`${collCount} document collection${collCount !== 1 ? 's' : ''}`);
       initialMessage = `Analyze the selected ${contextParts.join(', ')} and provide your initial audit assessment.`;
     }
 
-    // Show user message
-    addMessage('user', sessionContext.query || initialMessage);
+    addMessage('user', substantiveQuery ? query : initialMessage);
     addTypingIndicator();
 
-    // Send to Gemini via the chat session
     try {
       const res = await fetch(CHAT_API_URL, {
         method: 'POST',

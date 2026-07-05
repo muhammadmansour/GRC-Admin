@@ -2495,6 +2495,11 @@ dbInsertLocalPrompt.run(
   now
 );
 
+// Force-update to latest prompt template (in case DB had older version)
+if (chatPromptFileContent) {
+  dbUpdateLocalPrompt.run('Chat Auditor (Start Audit Session)', chatPromptFileContent, now, CHAT_AUDITOR_PROMPT_ID);
+}
+
 // Seed the controls-generator prompt into the DB — always update to latest template
 const CONTROLS_GENERATOR_PROMPT_ID = 'local-controls-generator';
 dbInsertLocalPrompt.run(
@@ -2574,6 +2579,17 @@ function getRefControlsExtractorPrompt() {
 function getChatAuditorPrompt() {
   const row = dbGetLocalPromptByKey.get('chat_auditor');
   return row ? row.content : (chatPromptFileContent || 'You are an expert compliance and governance auditor for the Wathbah Auditor platform.');
+}
+
+function isSubstantiveAuditQuery(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (t.length >= 20) return true;
+  const normalized = t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').trim();
+  if (/^(hi|hello|hey|thanks|thank you|ok|okay|yes|no|test|yo|salam|marhaba|مرحبا|السلام|اهلا|أهلا)(?:\s+\1)*$/.test(normalized)) {
+    return false;
+  }
+  return /\b(audit|analy|assess|comply|compliance|gap|evidence|requirement|control|review|implement|policy|framework|قياس|تدقيق|تحليل|امتثال|فجوة|دليل)\b/i.test(t);
 }
 
 // Helper: get the current controls generator prompt from DB (always use DB as source of truth)
@@ -8062,10 +8078,14 @@ Return a JSON array where each element has "article", "title", and "text" fields
           });
         }
 
-        // Inject user query context
+        // Inject user query context (only steer analysis when it is a real audit question)
         if (context.query) {
-          systemPrompt += `\n---\n## SESSION CONTEXT: User's Initial Query\n"${context.query}"\n`;
-          systemPrompt += `\nAddress this query directly in your first response. Tailor all analysis to this specific focus area.\n`;
+          systemPrompt += `\n---\n## SESSION CONTEXT: User's Audit Focus\n"${context.query}"\n`;
+          if (isSubstantiveAuditQuery(context.query)) {
+            systemPrompt += `\nAddress this focus directly when the user requests analysis. Tailor evidence, questions, and recommendations to it.\n`;
+          } else {
+            systemPrompt += `\nThis is a short note or greeting, not an audit question. Do not run a full analysis until the user asks a substantive audit question in chat.\n`;
+          }
         }
       }
 
