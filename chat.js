@@ -435,40 +435,6 @@ async function resumeSession(sessionId) {
 // Session Creation & Initial Message
 // ==========================================
 
-/** True when the Audit Studio query is a real audit question, not a greeting or filler. */
-function isSubstantiveAuditQuery(text) {
-  const t = (text || '').trim();
-  if (!t) return false;
-  if (t.length >= 20) return true;
-  const normalized = t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').trim();
-  if (/^(hi|hello|hey|thanks|thank you|ok|okay|yes|no|test|yo|salam|marhaba|مرحبا|السلام|اهلا|أهلا)(?:\s+\1)*$/.test(normalized)) {
-    return false;
-  }
-  const auditHints = /\b(audit|analy|assess|comply|compliance|gap|evidence|requirement|control|review|implement|policy|framework|قياس|تدقيق|تحليل|امتثال|فجوة|دليل)\b/i;
-  return auditHints.test(t);
-}
-
-function buildAuditSessionWelcome() {
-  const reqs = sessionContext.requirements || [];
-  const fw = reqs[0]?.frameworkName;
-  const reqLabel = reqs.length === 1
-    ? `**${reqs[0].refId || '1 requirement'}**${reqs[0].description || reqs[0].name ? ' — ' + (reqs[0].description || reqs[0].name) : ''}`
-    : `**${reqs.length} requirements**${fw ? ` from *${fw}*` : ''}`;
-
-  let msg = `Your audit session is ready with ${reqLabel}.\n\n`;
-  if (sessionContext.query && !isSubstantiveAuditQuery(sessionContext.query)) {
-    msg += `The note you entered ("${sessionContext.query}") is saved in **Query Context**, but it is not an audit question on its own.\n\n`;
-  } else if (!sessionContext.query) {
-    msg += `No audit focus was entered in Audit Studio — tell me what you want analyzed below.\n\n`;
-  }
-  msg += 'Examples:\n';
-  msg += '- "What evidence should we have for requirement P1?"\n';
-  msg += '- "Gap analysis for the selected requirements"\n';
-  msg += '- "Draft assessment questions for compliance review"\n\n';
-  msg += 'What would you like me to analyze?';
-  return msg;
-}
-
 async function initSession() {
   // Step 1: Create a new chat session on the server (gets UUID + Gemini cache)
   try {
@@ -512,29 +478,26 @@ async function initSession() {
   const reqCount = sessionContext.requirements.length;
   const fileCount = sessionContext.fileResources.length;
   const collCount = sessionContext.collections.length;
+  const query = (sessionContext.query || '').trim();
 
-  if (reqCount > 0) {
-    const query = (sessionContext.query || '').trim();
-    const substantiveQuery = isSubstantiveAuditQuery(query);
-
-    // Trivial query (e.g. "hello") — wait for a real audit question; do not auto-run analysis
-    if (query && !substantiveQuery) {
-      addMessage('ai', buildAuditSessionWelcome());
-      return;
-    }
-
+  if (reqCount > 0 || query) {
     let initialMessage = '';
-    if (substantiveQuery) {
+    let displayMessage = '';
+
+    if (query) {
+      // Always send the user's audit-focus text; Mode A/B in chat-auditor.txt handles greetings vs real questions
       initialMessage = query;
+      displayMessage = query;
     } else {
       const contextParts = [];
       if (reqCount > 0) contextParts.push(`${reqCount} framework requirement${reqCount !== 1 ? 's' : ''}`);
       if (fileCount > 0) contextParts.push(`${fileCount} reference file${fileCount !== 1 ? 's' : ''}`);
       if (collCount > 0) contextParts.push(`${collCount} document collection${collCount !== 1 ? 's' : ''}`);
       initialMessage = `Analyze the selected ${contextParts.join(', ')} and provide your initial audit assessment.`;
+      displayMessage = initialMessage;
     }
 
-    addMessage('user', substantiveQuery ? query : initialMessage);
+    addMessage('user', displayMessage);
     addTypingIndicator();
 
     try {

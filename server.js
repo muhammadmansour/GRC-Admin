@@ -2581,17 +2581,6 @@ function getChatAuditorPrompt() {
   return row ? row.content : (chatPromptFileContent || 'You are an expert compliance and governance auditor for the Wathbah Auditor platform.');
 }
 
-function isSubstantiveAuditQuery(text) {
-  const t = String(text || '').trim();
-  if (!t) return false;
-  if (t.length >= 20) return true;
-  const normalized = t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').trim();
-  if (/^(hi|hello|hey|thanks|thank you|ok|okay|yes|no|test|yo|salam|marhaba|مرحبا|السلام|اهلا|أهلا)(?:\s+\1)*$/.test(normalized)) {
-    return false;
-  }
-  return /\b(audit|analy|assess|comply|compliance|gap|evidence|requirement|control|review|implement|policy|framework|قياس|تدقيق|تحليل|امتثال|فجوة|دليل)\b/i.test(t);
-}
-
 // Helper: get the current controls generator prompt from DB (always use DB as source of truth)
 function getControlsGeneratorPrompt() {
   const row = dbGetLocalPromptByKey.get('controls_generator');
@@ -8078,14 +8067,10 @@ Return a JSON array where each element has "article", "title", and "text" fields
           });
         }
 
-        // Inject user query context (only steer analysis when it is a real audit question)
+        // Inject user query context
         if (context.query) {
-          systemPrompt += `\n---\n## SESSION CONTEXT: User's Audit Focus\n"${context.query}"\n`;
-          if (isSubstantiveAuditQuery(context.query)) {
-            systemPrompt += `\nAddress this focus directly when the user requests analysis. Tailor evidence, questions, and recommendations to it.\n`;
-          } else {
-            systemPrompt += `\nThis is a short note or greeting, not an audit question. Do not run a full analysis until the user asks a substantive audit question in chat.\n`;
-          }
+          systemPrompt += `\n---\n## SESSION CONTEXT: User's Audit Focus (first chat message)\n"${context.query}"\n`;
+          systemPrompt += `\nThis text is sent as the opening user message. Use Mode A for greetings; use Mode B when it is a substantive audit question.\n`;
         }
       }
 
