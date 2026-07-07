@@ -1,0 +1,10 @@
+# Qodo Code Review — GRC-Admin
+# Jira: https://wathbah-ai.atlassian.net (project KAN)
+# Docs: https://docs.qodo.ai/code-review/integrations/ticketing-integrations
+
+[jira]
+jira_base_url = "https://wathbah-ai.atlassian.net"
+
+[pr_reviewer]
+# Review PR changes against linked Jira tickets (e.g. LU-A3, KAN-*)
+require_ticket_analysis_review = true
