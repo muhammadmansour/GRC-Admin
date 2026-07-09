@@ -9706,10 +9706,13 @@ const LU_ICON_DOC =
   '<svg class="lu-doc-svg" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M14 2v6h6M8 13h8M8 17h5M8 9h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
 const LU_ICON_REPORT =
   '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M8 17V11M12 17V7M16 17v-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const LU_ICON_RERUN =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M20 4v5h-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const LU_ICON_EDIT =
   '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8.84058 2.85709L13.1432 7.15979L4.45285 15.8501H0.150146V11.5474L8.84058 2.85709Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M11.25 1.75L14.25 4.75" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
 const LU_ICON_TRASH =
   '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 4.5h9M6.5 4.5V3.5a1.5 1.5 0 0 1 1.5-1.5h0a1.5 1.5 0 0 1 1.5 1.5v1M12.5 4.5v8.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1V4.5M6.5 7v4M9.5 7v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const luRerunInFlight = new Set();
 
 function luBuildDocPreviewCell(href, fileName) {
   if (!href)
@@ -9871,6 +9874,96 @@ async function findPipelineRunForLuSource(sourceRow) {
   return null;
 }
 
+function luFileStem(name) {
+  return String(name || '')
+    .trim()
+    .replace(/\.[^.]+$/, '')
+    .toLowerCase();
+}
+
+function luBuildRegulationTextFromArticles(articles) {
+  if (!Array.isArray(articles)) return '';
+  return articles
+    .map((a, idx) => {
+      if (!a || typeof a !== 'object') return '';
+      const article = String(a.article || `Article ${idx + 1}`).trim();
+      const title = String(a.title || '').trim();
+      const text = String(a.text || '').trim();
+      if (!text) return '';
+      return `${article}${title ? ' — ' + title : ''}\n${text}`;
+    })
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+async function luRerunPipelineForSource(sourceId) {
+  const id = String(sourceId || '').trim();
+  if (!id) return;
+  const row = luInternalSourcesCache.find((s) => String(s.id) === id);
+  if (!row) {
+    toast('error', 'Source not found', 'Reload the page and try again.');
+    return;
+  }
+  if (luRerunInFlight.has(id)) {
+    toast('info', 'Already running', 'A pipeline run is already in progress for this source.');
+    return;
+  }
+
+  const rerunButtons = Array.from(document.querySelectorAll('[data-lu-rerun]'))
+    .filter((btn) => String(btn.getAttribute('data-lu-rerun')) === id);
+  luRerunInFlight.add(id);
+  rerunButtons.forEach((btn) => {
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+  });
+
+  try {
+    const extractedRes = await fetch('/api/ai-tools/extracted-regulations');
+    const extractedJson = await extractedRes.json().catch(() => ({}));
+    if (!extractedRes.ok) {
+      throw new Error(extractedJson.error || extractedRes.statusText || 'Could not load extracted regulations.');
+    }
+    const records = Array.isArray(extractedJson.data) ? extractedJson.data : [];
+    const fileName = String(row.original_file_name || '').trim();
+    const fileNameLower = fileName.toLowerCase();
+    const stem = luFileStem(fileName);
+    const match = records.find((rec) => {
+      const recFile = String(rec && rec.sourceFile ? rec.sourceFile : '').trim();
+      if (!recFile) return false;
+      const recLower = recFile.toLowerCase();
+      return recLower === fileNameLower || luFileStem(recLower) === stem;
+    });
+
+    if (!match || !Array.isArray(match.articles) || !match.articles.length) {
+      toast(
+        'info',
+        'No extracted regulation found',
+        'Extract the document first, then re-run the pipeline.'
+      );
+      return;
+    }
+
+    const regulationText = luBuildRegulationTextFromArticles(match.articles);
+    if (!regulationText) {
+      toast('error', 'No usable text', 'Extracted regulation has no article text to run.');
+      return;
+    }
+
+    const sourceLabel = fileName || String(row.name || 'Internal source');
+    toast('info', 'Pipeline started', `Re-running pipeline for "${sourceLabel}" in the background.`);
+    await runPipelineInBackground(regulationText, sourceLabel);
+  } catch (e) {
+    toast('error', 'Re-run failed', e.message || String(e));
+  } finally {
+    luRerunInFlight.delete(id);
+    rerunButtons.forEach((btn) => {
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+    });
+  }
+}
+
 async function openLuPipelineSummaryReport(sourceId) {
   const row = luInternalSourcesCache.find((s) => String(s.id) === String(sourceId));
   if (!row) {
@@ -9946,6 +10039,11 @@ function initLegislativeInternalPageListeners() {
       const reportBtn = e.target.closest('[data-lu-report]');
       if (reportBtn) {
         openLuPipelineSummaryReport(reportBtn.getAttribute('data-lu-report'));
+        return;
+      }
+      const rerunBtn = e.target.closest('[data-lu-rerun]');
+      if (rerunBtn) {
+        luRerunPipelineForSource(rerunBtn.getAttribute('data-lu-rerun'));
       }
     });
   }
@@ -10262,6 +10360,7 @@ async function loadLegislativeInternalSourcesList() {
         <td class="lu-col-actions"><div class="lu-row-actions">
           <button type="button" class="lu-icon-btn" data-lu-edit="${sid}" aria-label="Edit source">${LU_ICON_EDIT}</button>
           <button type="button" class="lu-icon-btn lu-icon-btn--danger" data-lu-delete="${sid}" aria-label="Delete source">${LU_ICON_TRASH}</button>
+          <button type="button" class="lu-icon-btn" data-lu-rerun="${sid}" aria-label="Re-run pipeline" title="Re-run pipeline">${LU_ICON_RERUN}</button>
           <button type="button" class="lu-icon-btn lu-icon-btn--report" data-lu-report="${sid}" aria-label="View relevance report" title="Relevance report">${LU_ICON_REPORT}</button>
           ${luBuildDocPreviewCell(href, fname)}
         </div></td>
