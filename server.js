@@ -83,6 +83,11 @@ function legislativePublicUrl(bucketName, objectPath) {
   return `https://storage.googleapis.com/${bucketName}/${enc}`;
 }
 
+/** Stable app URL for internal legislative documents (auth + fresh GCS redirect on each hit). */
+function legislativeInternalDownloadPath(id) {
+  return `/api/legislative-updates/internal-sources/${encodeURIComponent(String(id))}/download`;
+}
+
 async function legislativeSignedDownloadUrl(storage, bucketName, objectPath, mimeType) {
   const opts = {
     version: 'v4',
@@ -6030,34 +6035,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const rows = dbListLegislativeInternal.all();
-      const gcs = getLegislativeGcsClient();
-      const sources = [];
-      for (const row of rows) {
-        let download_url = row.public_url;
-        if (gcs.ok) {
-          try {
-            download_url = await legislativeSignedDownloadUrl(
-              gcs.storage,
-              row.gcs_bucket,
-              row.gcs_object_path,
-              row.mime_type
-            );
-          } catch (sigErr) {
-            console.warn('[Legislative] signed URL:', sigErr.message);
-          }
-        }
-        sources.push({
-          id: row.id,
-          name: row.name,
-          description: row.description,
-          original_file_name: row.original_file_name,
-          mime_type: row.mime_type,
-          size: row.size,
-          uploaded_by: row.uploaded_by,
-          created_at: row.created_at,
-          download_url,
-        });
-      }
+      const sources = rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        original_file_name: row.original_file_name,
+        mime_type: row.mime_type,
+        size: row.size,
+        uploaded_by: row.uploaded_by,
+        created_at: row.created_at,
+        download_url: legislativeInternalDownloadPath(row.id),
+      }));
       sendJSON(res, 200, { success: true, sources });
     } catch (err) {
       console.error('[Legislative] list:', err);
@@ -6151,16 +6139,6 @@ const server = http.createServer(async (req, res) => {
         throw dbErr;
       }
 
-      let download_url = publicUrl;
-      try {
-        download_url = await legislativeSignedDownloadUrl(
-          gcs.storage,
-          bucketName,
-          objectPath,
-          mimeType || 'application/octet-stream'
-        );
-      } catch (_) { /* keep publicUrl */ }
-
       sendJSON(res, 201, {
         success: true,
         source: {
@@ -6172,12 +6150,51 @@ const server = http.createServer(async (req, res) => {
           size: meta.size,
           uploaded_by: meta.uploaded_by,
           created_at: meta.created_at,
-          download_url,
+          download_url: legislativeInternalDownloadPath(meta.id),
         },
       });
     } catch (err) {
       console.error('[Legislative] upload:', err);
       sendJSON(res, 500, { error: err.message || 'Upload failed.' });
+    }
+    return;
+  }
+
+  const luInternalDownloadMatch = url.pathname.match(
+    /^\/api\/legislative-updates\/internal-sources\/([^/]+)\/download$/
+  );
+  if (luInternalDownloadMatch && req.method === 'GET') {
+    const id = luInternalDownloadMatch[1];
+    try {
+      const session = reqToken ? authSessions.get(reqToken) : null;
+      if (!session) {
+        sendJSON(res, 401, { error: 'Unauthorized.' });
+        return;
+      }
+      const row = dbGetLegislativeInternal.get(id);
+      if (!row) {
+        sendJSON(res, 404, { error: 'Source not found.' });
+        return;
+      }
+      const gcs = getLegislativeGcsClient();
+      if (!gcs.ok) {
+        sendJSON(res, 503, {
+          error: gcs.error,
+          hint: 'Install @google-cloud/storage and set GOOGLE_APPLICATION_CREDENTIALS (or run on GCP with a service account that can sign URLs and read from the bucket).',
+        });
+        return;
+      }
+      const signedUrl = await legislativeSignedDownloadUrl(
+        gcs.storage,
+        row.gcs_bucket,
+        row.gcs_object_path,
+        row.mime_type
+      );
+      res.writeHead(302, { Location: signedUrl });
+      res.end();
+    } catch (err) {
+      console.error('[Legislative] download:', err);
+      sendJSON(res, 500, { error: err.message || 'Failed to download source.' });
     }
     return;
   }
@@ -6222,20 +6239,6 @@ const server = http.createServer(async (req, res) => {
       }
       dbUpdateLegislativeInternalMeta.run(name, description, id);
       const updated = dbGetLegislativeInternal.get(id);
-      let download_url = updated.public_url;
-      const gcs = getLegislativeGcsClient();
-      if (gcs.ok) {
-        try {
-          download_url = await legislativeSignedDownloadUrl(
-            gcs.storage,
-            updated.gcs_bucket,
-            updated.gcs_object_path,
-            updated.mime_type
-          );
-        } catch (sigErr) {
-          console.warn('[Legislative] signed URL (patch):', sigErr.message);
-        }
-      }
       sendJSON(res, 200, {
         success: true,
         source: {
@@ -6247,7 +6250,7 @@ const server = http.createServer(async (req, res) => {
           size: updated.size,
           uploaded_by: updated.uploaded_by,
           created_at: updated.created_at,
-          download_url,
+          download_url: legislativeInternalDownloadPath(updated.id),
         },
       });
     } catch (err) {
@@ -10462,6 +10465,7 @@ server.listen(PORT, () => {
 ║   • POST /api/analyze             - Analyze requirements  ║
 ║   • POST /api/ai-tools/policy-update-pipeline - F1–F4     ║
 ║   • GET/POST/PATCH/DELETE /api/legislative-updates/internal-sources ║
+║   • GET  .../internal-sources/:id/download - Stable doc download    ║
 ║   • GET/POST/PATCH/DELETE /api/legislative-updates/extracted        ║
 ║   • GET  /api/legislative-updates/extracted/facets                  ║
 ║   • GET  /api/ai-tools/pipeline-legislative-updates       (list)    ║
