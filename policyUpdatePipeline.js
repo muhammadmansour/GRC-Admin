@@ -40,7 +40,46 @@ const DEFAULTS = {
    * Set to null in overrides to omit thinkingConfig (e.g. non-thinking models).
    */
   geminiThinkingBudget: 8192,
+  /**
+   * Hard ceiling on any single Gemini HTTP call. Without this, a single stalled
+   * request (network blip, unusually slow generation) hangs the `await` forever —
+   * on a large document's F4 stage (hundreds/thousands of sequential calls) this
+   * looks exactly like a "stuck pipeline" with no error and no way to recover
+   * short of killing and re-running the whole thing from scratch.
+   */
+  geminiRequestTimeoutMs: 45000,
+  /**
+   * F4 makes one Gemini call per (regulation point × matched policy) pair — for a
+   * large document this can be 1000+ calls. Running them fully sequentially is
+   * what makes large-document runs take tens of minutes; a small concurrency
+   * window cuts wall-clock time roughly proportionally without changing the
+   * total call count or overwhelming the API.
+   */
+  f4Concurrency: 4,
 };
+
+/** Aborts `fetch` after `timeoutMs` so one stalled Gemini call can't hang a whole pipeline run forever. */
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      throw new Error(`Gemini request timed out after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Splits `items` into chunks of `size` — used to run async work in bounded-concurrency batches. */
+function chunkArray(items, size) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
 
 function policyPipelineLogsEnabled() {
   const v = process.env.POLICY_PIPELINE_LOGS;
@@ -468,13 +507,15 @@ async function geminiGenerateContent(apiKey, modelId, userText, systemInstructio
     generationConfig: buildGc(),
   });
 
+  const timeoutMs = genExtras.geminiRequestTimeoutMs ?? DEFAULTS.geminiRequestTimeoutMs;
+
   async function post(withSystem) {
     const body = JSON.stringify(buildBody(withSystem));
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
-    });
+    }, timeoutMs);
     const txt = await res.text();
     return { res, txt };
   }
@@ -522,17 +563,17 @@ async function geminiJson(apiKey, modelId, systemPrompt, userText, maxTokens, te
   return parseJsonFromLlm(raw);
 }
 
-async function embedOne(apiKey, modelId, text) {
+async function embedOne(apiKey, modelId, text, timeoutMs) {
   const url = `${GEMINI_BASE}/models/${modelId}:embedContent?key=${encodeURIComponent(apiKey)}`;
   const body = {
     content: { parts: [{ text: String(text).slice(0, 20000) }] },
     taskType: 'SEMANTIC_SIMILARITY',
   };
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }, timeoutMs ?? DEFAULTS.geminiRequestTimeoutMs);
   const txt = await res.text();
   if (!res.ok) {
     throw new Error(`Gemini embedContent ${res.status}: ${txt.slice(0, 400)}`);
@@ -615,6 +656,7 @@ async function f1Relevance(apiKey, cfg, orgContext, regulationText) {
       ...attempts[i],
       pipelineStage: 'f1',
       _pupRunId: runId,
+      geminiRequestTimeoutMs: cfg.geminiRequestTimeoutMs,
     };
     policyPipelineLog({
       event: 'f1_attempt_start',
@@ -722,7 +764,7 @@ async function f2Summarize(apiKey, cfg, regulationText) {
   const allPoints = [];
   for (let i = 0; i < chunks.length; i++) {
     const user = `=== REGULATION TEXT (part ${i + 1}/${chunks.length}) ===\n${chunks[i]}`;
-    const f2Extras = {};
+    const f2Extras = { geminiRequestTimeoutMs: cfg.geminiRequestTimeoutMs };
     if (f2ThinkingBudget != null && typeof f2ThinkingBudget === 'number') {
       f2Extras.thinkingBudget = f2ThinkingBudget;
     }
@@ -750,44 +792,98 @@ async function f2Summarize(apiKey, cfg, regulationText) {
   return { policy_points: allPoints };
 }
 
+/** Placeholder impact used when a single F4 call fails/times out, so one bad pair can't sink the whole run. */
+function f4FailedImpact(match, errMessage) {
+  return {
+    policy_id: match.policy_id,
+    policy_title: match.policy_title,
+    similarity_score: match.similarity_score,
+    impact_summary: 'Impact analysis failed for this pair — retry or review manually.',
+    severity: 'none',
+    severity_reasoning: null,
+    requires_amendment: false,
+    amendments: [],
+    compliance_gap: null,
+    error: String(errMessage || 'unknown error').slice(0, 500),
+  };
+}
+
 async function f4Impact(apiKey, cfg, ragMatchesWithPoints) {
-  let callCount = 0;
-  for (const item of ragMatchesWithPoints) {
-    callCount += item.matches?.length || 0;
+  const tasks = [];
+  for (let itemIndex = 0; itemIndex < ragMatchesWithPoints.length; itemIndex++) {
+    const item = ragMatchesWithPoints[itemIndex];
+    for (let matchIndex = 0; matchIndex < (item.matches?.length || 0); matchIndex++) {
+      tasks.push({ itemIndex, matchIndex, item, match: item.matches[matchIndex] });
+    }
   }
+  const concurrency = Math.max(1, cfg.f4Concurrency ?? DEFAULTS.f4Concurrency);
   policyPipelineLog({
     event: 'f4_start',
     runId: cfg._pupRunId ?? null,
     ragPointsWithMatches: ragMatchesWithPoints.length,
-    totalImpactCalls: callCount,
+    totalImpactCalls: tasks.length,
     modelId: cfg.fastModel,
+    concurrency,
   });
-  const results = [];
-  for (const item of ragMatchesWithPoints) {
-    const impacts = [];
-    for (const match of item.matches) {
-      const user =
-        `=== NEW REGULATION POINT ===\n${item.point_text}\n\n` +
-        `=== EXISTING POLICY (${match.policy_title}) ===\n${match.content_excerpt}`;
-      const system = cfg.f4SystemInstruction || F4_SYSTEM;
-      const analysis = await geminiJson(apiKey, cfg.fastModel, system, user, cfg.f4MaxOutputTokens ?? DEFAULTS.f4MaxOutputTokens, 0.15);
-      impacts.push({
-        policy_id: match.policy_id,
-        policy_title: match.policy_title,
-        similarity_score: match.similarity_score,
-        ...analysis,
-      });
-    }
-    results.push({
-      point_id: item.point_id,
-      point_text: item.point_text,
-      impacts,
+
+  const impactsByItem = ragMatchesWithPoints.map((item) => new Array(item.matches?.length || 0));
+  const system = cfg.f4SystemInstruction || F4_SYSTEM;
+  const maxTokens = cfg.f4MaxOutputTokens ?? DEFAULTS.f4MaxOutputTokens;
+  let completed = 0;
+  let failed = 0;
+
+  for (const batch of chunkArray(tasks, concurrency)) {
+    await Promise.all(
+      batch.map(async (task) => {
+        const { itemIndex, matchIndex, item, match } = task;
+        const user =
+          `=== NEW REGULATION POINT ===\n${item.point_text}\n\n` +
+          `=== EXISTING POLICY (${match.policy_title}) ===\n${match.content_excerpt}`;
+        try {
+          const analysis = await geminiJson(apiKey, cfg.fastModel, system, user, maxTokens, 0.15, {
+            _pupRunId: cfg._pupRunId,
+            geminiRequestTimeoutMs: cfg.geminiRequestTimeoutMs,
+          });
+          impactsByItem[itemIndex][matchIndex] = {
+            policy_id: match.policy_id,
+            policy_title: match.policy_title,
+            similarity_score: match.similarity_score,
+            ...analysis,
+          };
+        } catch (e) {
+          failed++;
+          policyPipelineLog({
+            event: 'f4_call_failed',
+            runId: cfg._pupRunId ?? null,
+            pointId: item.point_id,
+            policyId: match.policy_id,
+            error: e?.message || String(e),
+          });
+          impactsByItem[itemIndex][matchIndex] = f4FailedImpact(match, e?.message || e);
+        }
+      }),
+    );
+    completed += batch.length;
+    policyPipelineLog({
+      event: 'f4_progress',
+      runId: cfg._pupRunId ?? null,
+      completed,
+      total: tasks.length,
+      failed,
     });
   }
+
+  const results = ragMatchesWithPoints.map((item, itemIndex) => ({
+    point_id: item.point_id,
+    point_text: item.point_text,
+    impacts: impactsByItem[itemIndex],
+  }));
   policyPipelineLog({
     event: 'f4_done',
     runId: cfg._pupRunId ?? null,
     regulationPointGroups: results.length,
+    totalImpactCalls: tasks.length,
+    failed,
   });
   return results;
 }
@@ -821,12 +917,14 @@ async function runPolicyUpdatePipeline(opts) {
         ? opts.overrides.f2ThinkingBudget
         : DEFAULTS.f2ThinkingBudget,
     f4MaxOutputTokens: opts.overrides?.f4MaxOutputTokens ?? DEFAULTS.f4MaxOutputTokens,
+    f4Concurrency: opts.overrides?.f4Concurrency ?? DEFAULTS.f4Concurrency,
     f3SimilarityThreshold: opts.overrides?.f3SimilarityThreshold ?? DEFAULTS.f3SimilarityThreshold,
     excerptLen: opts.overrides?.excerptLen ?? DEFAULTS.excerptLen,
     geminiThinkingBudget:
       opts.overrides && Object.prototype.hasOwnProperty.call(opts.overrides, 'geminiThinkingBudget')
         ? opts.overrides.geminiThinkingBudget
         : DEFAULTS.geminiThinkingBudget,
+    geminiRequestTimeoutMs: opts.overrides?.geminiRequestTimeoutMs ?? DEFAULTS.geminiRequestTimeoutMs,
     f4SystemInstruction: buildF4SystemInstruction(f4SevDefs),
     skipF1: opts.overrides?.skipF1 === true,
   };
@@ -864,7 +962,7 @@ async function runPolicyUpdatePipeline(opts) {
     const content = String(p.content || '').trim();
     if (!id || !content) continue;
     const docText = `${title}\n\n${content}`;
-    const embedding = await embedOne(apiKey, cfg.embeddingModel, docText);
+    const embedding = await embedOne(apiKey, cfg.embeddingModel, docText, cfg.geminiRequestTimeoutMs);
     policyRows.push({ id, title: title || id, docText, embedding });
   }
 
@@ -933,7 +1031,7 @@ async function runPolicyUpdatePipeline(opts) {
 
   // Embed each policy point for F3
   for (const pt of points) {
-    pt.embedding = await embedOne(apiKey, cfg.embeddingModel, pt.point);
+    pt.embedding = await embedOne(apiKey, cfg.embeddingModel, pt.point, cfg.geminiRequestTimeoutMs);
   }
 
   policyPipelineLog({
