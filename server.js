@@ -145,18 +145,30 @@ async function legislativeUploadBuffer(storage, bucketName, objectPath, buf, mim
 // ==========================================
 
 // Maps local session token → GRC auth token
-const authSessions = new Map(); // { localToken: { grcToken, username } }
+// In-memory hot-path cache, backed by the `auth_sessions` table (see SQLite section below)
+// so a process restart rehydrates active sessions instead of logging everyone out —
+// including anyone mid-upload/mid-request when the restart happens.
+const authSessions = new Map(); // { localToken: { grcToken, username, expiresAt } }
+
+// Local session lifetime — mirrors the 7-day `wathba_token` cookie set in login.js.
+// getSession() slides this forward on every valid use, so an active user's session
+// never hits the deadline; only a genuinely abandoned token expires.
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function generateLocalToken() {
   return crypto.randomBytes(48).toString('hex');
 }
 
+// NOTE: getSession()/persistSession()/removeSessionEverywhere() are defined further
+// down (after the SQLite `db` handle + auth_sessions prepared statements exist), but
+// `function` declarations are hoisted and none of these run until a request comes in
+// — by which point the DB setup below has already executed.
 function isValidToken(token) {
-  return token && authSessions.has(token);
+  return !!getSession(token);
 }
 
 function getGrcToken(localToken) {
-  const session = authSessions.get(localToken);
+  const session = getSession(localToken);
   return session ? session.grcToken : null;
 }
 
@@ -192,7 +204,7 @@ async function finalizeGrcUpstreamError(httpRes, reqToken, grcRes) {
   if (grcRes.ok) return false;
   const errText = await grcRes.text();
   if (reqToken && isGrcInvalidTokenBody(grcRes.status, errText)) {
-    authSessions.delete(reqToken);
+    removeSessionEverywhere(reqToken);
     httpRes.writeHead(401, { 'Content-Type': 'application/json' });
     httpRes.end(JSON.stringify({
       success: false,
@@ -212,7 +224,7 @@ async function finalizeGrcUpstreamError(httpRes, reqToken, grcRes) {
 async function consumeGrcErrorBody(httpRes, reqToken, grcRes) {
   const errText = await grcRes.text();
   if (reqToken && isGrcInvalidTokenBody(grcRes.status, errText)) {
-    authSessions.delete(reqToken);
+    removeSessionEverywhere(reqToken);
     httpRes.writeHead(401, { 'Content-Type': 'application/json' });
     httpRes.end(JSON.stringify({
       success: false,
@@ -627,6 +639,22 @@ try {
   addCol('store_id', "TEXT DEFAULT ''");
 } catch (migErr) { console.warn('Org profile migration:', migErr.message); }
 
+// Create auth_sessions table (persists local-token → GRC-token sessions so a process
+// restart rehydrates active logins instead of forcing everyone — including anyone
+// mid-upload — to log back in).
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+      token TEXT PRIMARY KEY,
+      grc_token TEXT NOT NULL,
+      username TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)`);
+} catch (migErr) { console.warn('auth_sessions table migration:', migErr.message); }
+
 console.log('SQLite database initialized (sessions.db)');
 
 // DB helper functions
@@ -653,6 +681,94 @@ const dbListSessions = db.prepare(`
 
 const dbDeleteSession = db.prepare(`DELETE FROM sessions WHERE id = ?`);
 const dbDeleteSessionMessages = db.prepare(`DELETE FROM messages WHERE session_id = ?`);
+
+// Auth sessions DB helpers — persistence backing for the `authSessions` in-memory cache.
+const dbUpsertAuthSession = db.prepare(`
+  INSERT INTO auth_sessions (token, grc_token, username, created_at, expires_at)
+  VALUES (@token, @grcToken, @username, @createdAt, @expiresAt)
+  ON CONFLICT(token) DO UPDATE SET
+    grc_token = excluded.grc_token,
+    username = excluded.username,
+    expires_at = excluded.expires_at
+`);
+const dbGetAuthSession = db.prepare(`SELECT * FROM auth_sessions WHERE token = ?`);
+const dbDeleteAuthSession = db.prepare(`DELETE FROM auth_sessions WHERE token = ?`);
+const dbListValidAuthSessions = db.prepare(`SELECT * FROM auth_sessions WHERE expires_at > ?`);
+const dbDeleteExpiredAuthSessions = db.prepare(`DELETE FROM auth_sessions WHERE expires_at <= ?`);
+
+/** Only write-through to disk on set/delete/boot, and at most every 5 min per session on sliding renewal — avoids a DB write on every single request. */
+const AUTH_SESSION_TOUCH_THROTTLE_MS = 5 * 60 * 1000;
+
+function persistSession(token, session) {
+  try {
+    dbUpsertAuthSession.run({
+      token,
+      grcToken: session.grcToken,
+      username: session.username,
+      createdAt: session.createdAt || new Date().toISOString(),
+      expiresAt: session.expiresAt,
+    });
+  } catch (err) {
+    console.warn('[Auth] Failed to persist session:', err.message);
+  }
+}
+
+function removeSessionEverywhere(token) {
+  if (!token) return;
+  authSessions.delete(token);
+  try { dbDeleteAuthSession.run(token); } catch (err) { console.warn('[Auth] Failed to delete persisted session:', err.message); }
+}
+
+/**
+ * Look up a session, sliding its expiry forward on every valid use (so an active user's
+ * session never hits the fixed TTL deadline — only a genuinely abandoned token expires).
+ * An expired-but-still-present row is treated exactly like "no session" and reaped here,
+ * on the read path — expiry is never inferred merely from a row's absence.
+ */
+function getSession(token) {
+  if (!token) return null;
+  let session = authSessions.get(token);
+  if (!session) {
+    // Not in the hot cache (e.g. rehydration raced a request) — fall back to the DB once.
+    const row = dbGetAuthSession.get(token);
+    if (!row) return null;
+    session = { grcToken: row.grc_token, username: row.username, createdAt: row.created_at, expiresAt: row.expires_at };
+    authSessions.set(token, session);
+  }
+  if (new Date(session.expiresAt).getTime() <= Date.now()) {
+    removeSessionEverywhere(token);
+    return null;
+  }
+  const now = Date.now();
+  if (!session.lastTouchedAt || now - session.lastTouchedAt > AUTH_SESSION_TOUCH_THROTTLE_MS) {
+    session.expiresAt = new Date(now + SESSION_TTL_MS).toISOString();
+    session.lastTouchedAt = now;
+    persistSession(token, session);
+  }
+  return session;
+}
+
+/** Runs once at boot: reloads still-valid sessions from disk so a process restart doesn't drop active logins. */
+function rehydrateAuthSessions() {
+  try {
+    const nowIso = new Date().toISOString();
+    const rows = dbListValidAuthSessions.all(nowIso);
+    for (const row of rows) {
+      authSessions.set(row.token, { grcToken: row.grc_token, username: row.username, createdAt: row.created_at, expiresAt: row.expires_at });
+    }
+    dbDeleteExpiredAuthSessions.run(nowIso);
+    if (rows.length) console.log(`[Auth] Rehydrated ${rows.length} session(s) from sessions.db`);
+  } catch (err) {
+    console.warn('[Auth] Failed to rehydrate sessions:', err.message);
+  }
+}
+rehydrateAuthSessions();
+
+// Periodic hygiene sweep — not the source of truth for validity (getSession() reaps
+// expired rows lazily on read), just keeps auth_sessions from growing unbounded.
+setInterval(() => {
+  try { dbDeleteExpiredAuthSessions.run(new Date().toISOString()); } catch (err) { /* ignore */ }
+}, 60 * 60 * 1000);
 
 // Extracted policies DB helpers (legacy)
 const dbInsertExtractedPolicies = db.prepare(`
@@ -4890,9 +5006,18 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // Create local session linked to GRC token
+      // Create local session linked to GRC token (persisted so it survives a process restart)
       const localToken = generateLocalToken();
-      authSessions.set(localToken, { grcToken, username });
+      const nowIso = new Date().toISOString();
+      const session = {
+        grcToken,
+        username,
+        createdAt: nowIso,
+        expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+        lastTouchedAt: Date.now(),
+      };
+      authSessions.set(localToken, session);
+      persistSession(localToken, session);
       console.log(`[Auth] Login successful for ${username} — GRC token stored`);
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -4908,7 +5033,7 @@ const server = http.createServer(async (req, res) => {
   // ---- Auth: Logout endpoint ----
   if (url.pathname === '/api/auth/logout' && req.method === 'POST') {
     const token = getTokenFromRequest(req);
-    if (token) authSessions.delete(token);
+    if (token) removeSessionEverywhere(token);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: true }));
     return;
@@ -4926,7 +5051,7 @@ const server = http.createServer(async (req, res) => {
   // ---- Auth: Me endpoint ----
   if (url.pathname === '/api/auth/me' && req.method === 'GET') {
     const token = getTokenFromRequest(req);
-    const session = token ? authSessions.get(token) : null;
+    const session = token ? getSession(token) : null;
     if (session) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ authenticated: true, username: session.username }));
@@ -6029,7 +6154,7 @@ const server = http.createServer(async (req, res) => {
   // ---- Legislative updates: internal sources (GCS + SQLite) ----
   if (url.pathname === '/api/legislative-updates/internal-sources' && req.method === 'GET') {
     try {
-      const session = reqToken ? authSessions.get(reqToken) : null;
+      const session = reqToken ? getSession(reqToken) : null;
       if (!session) {
         sendJSON(res, 401, { error: 'Unauthorized.' });
         return;
@@ -6056,7 +6181,7 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/api/legislative-updates/internal-sources' && req.method === 'POST') {
     try {
-      const session = reqToken ? authSessions.get(reqToken) : null;
+      const session = reqToken ? getSession(reqToken) : null;
       if (!session) {
         sendJSON(res, 401, { error: 'Unauthorized.' });
         return;
@@ -6166,7 +6291,7 @@ const server = http.createServer(async (req, res) => {
   if (luInternalDownloadMatch && req.method === 'GET') {
     const id = luInternalDownloadMatch[1];
     try {
-      const session = reqToken ? authSessions.get(reqToken) : null;
+      const session = reqToken ? getSession(reqToken) : null;
       if (!session) {
         sendJSON(res, 401, { error: 'Unauthorized.' });
         return;
@@ -6205,7 +6330,7 @@ const server = http.createServer(async (req, res) => {
   if (luInternalOneMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
     const id = luInternalOneMatch[1];
     try {
-      const session = reqToken ? authSessions.get(reqToken) : null;
+      const session = reqToken ? getSession(reqToken) : null;
       if (!session) {
         sendJSON(res, 401, { error: 'Unauthorized.' });
         return;
@@ -6345,7 +6470,7 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/api/legislative-updates/extracted' && req.method === 'POST') {
     try {
-      const session = reqToken ? authSessions.get(reqToken) : null;
+      const session = reqToken ? getSession(reqToken) : null;
       if (!session) { sendJSON(res, 401, { error: 'Unauthorized.' }); return; }
       const body = await parseBody(req);
       const title = String(body.title || '').trim();
@@ -6414,7 +6539,7 @@ const server = http.createServer(async (req, res) => {
   if (luExtractedOneMatch && (req.method === 'PATCH' || req.method === 'DELETE')) {
     const id = luExtractedOneMatch[1];
     try {
-      const session = reqToken ? authSessions.get(reqToken) : null;
+      const session = reqToken ? getSession(reqToken) : null;
       if (!session) { sendJSON(res, 401, { error: 'Unauthorized.' }); return; }
       const existing = dbGetLegislativeExtracted.get(id);
       if (!existing) { sendJSON(res, 404, { error: 'Update not found.' }); return; }
@@ -6680,7 +6805,7 @@ Return a JSON array where each element has "article", "title", and "text" fields
       // The /api/ai-tools/pipeline-runs prefix is whitelisted in isPublicPath
       // for read access (portal feed), so we must re-check auth here for writes
       // to prevent unauthenticated inserts into pipeline_runs.
-      const session = reqToken ? authSessions.get(reqToken) : null;
+      const session = reqToken ? getSession(reqToken) : null;
       if (!session) { sendJSON(res, 401, { error: 'Unauthorized.' }); return; }
       const body = await parseBody(req);
       const result = body.result && typeof body.result === 'object' ? body.result : {};
