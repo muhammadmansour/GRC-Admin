@@ -22,8 +22,16 @@ const DEFAULTS = {
    */
   f1MaxOutputTokens: 20480,
   f1ExcerptLimit: 10000,
-  f2ChunkSize: 24000,
-  f2ChunkOverlap: 1000,
+  /**
+   * Halved from 24000 — a 24K-char chunk can hold 20-30 policy points, and
+   * generating that much JSON from `gemini-2.5-pro` (non-streaming call) can
+   * take longer than any reasonable request timeout. Smaller chunks mean less
+   * output per call, so each call finishes faster and is far less likely to
+   * time out — at the cost of more (cheaper) sequential calls per document.
+   */
+  f2ChunkSize: 12000,
+  /** Kept proportional to f2ChunkSize (~4% overlap) so a requirement split across a chunk boundary isn't cut off. */
+  f2ChunkOverlap: 500,
   /**
    * F2 with 2.5 Pro consumes most of `maxOutputTokens` on the thinking budget,
    * so the visible JSON gets squeezed out when this is too small. Long policies
