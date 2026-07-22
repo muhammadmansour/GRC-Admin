@@ -49,6 +49,14 @@ const DEFAULTS = {
    */
   geminiRequestTimeoutMs: 45000,
   /**
+   * F2 chunks go to `gemini-2.5-pro` with a large `maxOutputTokens` (see
+   * `f2MaxOutputTokens`) — dense/large chunks can legitimately take longer than
+   * the generic 45s `geminiRequestTimeoutMs` to finish generating. Bigger
+   * documents mean more chunks, so more independent chances to exceed a short
+   * timeout; give F2 its own, longer ceiling instead of sharing F1/F4's.
+   */
+  f2RequestTimeoutMs: 120000,
+  /**
    * F4 makes one Gemini call per (regulation point × matched policy) pair — for a
    * large document this can be 1000+ calls. Running them fully sequentially is
    * what makes large-document runs take tens of minutes; a small concurrency
@@ -748,10 +756,28 @@ function cloneF2WithoutEmbeddings(f2) {
   };
 }
 
+/** Single F2 chunk call, factored out so f2Summarize can retry it with a fresh timeout. */
+async function f2SummarizeChunk(apiKey, cfg, chunkStr, chunkIndex, totalChunks, f2MaxTokens, f2ThinkingBudget, timeoutMs) {
+  const user = `=== REGULATION TEXT (part ${chunkIndex + 1}/${totalChunks}) ===\n${chunkStr}`;
+  const f2Extras = { geminiRequestTimeoutMs: timeoutMs };
+  if (f2ThinkingBudget != null && typeof f2ThinkingBudget === 'number') {
+    f2Extras.thinkingBudget = f2ThinkingBudget;
+  }
+  return geminiJson(apiKey, cfg.reasoningModel, F2_SYSTEM, user, f2MaxTokens, 0.15, f2Extras);
+}
+
+/**
+ * Extract policy points chunk-by-chunk. Each chunk is resilient to a single slow/failed
+ * Gemini call: on timeout it's retried once with double the timeout (a stalled/slow
+ * generation may just need more room); if it still fails, that chunk is skipped — logged
+ * and excluded — instead of throwing away every point already extracted from the rest of
+ * a large document. Mirrors the per-call resilience `f4Impact` already has for F4.
+ */
 async function f2Summarize(apiKey, cfg, regulationText) {
   const chunks = chunkText(regulationText, cfg.f2ChunkSize, cfg.f2ChunkOverlap);
   const f2MaxTokens     = cfg.f2MaxOutputTokens ?? DEFAULTS.f2MaxOutputTokens;
   const f2ThinkingBudget = cfg.f2ThinkingBudget ?? DEFAULTS.f2ThinkingBudget;
+  const f2TimeoutMs = cfg.f2RequestTimeoutMs ?? DEFAULTS.f2RequestTimeoutMs;
   policyPipelineLog({
     event: 'f2_start',
     runId: cfg._pupRunId ?? null,
@@ -760,15 +786,45 @@ async function f2Summarize(apiKey, cfg, regulationText) {
     modelId: cfg.reasoningModel,
     maxOutputTokens: f2MaxTokens,
     thinkingBudget: f2ThinkingBudget,
+    requestTimeoutMs: f2TimeoutMs,
   });
   const allPoints = [];
+  let chunksFailed = 0;
   for (let i = 0; i < chunks.length; i++) {
-    const user = `=== REGULATION TEXT (part ${i + 1}/${chunks.length}) ===\n${chunks[i]}`;
-    const f2Extras = { geminiRequestTimeoutMs: cfg.geminiRequestTimeoutMs };
-    if (f2ThinkingBudget != null && typeof f2ThinkingBudget === 'number') {
-      f2Extras.thinkingBudget = f2ThinkingBudget;
+    let result;
+    let retried = false;
+    try {
+      result = await f2SummarizeChunk(apiKey, cfg, chunks[i], i, chunks.length, f2MaxTokens, f2ThinkingBudget, f2TimeoutMs);
+    } catch (e) {
+      const isTimeout = String(e?.message || e).includes('timed out');
+      policyPipelineLog({
+        event: 'f2_chunk_error',
+        runId: cfg._pupRunId ?? null,
+        chunkIndex: i + 1,
+        chunkOf: chunks.length,
+        error: String(e?.message || e).slice(0, 400),
+        willRetry: isTimeout,
+      });
+      if (isTimeout) {
+        retried = true;
+        try {
+          result = await f2SummarizeChunk(apiKey, cfg, chunks[i], i, chunks.length, f2MaxTokens, f2ThinkingBudget, f2TimeoutMs * 2);
+        } catch (e2) {
+          policyPipelineLog({
+            event: 'f2_chunk_failed',
+            runId: cfg._pupRunId ?? null,
+            chunkIndex: i + 1,
+            chunkOf: chunks.length,
+            error: String(e2?.message || e2).slice(0, 400),
+          });
+          chunksFailed++;
+          result = { policy_points: [] };
+        }
+      } else {
+        chunksFailed++;
+        result = { policy_points: [] };
+      }
     }
-    const result = await geminiJson(apiKey, cfg.reasoningModel, F2_SYSTEM, user, f2MaxTokens, 0.15, f2Extras);
     const pts = result.policy_points;
     const took = Array.isArray(pts) ? pts.length : 0;
     policyPipelineLog({
@@ -778,6 +834,7 @@ async function f2Summarize(apiKey, cfg, regulationText) {
       chunkOf: chunks.length,
       policyPointsReturned: took,
       usedRawFallback: typeof result?.raw_response === 'string' && result.raw_response.trim().length > 0,
+      retried,
     });
     if (Array.isArray(pts)) allPoints.push(...pts);
   }
@@ -788,8 +845,9 @@ async function f2Summarize(apiKey, cfg, regulationText) {
     event: 'f2_done',
     runId: cfg._pupRunId ?? null,
     totalPolicyPoints: allPoints.length,
+    chunksFailed,
   });
-  return { policy_points: allPoints };
+  return { policy_points: allPoints, chunks_failed: chunksFailed };
 }
 
 /** Placeholder impact used when a single F4 call fails/times out, so one bad pair can't sink the whole run. */
@@ -925,6 +983,7 @@ async function runPolicyUpdatePipeline(opts) {
         ? opts.overrides.geminiThinkingBudget
         : DEFAULTS.geminiThinkingBudget,
     geminiRequestTimeoutMs: opts.overrides?.geminiRequestTimeoutMs ?? DEFAULTS.geminiRequestTimeoutMs,
+    f2RequestTimeoutMs: opts.overrides?.f2RequestTimeoutMs ?? DEFAULTS.f2RequestTimeoutMs,
     f4SystemInstruction: buildF4SystemInstruction(f4SevDefs),
     skipF1: opts.overrides?.skipF1 === true,
   };
